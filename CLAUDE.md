@@ -7,7 +7,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build                    # debug build (downloads ~90MB ONNX model on first build)
 cargo build --release          # release build (LTO enabled, ~109MB binary)
-cargo build --no-default-features  # build without TUI support
 cargo test                     # run all tests (requires model, so first build must complete)
 cargo test embedder::tests::test_embed_single  # run a single test
 ```
@@ -44,8 +43,6 @@ walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  outp
 - **Cache invalidation**: BLAKE3 content hash per file. If model name or chunk params change (stored in `meta` table as JSON), the entire index is rebuilt.
 - **Index location**: `.vecgrep/index.db` in the search root directory. Automatically added to `.gitignore`.
 - **Embeddings stored as BLOB**: `Vec<f32>` → little-endian bytes in SQLite, reconstituted into `ndarray::Array2<f32>` for search.
-- **TUI is feature-gated**: `ratatui`/`crossterm`/`nucleo` are behind the `tui` feature (default on).
-
 **Module responsibilities:**
 
 | Module | Role |
