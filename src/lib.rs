@@ -4,6 +4,7 @@ pub mod embedder;
 pub mod index;
 pub mod output;
 pub mod search;
+pub mod serve;
 pub mod tui;
 pub mod types;
 pub mod walker;

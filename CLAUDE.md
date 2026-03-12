@@ -31,7 +31,7 @@ vecgrep is a semantic grep tool: it embeds a query and file chunks into vectors 
 **Data pipeline** (orchestrated in `main.rs`):
 
 ```
-walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  output/tui
+walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  output/tui/serve
 (files)    (chunks)    (vectors)    (cache)             (rank)     (display)
 ```
 
@@ -55,4 +55,5 @@ walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  outp
 | `search.rs` | Matrix dot-product scoring, top-k partial sort, threshold filter |
 | `walker.rs` | `ignore` crate for .gitignore-aware file discovery with type/glob filters |
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
+| `serve.rs` | `tiny_http` server for `--serve` mode; loads model once, serves queries over HTTP |
 | `tui.rs` | `ratatui` interactive mode with debounced re-embedding on keystrokes |

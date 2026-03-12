@@ -1,0 +1,316 @@
+use std::net::TcpListener;
+
+use anyhow::{Context, Result};
+use ndarray::Array2;
+use tiny_http::{Header, Method, Response, Server, StatusCode};
+use url::Url;
+
+use crate::embedder::Embedder;
+use crate::output::format_json_result;
+use crate::search;
+use crate::types::Chunk;
+
+pub fn run(
+    embedder: &mut Embedder,
+    chunks: &[Chunk],
+    embedding_matrix: &Array2<f32>,
+    port: Option<u16>,
+    default_top_k: usize,
+    default_threshold: f32,
+    quiet: bool,
+) -> Result<()> {
+    let port = port.unwrap_or(0);
+    let listener =
+        TcpListener::bind(("127.0.0.1", port)).context("Failed to bind HTTP listener")?;
+    let actual_port = listener.local_addr()?.port();
+
+    let server = Server::from_listener(listener, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
+
+    // Always print the listen address so tooling can discover the port.
+    let _ = quiet; // intentionally ignored
+    eprintln!("Listening on http://127.0.0.1:{actual_port}");
+
+    let json_content_type: Header = "Content-Type: application/x-ndjson"
+        .parse()
+        .expect("valid header");
+    let json_error_type: Header = "Content-Type: application/json"
+        .parse()
+        .expect("valid header");
+
+    for request in server.incoming_requests() {
+        // Only allow GET
+        if request.method() != &Method::Get {
+            let body = r#"{"error":"method not allowed"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(405))
+                .with_header(json_error_type.clone());
+            let _ = request.respond(resp);
+            continue;
+        }
+
+        // Parse URL — tiny_http gives us the raw URL path+query
+        let raw_url = request.url().to_string();
+        let full_url = format!("http://localhost{raw_url}");
+        let parsed = match Url::parse(&full_url) {
+            Ok(u) => u,
+            Err(_) => {
+                let body = r#"{"error":"invalid URL"}"#;
+                let resp = Response::from_string(body)
+                    .with_status_code(StatusCode(400))
+                    .with_header(json_error_type.clone());
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        // Route: only /search is supported
+        if parsed.path() != "/search" {
+            let body = r#"{"error":"not found"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(404))
+                .with_header(json_error_type.clone());
+            let _ = request.respond(resp);
+            continue;
+        }
+
+        // Extract query params
+        let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        let q = params
+            .iter()
+            .find(|(k, _)| k == "q")
+            .map(|(_, v)| v.clone());
+
+        let q = match q {
+            Some(q) if !q.is_empty() => q,
+            _ => {
+                let body = r#"{"error":"missing or empty 'q' parameter"}"#;
+                let resp = Response::from_string(body)
+                    .with_status_code(StatusCode(400))
+                    .with_header(json_error_type.clone());
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        let top_k: usize = params
+            .iter()
+            .find(|(k, _)| k == "k")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(default_top_k);
+
+        let threshold: f32 = params
+            .iter()
+            .find(|(k, _)| k == "threshold")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(default_threshold);
+
+        // Embed + search
+        let query_embedding = match embedder.embed(&q) {
+            Ok(e) => e,
+            Err(e) => {
+                let body = serde_json::json!({"error": format!("{e:#}")}).to_string();
+                let resp = Response::from_string(body)
+                    .with_status_code(StatusCode(500))
+                    .with_header(json_error_type.clone());
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        let results = search::search(&query_embedding, embedding_matrix, top_k, threshold, chunks);
+
+        let mut body = String::new();
+        for result in &results {
+            let json = format_json_result(result);
+            body.push_str(&json.to_string());
+            body.push('\n');
+        }
+
+        let resp = Response::from_string(body).with_header(json_content_type.clone());
+        let _ = request.respond(resp);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedder::Embedder;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+    use std::sync::OnceLock;
+    use std::thread;
+    use std::time::Duration;
+
+    static SERVER_PORT: OnceLock<u16> = OnceLock::new();
+
+    /// Start a shared test server (once) and return its port.
+    fn test_port() -> u16 {
+        *SERVER_PORT.get_or_init(|| {
+            // Grab a free port, then release it so the server can bind.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+
+            thread::spawn(move || {
+                let mut embedder = Embedder::new().unwrap();
+
+                let texts = ["error handling in rust", "memory management", "HTTP server"];
+                let chunks: Vec<Chunk> = texts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| Chunk {
+                        file_path: format!("test{i}.rs"),
+                        text: text.to_string(),
+                        start_line: 1,
+                        end_line: 1,
+                    })
+                    .collect();
+
+                let embeddings: Vec<Vec<f32>> =
+                    texts.iter().map(|t| embedder.embed(t).unwrap()).collect();
+                let dim = embeddings[0].len();
+                let flat: Vec<f32> = embeddings.into_iter().flatten().collect();
+                let matrix = Array2::from_shape_vec((chunks.len(), dim), flat).unwrap();
+
+                run(&mut embedder, &chunks, &matrix, Some(port), 10, 0.3, true).unwrap();
+            });
+
+            // Poll until the server is accepting connections.
+            for _ in 0..50 {
+                if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                    return port;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            panic!("test server did not start within 5 seconds");
+        })
+    }
+
+    /// Send an HTTP request and return (status_code, body, content_type).
+    fn http_request(method: &str, port: u16, path: &str) -> (u16, String, String) {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        let status_line = response.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let content_type = response
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("content-type:"))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string())
+            .unwrap_or_default();
+
+        let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        let body = response[body_start..].to_string();
+
+        (status_code, body, content_type)
+    }
+
+    #[test]
+    fn test_search_returns_jsonl() {
+        let port = test_port();
+        let (status, body, content_type) = http_request("GET", port, "/search?q=error+handling");
+
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/x-ndjson");
+
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(!lines.is_empty(), "expected at least one result");
+
+        let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert!(json.get("file").is_some());
+        assert!(json.get("score").is_some());
+        assert!(json.get("text").is_some());
+        assert!(json.get("start_line").is_some());
+        assert!(json.get("end_line").is_some());
+    }
+
+    #[test]
+    fn test_search_k_override() {
+        let port = test_port();
+        let (status, body, _) = http_request("GET", port, "/search?q=test&k=1");
+
+        assert_eq!(status, 200);
+        let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            lines.len() <= 1,
+            "expected at most 1 result with k=1, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn test_search_threshold_override() {
+        let port = test_port();
+        let (status, body, _) = http_request("GET", port, "/search?q=test&threshold=0.99");
+
+        assert_eq!(status, 200);
+        for line in body.lines().filter(|l| !l.is_empty()) {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            let score = json["score"].as_f64().unwrap();
+            assert!(score >= 0.99, "score {score} should be >= 0.99");
+        }
+    }
+
+    #[test]
+    fn test_missing_query_returns_400() {
+        let port = test_port();
+        let (status, body, content_type) = http_request("GET", port, "/search");
+
+        assert_eq!(status, 400);
+        assert_eq!(content_type, "application/json");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json.get("error").is_some());
+    }
+
+    #[test]
+    fn test_empty_query_returns_400() {
+        let port = test_port();
+        let (status, body, _) = http_request("GET", port, "/search?q=");
+
+        assert_eq!(status, 400);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("missing"));
+    }
+
+    #[test]
+    fn test_not_found_returns_404() {
+        let port = test_port();
+        let (status, body, content_type) = http_request("GET", port, "/invalid");
+
+        assert_eq!(status, 404);
+        assert_eq!(content_type, "application/json");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], "not found");
+    }
+
+    #[test]
+    fn test_post_returns_405() {
+        let port = test_port();
+        let (status, body, content_type) = http_request("POST", port, "/search?q=test");
+
+        assert_eq!(status, 405);
+        assert_eq!(content_type, "application/json");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], "method not allowed");
+    }
+}

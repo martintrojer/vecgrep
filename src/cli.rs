@@ -15,7 +15,7 @@ pub enum ColorChoice {
 )]
 pub struct Args {
     /// The search query (natural language or code snippet).
-    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive"])]
+    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive", "serve"])]
     pub query: Option<String>,
 
     /// Paths to search (files or directories). Defaults to current directory.
@@ -118,4 +118,12 @@ pub struct Args {
     /// When to use colored output.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
+
+    /// Start HTTP server mode.
+    #[arg(long)]
+    pub serve: bool,
+
+    /// Port for HTTP server (default: auto-pick free port).
+    #[arg(long, requires = "serve")]
+    pub port: Option<u16>,
 }

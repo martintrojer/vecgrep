@@ -7,7 +7,7 @@ use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::Index;
 use vecgrep::types::IndexConfig;
-use vecgrep::{chunker, output, search, tui, walker};
+use vecgrep::{chunker, output, search, serve, tui, walker};
 
 /// Print a status message to stderr unless --quiet is set.
 macro_rules! status {
@@ -259,6 +259,19 @@ fn run() -> Result<bool> {
     // Load all embeddings for search
     let (chunks, embedding_matrix) = idx.load_all()?;
     status!(quiet, "Loaded {} chunks for search.", chunks.len());
+
+    if args.serve {
+        serve::run(
+            &mut embedder,
+            &chunks,
+            &embedding_matrix,
+            args.port,
+            args.top_k,
+            args.threshold,
+            quiet,
+        )?;
+        return Ok(true);
+    }
 
     if args.interactive {
         tui::interactive::run(

@@ -22,6 +22,16 @@ vecgrep -i "authentication"
 # JSON output for scripting
 vecgrep "retry logic" --json | jq '.score'
 
+# HTTP server mode (load model once, query via curl)
+# Omit --port to auto-pick a free port; the URL is printed to stderr
+vecgrep --serve --port 8080 ./src
+# => Listening on http://127.0.0.1:8080
+curl -s "http://localhost:8080/search?q=error+handling&k=5"
+
+# Use with fzf for interactive fuzzy semantic search
+vecgrep --serve --port 8080 ./src &
+fzf --bind "change:reload:curl -s 'http://localhost:8080/search?q={q}'" --preview 'echo {}'
+
 # Index management
 vecgrep --stats              # show index statistics
 vecgrep --reindex ./src      # force full re-index
@@ -101,6 +111,8 @@ Options:
       --stats                   Show index statistics
       --clear-cache             Delete cached index
       --json                    JSONL output
+      --serve                   Start HTTP server mode
+      --port <PORT>             Port for HTTP server [default: auto]
       --chunk-size <N>          Tokens per chunk [default: 500]
       --chunk-overlap <N>       Overlap tokens [default: 100]
 ```

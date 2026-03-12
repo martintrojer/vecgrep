@@ -34,6 +34,8 @@ dirs = "6"
 ratatui = "0.29"
 crossterm = "0.28"
 nucleo = "0.5"
+tiny_http = "0.12"
+url = "2"
 
 [features]
 cuda = []
