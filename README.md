@@ -123,6 +123,10 @@ Options:
       --chunk-overlap <N>       Overlap tokens [default: 100]
 ```
 
+## Integrations
+
+- [vecgrep.nvim](https://github.com/martintrojer/vecgrep.nvim) — Neovim plugin for semantic search via vecgrep's `--serve` mode
+
 ## Environment variables
 
 - `VECGREP_MODEL_CACHE` — override model cache directory (default: system cache dir)
