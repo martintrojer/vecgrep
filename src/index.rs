@@ -162,6 +162,32 @@ impl Index {
         Ok(removed)
     }
 
+    /// Remove stale files, but only within the given path prefix.
+    /// Files outside the prefix are left untouched.
+    pub fn remove_stale_files_under(
+        &self,
+        current_paths: &[String],
+        prefix: &str,
+    ) -> Result<usize> {
+        let stored_paths = self.all_file_paths()?;
+        let current_set: std::collections::HashSet<&str> =
+            current_paths.iter().map(|s| s.as_str()).collect();
+
+        let mut removed = 0;
+        for path in &stored_paths {
+            if path.starts_with(prefix) && !current_set.contains(path.as_str()) {
+                if let Ok(file_id) = self.get_file_id(path) {
+                    self.conn
+                        .execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+                    self.conn
+                        .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     /// Load all chunks and embeddings from the index.
     pub fn load_all(&self) -> Result<(Vec<Chunk>, ndarray::Array2<f32>)> {
         let mut stmt = self.conn.prepare(
@@ -525,6 +551,37 @@ mod tests {
         assert!(paths.contains(&"a.rs"));
         assert!(paths.contains(&"c.rs"));
         assert!(!paths.contains(&"b.rs"));
+    }
+
+    #[test]
+    fn test_remove_stale_files_under() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        // Index files under different prefixes
+        for name in &["src/a.rs", "src/b.rs", "lib/c.rs", "README.md"] {
+            let chunks = vec![Chunk {
+                file_path: name.to_string(),
+                text: format!("content of {}", name),
+                start_line: 1,
+                end_line: 1,
+            }];
+            let emb = vec![make_test_embedding(dim, 1.0)];
+            index.upsert_file(name, "hash", &chunks, &emb).unwrap();
+        }
+
+        // Only src/a.rs remains on disk under src/
+        let current = vec!["src/a.rs".to_string()];
+        let removed = index.remove_stale_files_under(&current, "src/").unwrap();
+        assert_eq!(removed, 1); // src/b.rs removed
+
+        let (loaded, _) = index.load_all().unwrap();
+        assert_eq!(loaded.len(), 3); // src/a.rs, lib/c.rs, README.md
+        let paths: Vec<&str> = loaded.iter().map(|c| c.file_path.as_str()).collect();
+        assert!(paths.contains(&"src/a.rs"));
+        assert!(!paths.contains(&"src/b.rs"));
+        assert!(paths.contains(&"lib/c.rs")); // untouched
+        assert!(paths.contains(&"README.md")); // untouched
     }
 
     #[test]
