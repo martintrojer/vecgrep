@@ -119,6 +119,11 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
 
+    /// Warn and ask for confirmation when more than this many files need indexing.
+    /// Set to 0 to disable.
+    #[arg(long, default_value_t = 1000)]
+    pub index_warn_threshold: usize,
+
     /// Start HTTP server mode.
     #[arg(long)]
     pub serve: bool,

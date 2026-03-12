@@ -1,8 +1,11 @@
 pub mod interactive {
     use crate::embedder::Embedder;
+    use crate::index::Index;
     use crate::output::{SCORE_HIGH_THRESHOLD, SCORE_MEDIUM_THRESHOLD};
+    use crate::pipeline;
     use crate::search;
     use crate::types::{Chunk, SearchResult};
+    use crate::walker::WalkedFile;
     use anyhow::Result;
     use crossterm::{
         event::{self, Event, KeyCode},
@@ -19,6 +22,8 @@ pub mod interactive {
         Terminal,
     };
     use std::io;
+    use std::path::Path;
+    use std::sync::mpsc::{Receiver, TryRecvError};
     use std::time::{Duration, Instant};
 
     pub fn run(
@@ -50,6 +55,339 @@ pub mod interactive {
         terminal.show_cursor()?;
 
         result
+    }
+
+    /// Convert a walker-relative path to a project-root-relative path.
+    fn to_project_relative(walker_path: &str, cwd_suffix: &Path) -> String {
+        let stripped = walker_path.strip_prefix("./").unwrap_or(walker_path);
+        if cwd_suffix.as_os_str().is_empty() {
+            stripped.to_string()
+        } else {
+            format!("{}/{}", cwd_suffix.display(), stripped)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_streaming(
+        embedder: &mut Embedder,
+        idx: &Index,
+        rx: Receiver<WalkedFile>,
+        initial_query: &str,
+        top_k: usize,
+        threshold: f32,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        cwd_suffix: &Path,
+    ) -> Result<()> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let result = run_streaming_loop(
+            &mut terminal,
+            embedder,
+            idx,
+            rx,
+            initial_query,
+            top_k,
+            threshold,
+            chunk_size,
+            chunk_overlap,
+            cwd_suffix,
+        );
+
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_streaming_loop(
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        embedder: &mut Embedder,
+        idx: &Index,
+        rx: Receiver<WalkedFile>,
+        initial_query: &str,
+        top_k: usize,
+        threshold: f32,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        cwd_suffix: &Path,
+    ) -> Result<()> {
+        let mut query = initial_query.to_string();
+        let mut results: Vec<SearchResult> = Vec::new();
+        let mut list_state = ListState::default();
+        let mut show_preview = true;
+        let mut last_search = Instant::now() - Duration::from_secs(1);
+        let mut needs_search = true;
+        let debounce = Duration::from_millis(300);
+
+        // Preview state
+        let mut preview_file_cache: Option<(String, String)> = None;
+        let mut preview_scroll: u16 = 0;
+        let mut last_selected: Option<usize> = None;
+
+        // Streaming indexing state
+        let mut indexing_done = false;
+        let mut indexed_count: usize = 0;
+        let mut last_reload = Instant::now() - Duration::from_secs(10);
+
+        // Load initial data from index
+        let (mut chunks, mut embedding_matrix) = idx.load_all()?;
+
+        // Initial search
+        if !query.is_empty() && !chunks.is_empty() {
+            if let Ok(emb) = embedder.embed(&query) {
+                results = search::search(&emb, &embedding_matrix, top_k, threshold, &chunks);
+                if !results.is_empty() {
+                    list_state.select(Some(0));
+                }
+            }
+            needs_search = false;
+        }
+
+        loop {
+            // 1. Process files from channel (non-blocking, up to 4 files per iteration)
+            if !indexing_done {
+                let mut batch: Vec<(WalkedFile, String)> = Vec::new();
+                loop {
+                    match rx.try_recv() {
+                        Ok(mut file) => {
+                            file.rel_path = to_project_relative(&file.rel_path, cwd_suffix);
+                            let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+                            let needs_index = match idx.get_file_hash(&file.rel_path) {
+                                Ok(Some(stored_hash)) => stored_hash != hash,
+                                _ => true,
+                            };
+                            if needs_index {
+                                batch.push((file, hash));
+                            }
+                            if batch.len() >= 4 {
+                                break;
+                            }
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            indexing_done = true;
+                            break;
+                        }
+                    }
+                }
+                if !batch.is_empty() {
+                    indexed_count += batch.len();
+                    pipeline::process_batch(embedder, idx, &batch, chunk_size, chunk_overlap)?;
+                    // Rate-limit reloads to every 2 seconds
+                    if last_reload.elapsed() >= Duration::from_secs(2) {
+                        let (new_chunks, new_matrix) = idx.load_all()?;
+                        chunks = new_chunks;
+                        embedding_matrix = new_matrix;
+                        needs_search = true;
+                        last_reload = Instant::now();
+                    }
+                }
+                // Final reload when indexing completes
+                if indexing_done && indexed_count > 0 {
+                    let (new_chunks, new_matrix) = idx.load_all()?;
+                    chunks = new_chunks;
+                    embedding_matrix = new_matrix;
+                    needs_search = true;
+                }
+            }
+
+            // 2. Detect selection change and update preview cache/scroll
+            let current_selected = list_state.selected();
+            if current_selected != last_selected {
+                last_selected = current_selected;
+                if let Some(idx) = current_selected {
+                    if let Some(result) = results.get(idx) {
+                        let path = &result.chunk.file_path;
+                        let needs_load = match &preview_file_cache {
+                            Some((cached_path, _)) => cached_path != path,
+                            None => true,
+                        };
+                        if needs_load {
+                            if let Ok(content) = std::fs::read_to_string(path) {
+                                preview_file_cache = Some((path.clone(), content));
+                            } else {
+                                preview_file_cache = None;
+                            }
+                        }
+                        preview_scroll = (result.chunk.start_line.saturating_sub(4)) as u16;
+                    }
+                }
+            }
+
+            // 3. Render
+            let preview_scroll_val = preview_scroll;
+            let preview_cache_ref = &preview_file_cache;
+            let status_text = if indexing_done {
+                format!(
+                    "{} results | {} chunks indexed",
+                    results.len(),
+                    chunks.len()
+                )
+            } else {
+                format!(
+                    "{} results | Indexing: {} files...",
+                    results.len(),
+                    indexed_count
+                )
+            };
+
+            terminal.draw(|f| {
+                let main_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(5),
+                        Constraint::Length(1),
+                    ])
+                    .split(f.area());
+
+                let query_block = Paragraph::new(query.as_str())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Query (semantic search) "),
+                    )
+                    .style(Style::default().fg(Color::Yellow));
+                f.render_widget(query_block, main_chunks[0]);
+
+                if show_preview && !results.is_empty() {
+                    let result_area = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                        .split(main_chunks[1]);
+
+                    render_list(f, &results, &mut list_state, result_area[0]);
+                    render_preview(
+                        f,
+                        &results,
+                        &list_state,
+                        result_area[1],
+                        preview_cache_ref,
+                        preview_scroll_val,
+                    );
+                } else {
+                    render_list(f, &results, &mut list_state, main_chunks[1]);
+                }
+
+                let status = Line::from(vec![
+                    Span::styled(
+                        " Esc",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(":quit "),
+                    Span::styled(
+                        "Enter",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(":view "),
+                    Span::styled(
+                        "Tab",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(":preview "),
+                    Span::styled(
+                        "PgUp/PgDn",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(":scroll "),
+                    Span::raw(format!(" | {}", status_text)),
+                ]);
+                let status_bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
+                f.render_widget(status_bar, main_chunks[2]);
+            })?;
+
+            // 4. Handle input with debouncing
+            if event::poll(Duration::from_millis(50))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Enter => {
+                            if let Some(idx) = list_state.selected() {
+                                if let Some(result) = results.get(idx) {
+                                    let line = result.chunk.start_line;
+                                    let file = result.chunk.file_path.clone();
+
+                                    disable_raw_mode()?;
+                                    execute!(io::stdout(), LeaveAlternateScreen)?;
+
+                                    let pager = std::env::var("PAGER")
+                                        .unwrap_or_else(|_| "less".to_string());
+                                    let _ = std::process::Command::new(&pager)
+                                        .arg(format!("+{}G", line))
+                                        .arg(&file)
+                                        .status();
+
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        KeyCode::Tab => {
+                            show_preview = !show_preview;
+                        }
+                        KeyCode::Up => {
+                            if let Some(idx) = list_state.selected() {
+                                if idx > 0 {
+                                    list_state.select(Some(idx - 1));
+                                }
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(idx) = list_state.selected() {
+                                if idx + 1 < results.len() {
+                                    list_state.select(Some(idx + 1));
+                                }
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            preview_scroll = preview_scroll.saturating_sub(10);
+                        }
+                        KeyCode::PageDown => {
+                            preview_scroll = preview_scroll.saturating_add(10);
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            needs_search = true;
+                            last_search = Instant::now();
+                        }
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                            needs_search = true;
+                            last_search = Instant::now();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // 5. Debounced search
+            if needs_search && last_search.elapsed() >= debounce && !query.is_empty() {
+                if let Ok(emb) = embedder.embed(&query) {
+                    results = search::search(&emb, &embedding_matrix, top_k, threshold, &chunks);
+                    if !results.is_empty() {
+                        list_state.select(Some(0));
+                    } else {
+                        list_state.select(None);
+                    }
+                }
+                needs_search = false;
+                last_selected = None;
+            }
+        }
     }
 
     fn run_loop(
