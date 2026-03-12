@@ -148,6 +148,11 @@ impl Embedder {
 
         Ok(results)
     }
+
+    /// Get a reference to the tokenizer.
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
 }
 
 fn l2_norm(v: &Array1<f32>) -> f32 {
@@ -178,6 +183,8 @@ mod tests {
         assert_eq!(embeddings.len(), 2);
         assert_eq!(embeddings[0].len(), EMBEDDING_DIM);
         assert_eq!(embeddings[1].len(), EMBEDDING_DIM);
+        // Different inputs should produce different embeddings
+        assert_ne!(embeddings[0], embeddings[1]);
     }
 
     #[test]

@@ -57,6 +57,9 @@ mod tests {
     use crate::types::Chunk;
     use ndarray::Array2;
 
+    /// 1/sqrt(2) - used for L2-normalized test vectors.
+    const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
     fn dummy_chunk(text: &str) -> Chunk {
         Chunk {
             file_path: "test.rs".to_string(),
@@ -74,7 +77,7 @@ mod tests {
             vec![
                 1.0, 0.0, 0.0, 0.0, // chunk 0
                 0.0, 1.0, 0.0, 0.0, // chunk 1
-                0.7, 0.7, 0.0, 0.0, // chunk 2
+                S, S, 0.0, 0.0, // chunk 2 (L2-normalized)
             ],
         )
         .unwrap();
@@ -127,7 +130,7 @@ mod tests {
             vec![
                 1.0, 0.0, 0.0, 0.0, // chunk 0
                 0.0, 1.0, 0.0, 0.0, // chunk 1
-                0.5, 0.5, 0.0, 0.0, // chunk 2
+                S, S, 0.0, 0.0, // chunk 2 (L2-normalized)
             ],
         )
         .unwrap();
@@ -150,9 +153,9 @@ mod tests {
             (4, dim),
             vec![
                 0.0, 0.0, 1.0, 0.0, // chunk 0: sim = 0.0
-                0.5, 0.5, 0.0, 0.0, // chunk 1: sim = 0.5
+                0.6, 0.8, 0.0, 0.0, // chunk 1: sim = 0.6 (L2-normalized)
                 1.0, 0.0, 0.0, 0.0, // chunk 2: sim = 1.0
-                0.7, 0.3, 0.0, 0.0, // chunk 3: sim = 0.7
+                0.8, 0.6, 0.0, 0.0, // chunk 3: sim = 0.8 (L2-normalized)
             ],
         )
         .unwrap();

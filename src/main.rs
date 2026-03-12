@@ -136,14 +136,19 @@ fn run() -> Result<bool> {
         status!(quiet, "Removed {} stale files from index.", removed);
     }
 
-    // Find files that need (re-)indexing
-    let files_to_index: Vec<&walker::WalkedFile> = files
+    // Find files that need (re-)indexing (with pre-computed hashes)
+    let files_to_index: Vec<(&walker::WalkedFile, String)> = files
         .iter()
-        .filter(|f| {
+        .filter_map(|f| {
             let hash = blake3::hash(f.content.as_bytes()).to_hex().to_string();
-            match idx.get_file_hash(&f.rel_path) {
+            let needs_index = match idx.get_file_hash(&f.rel_path) {
                 Ok(Some(stored_hash)) => stored_hash != hash,
                 _ => true,
+            };
+            if needs_index {
+                Some((f, hash))
+            } else {
+                None
             }
         })
         .collect();
@@ -151,25 +156,21 @@ fn run() -> Result<bool> {
     if !files_to_index.is_empty() {
         status!(quiet, "Indexing {} files...", files_to_index.len());
 
-        let tokenizer_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/models/tokenizer.json"));
-        let tokenizer = tokenizers::Tokenizer::from_bytes(tokenizer_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-
         let batch_size = 32;
-        let file_batches: Vec<&[&walker::WalkedFile]> = files_to_index.chunks(batch_size).collect();
+        let file_batches: Vec<&[(&walker::WalkedFile, String)]> =
+            files_to_index.chunks(batch_size).collect();
 
         for (batch_idx, file_batch) in file_batches.iter().enumerate() {
             let mut all_chunks = Vec::new();
             let mut chunk_file_info: Vec<(String, String)> = Vec::new();
 
-            for file in *file_batch {
-                let content_hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+            for (file, content_hash) in *file_batch {
                 let file_chunks = chunker::chunk_file(
                     &file.rel_path,
                     &file.content,
                     args.chunk_size,
                     args.chunk_overlap,
-                    &tokenizer,
+                    embedder.tokenizer(),
                 );
 
                 for _ in &file_chunks {

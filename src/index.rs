@@ -50,7 +50,7 @@ impl Index {
             );
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY,
-                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                file_id INTEGER NOT NULL REFERENCES files(id),
                 text TEXT NOT NULL,
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
@@ -179,8 +179,7 @@ impl Index {
                     row.get::<_, String>(4)?,
                 ))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let n = rows.len();
         let mut chunks = Vec::with_capacity(n);
@@ -244,8 +243,7 @@ impl Index {
         let mut stmt = self.conn.prepare("SELECT path FROM files")?;
         let paths: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(paths)
     }
 
@@ -274,11 +272,7 @@ pub struct IndexStats {
 
 /// Convert f32 embedding to bytes for SQLite BLOB storage.
 pub(crate) fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(embedding.len() * 4);
-    for &val in embedding {
-        bytes.extend_from_slice(&val.to_le_bytes());
-    }
-    bytes
+    embedding.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
 /// Convert bytes from SQLite BLOB to f32 embedding.
@@ -607,5 +601,33 @@ mod tests {
             .unwrap();
         assert_eq!(file_count, 1);
         assert_eq!(chunk_count, 2);
+    }
+
+    #[test]
+    fn test_stats_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let dim = EMBEDDING_DIM;
+        let chunks = vec![
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "one".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "two".to_string(),
+                start_line: 2,
+                end_line: 2,
+            },
+        ];
+        let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
+        index.upsert_file("a.rs", "hash", &chunks, &emb).unwrap();
+
+        let stats = index.stats().unwrap();
+        assert_eq!(stats.file_count, 1);
+        assert_eq!(stats.chunk_count, 2);
+        assert!(stats.db_size_bytes > 0);
     }
 }

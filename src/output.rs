@@ -110,10 +110,14 @@ pub fn print_count(results: &[SearchResult], color: ColorChoice) -> std::io::Res
     Ok(())
 }
 
+/// Score thresholds for color coding.
+pub const SCORE_HIGH_THRESHOLD: f32 = 0.7;
+pub const SCORE_MEDIUM_THRESHOLD: f32 = 0.5;
+
 pub(crate) fn score_to_color(score: f32) -> Color {
-    if score >= 0.7 {
+    if score >= SCORE_HIGH_THRESHOLD {
         Color::Green
-    } else if score >= 0.5 {
+    } else if score >= SCORE_MEDIUM_THRESHOLD {
         Color::Yellow
     } else {
         Color::Red

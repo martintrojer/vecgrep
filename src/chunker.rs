@@ -200,4 +200,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_chunks_overlap_and_cover_file() {
+        let tokenizer = make_tokenizer();
+        // Tokenizer pads each line to 128 tokens, so use large chunk_size/overlap
+        // to fit multiple lines per chunk and ensure overlap manifests.
+        let lines: Vec<String> = (0..100).map(|i| format!("Line {}", i)).collect();
+        let content = lines.join("\n");
+        let chunks = chunk_file("test.txt", &content, 500, 300, &tokenizer);
+        assert!(chunks.len() >= 2, "Need multiple chunks to test overlap");
+
+        // First chunk starts at line 1
+        assert_eq!(chunks[0].start_line, 1);
+
+        for pair in chunks.windows(2) {
+            // Adjacent chunks must overlap (no gaps between them)
+            assert!(
+                pair[1].start_line <= pair[0].end_line,
+                "Adjacent chunks should overlap: [{}-{}] and [{}-{}]",
+                pair[0].start_line,
+                pair[0].end_line,
+                pair[1].start_line,
+                pair[1].end_line
+            );
+        }
+    }
 }

@@ -1,5 +1,6 @@
 pub mod interactive {
     use crate::embedder::Embedder;
+    use crate::output::{SCORE_HIGH_THRESHOLD, SCORE_MEDIUM_THRESHOLD};
     use crate::search;
     use crate::types::{Chunk, SearchResult};
     use anyhow::Result;
@@ -279,9 +280,9 @@ pub mod interactive {
         let items: Vec<ListItem> = results
             .iter()
             .map(|r| {
-                let score_color = if r.score >= 0.7 {
+                let score_color = if r.score >= SCORE_HIGH_THRESHOLD {
                     Color::Green
-                } else if r.score >= 0.5 {
+                } else if r.score >= SCORE_MEDIUM_THRESHOLD {
                     Color::Yellow
                 } else {
                     Color::Red
