@@ -37,6 +37,30 @@ vecgrep --index-only ./src   # build index without searching
 4. **Index** — caches embeddings in a local SQLite database (`.vecgrep/index.db`), keyed by BLAKE3 content hash so only changed files are re-embedded on subsequent runs
 5. **Search** — computes cosine similarity between your query embedding and all cached chunk embeddings, returns top-k results
 
+## Why local-only?
+
+vecgrep runs entirely on your machine. There are no API calls, no cloud services, no telemetry. Your code never leaves your computer.
+
+This matters for:
+
+- **Privacy** — proprietary codebases stay private
+- **Speed** — no network round-trips; search is a local matrix multiply that takes <5ms
+- **Availability** — works offline, on planes, behind firewalls, in air-gapped environments
+- **Cost** — no API fees, no usage limits
+
+## Model choice
+
+vecgrep embeds [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) directly in the binary. This is a 22M-parameter sentence transformer that produces 384-dimensional embeddings.
+
+Why this model:
+
+- **Small and fast** — 90 MB (float32 ONNX), runs inference in single-digit milliseconds on CPU. No GPU required.
+- **Good quality for its size** — consistently ranks near the top of [MTEB](https://huggingface.co/spaces/mteb/leaderboard) benchmarks among models under 100 MB. Handles both natural language and code well.
+- **Standard BERT architecture** — wide ONNX Runtime support across platforms (x86, ARM, with optional CoreML/CUDA acceleration).
+- **Battle-tested** — one of the most downloaded sentence-transformers models, with well-understood behaviour.
+
+The model is downloaded once at build time from HuggingFace, cached locally, and compiled into the binary via `include_bytes!`. The resulting binary is fully self-contained.
+
 ## Install
 
 ```bash
