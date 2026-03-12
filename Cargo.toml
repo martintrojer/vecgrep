@@ -5,7 +5,11 @@ edition = "2021"
 description = "Semantic grep — like ripgrep, but with vector search"
 authors = ["Martin Trojer <martin.trojer@gmail.com>"]
 repository = "https://github.com/martintrojer/vecgrep"
+homepage = "https://github.com/martintrojer/vecgrep"
+readme = "README.md"
 license = "MIT"
+keywords = ["grep", "search", "semantic", "embeddings", "vector"]
+categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
