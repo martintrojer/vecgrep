@@ -142,3 +142,57 @@ fn test_incremental_indexing() {
     let new_hash = index.get_file_hash("a.rs").unwrap();
     assert_eq!(new_hash, Some("hash_a_v2".to_string()));
 }
+
+// --- CLI flag tests using the binary ---
+
+#[test]
+fn test_show_root_at_git_root() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--show-root")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expected = dir.path().canonicalize().unwrap();
+    assert_eq!(stdout.trim(), expected.display().to_string());
+}
+
+#[test]
+fn test_show_root_from_subdirectory() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src/deep")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--show-root")
+        .current_dir(dir.path().join("src/deep"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expected = dir.path().canonicalize().unwrap();
+    assert_eq!(stdout.trim(), expected.display().to_string());
+}
+
+#[test]
+fn test_show_root_no_marker_falls_back_to_cwd() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // No .git, .hg, .jj, or .vecgrep — falls back to cwd
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--show-root")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expected = dir.path().canonicalize().unwrap();
+    assert_eq!(stdout.trim(), expected.display().to_string());
+}
