@@ -50,6 +50,8 @@ vecgrep --show-root          # print resolved project root
 
 Walking and indexing overlap — the embedder processes files as the walker discovers them. In interactive (`-i`) and server (`--serve`) modes, results appear progressively as files are indexed.
 
+Once the index is built, searching is fast — the only work per query is embedding it (~5ms) and a matrix dot product against the cached embeddings. The SQLite database is not in the hot path; all embeddings are loaded into memory once. This makes interactive mode feel instant and the HTTP server suitable for editor integrations that query on every keystroke.
+
 ## Why local-only?
 
 vecgrep runs entirely on your machine. There are no API calls, no cloud services, no telemetry. Your code never leaves your computer.
