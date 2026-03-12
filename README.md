@@ -45,11 +45,6 @@ cargo install --path .
 
 The first build downloads the ONNX model (~90 MB) from HuggingFace and caches it locally. Subsequent builds reuse the cached model.
 
-### Build without TUI
-
-```bash
-cargo install --path . --no-default-features
-```
 
 ## Options
 

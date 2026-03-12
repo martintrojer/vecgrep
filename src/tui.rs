@@ -1,4 +1,3 @@
-#[cfg(feature = "tui")]
 pub mod interactive {
     use crate::embedder::Embedder;
     use crate::search;

@@ -4,7 +4,6 @@ mod embedder;
 mod index;
 mod output;
 mod search;
-#[cfg(feature = "tui")]
 mod tui;
 mod types;
 mod walker;
@@ -223,7 +222,6 @@ fn main() -> Result<()> {
     // Embed query
     let query_embedding = embedder.embed(&query)?;
 
-    #[cfg(feature = "tui")]
     if args.interactive {
         match tui::interactive::run(
             &mut embedder,
