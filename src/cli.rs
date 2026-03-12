@@ -15,7 +15,7 @@ pub enum ColorChoice {
 )]
 pub struct Args {
     /// The search query (natural language or code snippet).
-    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list"])]
+    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive"])]
     pub query: Option<String>,
 
     /// Paths to search (files or directories). Defaults to current directory.

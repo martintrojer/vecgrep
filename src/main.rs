@@ -217,9 +217,10 @@ fn main() -> Result<()> {
         }
     }
 
-    // Need a query from here on
+    // Need a query from here on (unless interactive mode)
     let query = match &args.query {
         Some(q) => q.clone(),
+        None if args.interactive => String::new(),
         None => return Ok(()),
     };
 
@@ -227,31 +228,20 @@ fn main() -> Result<()> {
     let (chunks, embedding_matrix) = idx.load_all()?;
     eprintln!("Loaded {} chunks for search.", chunks.len());
 
-    // Embed query
-    let query_embedding = embedder.embed(&query)?;
-
     if args.interactive {
-        match tui::interactive::run(
+        tui::interactive::run(
             &mut embedder,
             &chunks,
             &embedding_matrix,
             &query,
             args.top_k,
             args.threshold,
-        )? {
-            Some(result) => {
-                if args.json {
-                    output::print_json(&[result])?;
-                } else {
-                    output::print_results(&[result], args.context, color_choice)?;
-                }
-            }
-            None => {
-                eprintln!("No selection.");
-            }
-        }
+        )?;
         return Ok(());
     }
+
+    // Embed query
+    let query_embedding = embedder.embed(&query)?;
 
     // Batch search
     let results = search::search(
