@@ -127,7 +127,6 @@ Options:
 
 - `VECGREP_MODEL_CACHE` — override model cache directory (default: system cache dir)
 - `VECGREP_LOG` — enable debug logging, e.g. `VECGREP_LOG=debug`
-- `EDITOR` — editor opened by `Ctrl+O` in TUI mode
 
 ## License
 
