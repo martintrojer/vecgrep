@@ -1,9 +1,111 @@
 use anyhow::Result;
+use std::path::Path;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use crate::chunker;
 use crate::embedder::Embedder;
 use crate::index::Index;
+use crate::paths;
+use crate::types::Chunk;
 use crate::walker::WalkedFile;
+
+/// Max files to drain from the channel per iteration in streaming modes.
+pub const STREAMING_BATCH_SIZE: usize = 4;
+
+/// Manages incremental indexing from a streaming channel.
+pub struct StreamingIndexer {
+    rx: Receiver<WalkedFile>,
+    pub indexing_done: bool,
+    pub indexed_count: usize,
+    last_reload: Instant,
+    chunk_size: usize,
+    chunk_overlap: usize,
+    cwd_suffix: Box<Path>,
+}
+
+impl StreamingIndexer {
+    pub fn new(
+        rx: Receiver<WalkedFile>,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        cwd_suffix: &Path,
+    ) -> Self {
+        Self {
+            rx,
+            indexing_done: false,
+            indexed_count: 0,
+            last_reload: Instant::now() - Duration::from_secs(10),
+            chunk_size,
+            chunk_overlap,
+            cwd_suffix: cwd_suffix.into(),
+        }
+    }
+
+    /// Drain up to STREAMING_BATCH_SIZE files from the channel, process them,
+    /// and reload the index if enough time has passed.
+    /// Returns `true` if the index data was reloaded (caller should re-search).
+    pub fn poll(
+        &mut self,
+        embedder: &mut Embedder,
+        idx: &Index,
+        chunks: &mut Vec<Chunk>,
+        embedding_matrix: &mut ndarray::Array2<f32>,
+    ) -> Result<bool> {
+        if self.indexing_done {
+            return Ok(false);
+        }
+
+        let mut batch: Vec<(WalkedFile, String)> = Vec::new();
+        loop {
+            match self.rx.try_recv() {
+                Ok(mut file) => {
+                    file.rel_path = paths::to_project_relative(&file.rel_path, &self.cwd_suffix);
+                    let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+                    let needs_index = match idx.get_file_hash(&file.rel_path) {
+                        Ok(Some(stored_hash)) => stored_hash != hash,
+                        _ => true,
+                    };
+                    if needs_index {
+                        batch.push((file, hash));
+                    }
+                    if batch.len() >= STREAMING_BATCH_SIZE {
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.indexing_done = true;
+                    break;
+                }
+            }
+        }
+
+        let mut reloaded = false;
+
+        if !batch.is_empty() {
+            self.indexed_count += batch.len();
+            process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
+            if self.last_reload.elapsed() >= Duration::from_secs(2) {
+                let (new_chunks, new_matrix) = idx.load_all()?;
+                *chunks = new_chunks;
+                *embedding_matrix = new_matrix;
+                self.last_reload = Instant::now();
+                reloaded = true;
+            }
+        }
+
+        // Final reload when indexing completes
+        if self.indexing_done && self.indexed_count > 0 && !reloaded {
+            let (new_chunks, new_matrix) = idx.load_all()?;
+            *chunks = new_chunks;
+            *embedding_matrix = new_matrix;
+            reloaded = true;
+        }
+
+        Ok(reloaded)
+    }
+}
 
 /// Process a batch of files: chunk, embed, and upsert into the index.
 /// Returns the number of chunks indexed.
@@ -104,7 +206,7 @@ mod tests {
         ];
 
         let chunk_count = process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
-        assert!(chunk_count >= 2);
+        assert_eq!(chunk_count, 2); // two small files → one chunk each
 
         let (chunks, matrix) = idx.load_all().unwrap();
         assert_eq!(chunks.len(), chunk_count);
@@ -122,6 +224,9 @@ mod tests {
 
         let chunk_count = process_batch(&mut embedder, &idx, &[], 500, 100).unwrap();
         assert_eq!(chunk_count, 0);
+
+        let (chunks, _) = idx.load_all().unwrap();
+        assert!(chunks.is_empty());
     }
 
     #[test]
@@ -214,5 +319,84 @@ mod tests {
         assert_eq!(chunks.len(), 2); // still 2 files, a.rs was replaced
         let a_chunk = chunks.iter().find(|c| c.file_path == "a.rs").unwrap();
         assert!(a_chunk.text.contains("alpha_v2"));
+    }
+
+    #[test]
+    fn test_process_batch_multi_chunk_file() {
+        let mut embedder = Embedder::new().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        // Generate content large enough for multiple chunks at chunk_size=10
+        let lines: Vec<String> = (0..50)
+            .map(|i| format!("Line {} with some content to fill tokens", i))
+            .collect();
+        let content = lines.join("\n");
+        let files = vec![(
+            WalkedFile {
+                rel_path: "big.rs".to_string(),
+                content,
+            },
+            "hash_big".to_string(),
+        )];
+
+        let chunk_count = process_batch(&mut embedder, &idx, &files, 10, 2).unwrap();
+        assert!(
+            chunk_count > 1,
+            "expected multiple chunks, got {chunk_count}"
+        );
+
+        let (chunks, matrix) = idx.load_all().unwrap();
+        assert_eq!(chunks.len(), chunk_count);
+        assert_eq!(matrix.nrows(), chunk_count);
+        assert!(chunks.iter().all(|c| c.file_path == "big.rs"));
+    }
+
+    #[test]
+    fn test_streaming_skips_already_indexed() {
+        let mut embedder = Embedder::new().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        // Pre-index a file
+        let content = "fn already_indexed() {}";
+        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+        let files = vec![(
+            WalkedFile {
+                rel_path: "cached.rs".to_string(),
+                content: content.to_string(),
+            },
+            hash.clone(),
+        )];
+        process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
+
+        // Now simulate streaming: send the same file through a channel
+        let (tx, rx) = mpsc::sync_channel(32);
+        tx.send(WalkedFile {
+            rel_path: "cached.rs".to_string(),
+            content: content.to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        // Drain and check — hash matches, so it should be skipped
+        let mut batch: Vec<(WalkedFile, String)> = Vec::new();
+        for file in rx.iter() {
+            let file_hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+            let needs_index = match idx.get_file_hash(&file.rel_path) {
+                Ok(Some(stored_hash)) => stored_hash != file_hash,
+                _ => true,
+            };
+            if needs_index {
+                batch.push((file, file_hash));
+            }
+        }
+        assert!(
+            batch.is_empty(),
+            "file should have been skipped (hash match)"
+        );
+
+        // Index still has original data
+        let (chunks, _) = idx.load_all().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].file_path, "cached.rs");
     }
 }

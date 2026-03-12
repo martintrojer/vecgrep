@@ -7,7 +7,7 @@ use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::Index;
 use vecgrep::types::IndexConfig;
-use vecgrep::{output, pipeline, search, serve, tui, walker};
+use vecgrep::{output, paths, pipeline, search, serve, tui, walker};
 
 /// Print a status message to stderr unless --quiet is set.
 macro_rules! status {
@@ -48,52 +48,6 @@ fn find_project_root(start: &Path) -> PathBuf {
             _ => return start_canon,
         }
     }
-}
-
-/// Convert a walker-relative path to a project-root-relative path.
-fn to_project_relative(walker_path: &str, cwd_suffix: &Path) -> String {
-    let stripped = walker_path.strip_prefix("./").unwrap_or(walker_path);
-    if cwd_suffix.as_os_str().is_empty() {
-        stripped.to_string()
-    } else {
-        format!("{}/{}", cwd_suffix.display(), stripped)
-    }
-}
-
-/// Convert a project-root-relative path to a cwd-relative path for display.
-fn to_display_path(project_path: &str, cwd_suffix: &Path) -> String {
-    if cwd_suffix.as_os_str().is_empty() {
-        return project_path.to_string();
-    }
-    let prefix = format!("{}/", cwd_suffix.display());
-    if let Some(rest) = project_path.strip_prefix(&prefix) {
-        rest.to_string()
-    } else {
-        // Path is outside cwd subtree, compute relative path
-        make_relative(cwd_suffix, Path::new(project_path))
-    }
-}
-
-/// Compute a relative path from `from` to `to`, where both are relative to the same root.
-fn make_relative(from: &Path, to: &Path) -> String {
-    let from_comps: Vec<_> = from.components().collect();
-    let to_comps: Vec<_> = to.components().collect();
-
-    let common = from_comps
-        .iter()
-        .zip(to_comps.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-
-    let ups = from_comps.len() - common;
-    let mut result = PathBuf::new();
-    for _ in 0..ups {
-        result.push("..");
-    }
-    for comp in &to_comps[common..] {
-        result.push(comp);
-    }
-    result.to_string_lossy().to_string()
 }
 
 fn main() {
@@ -248,22 +202,22 @@ fn run() -> Result<bool> {
         std::thread::spawn(move || walker::walk_paths_streaming(&walk_paths, &walk_opts, tx));
 
     let mut all_paths = Vec::new();
-    let mut batch: Vec<(walker::WalkedFile, String)> = Vec::new();
-    let mut needs_indexing_count = 0;
     let mut total_indexed = 0;
-    let mut threshold_prompted = false;
     let threshold = args.index_warn_threshold;
+    let root_str = project_root_canon.to_string_lossy().to_string();
 
     // For TUI/serve streaming, pass the receiver along instead of draining here.
-    let is_streaming_mode = args.interactive || args.serve;
-    let (streaming_rx, walker_handle) = if is_streaming_mode {
+    let (streaming_rx, walker_handle) = if args.interactive || args.serve {
         (Some(rx), Some(walker_join_handle))
     } else {
         // Standard CLI path: stream files from walker, index in batches inline.
         // The walker thread overlaps file I/O with embedding compute.
         // The threshold prompt fires mid-stream when the count crosses the limit.
+        let mut batch: Vec<(walker::WalkedFile, String)> = Vec::new();
+        let mut needs_indexing_count = 0;
+        let mut threshold_prompted = false;
         for mut file in rx.iter() {
-            file.rel_path = to_project_relative(&file.rel_path, &cwd_suffix);
+            file.rel_path = paths::to_project_relative(&file.rel_path, &cwd_suffix);
             all_paths.push(file.rel_path.clone());
 
             let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
@@ -395,7 +349,7 @@ fn run() -> Result<bool> {
                 args.chunk_size,
                 args.chunk_overlap,
                 &cwd_suffix,
-                &project_root_canon.to_string_lossy(),
+                &root_str,
             )?;
             if let Some(h) = walker_handle {
                 let _ = h.join();
@@ -417,7 +371,7 @@ fn run() -> Result<bool> {
                 args.top_k,
                 args.threshold,
                 quiet,
-                &project_root_canon.to_string_lossy(),
+                &root_str,
             )?;
         }
         return Ok(true);
@@ -480,12 +434,12 @@ fn run() -> Result<bool> {
     let mut results = results;
     if !args.json && !cwd_suffix.as_os_str().is_empty() {
         for r in &mut results {
-            r.chunk.file_path = to_display_path(&r.chunk.file_path, &cwd_suffix);
+            r.chunk.file_path = paths::to_cwd_relative(&r.chunk.file_path, &cwd_suffix);
         }
     }
 
     if args.json {
-        output::print_json(&results, &project_root_canon.to_string_lossy())?;
+        output::print_json(&results, &root_str)?;
     } else if args.files_with_matches {
         output::print_files_with_matches(&results, color_choice)?;
     } else if args.count {
@@ -580,133 +534,5 @@ mod tests {
         let result = find_project_root(Path::new("/nonexistent/path/that/doesnt/exist"));
         // canonicalize fails, falls back to the input path
         assert_eq!(result, PathBuf::from("/nonexistent/path/that/doesnt/exist"));
-    }
-
-    // --- to_project_relative tests ---
-
-    #[test]
-    fn test_project_relative_empty_suffix_strips_dot_slash() {
-        assert_eq!(to_project_relative("./main.rs", Path::new("")), "main.rs");
-    }
-
-    #[test]
-    fn test_project_relative_empty_suffix_no_dot_slash() {
-        assert_eq!(
-            to_project_relative("src/main.rs", Path::new("")),
-            "src/main.rs"
-        );
-    }
-
-    #[test]
-    fn test_project_relative_with_suffix_strips_dot_slash() {
-        assert_eq!(
-            to_project_relative("./main.rs", Path::new("src")),
-            "src/main.rs"
-        );
-    }
-
-    #[test]
-    fn test_project_relative_with_suffix_no_dot_slash() {
-        assert_eq!(
-            to_project_relative("lib/foo.rs", Path::new("src")),
-            "src/lib/foo.rs"
-        );
-    }
-
-    #[test]
-    fn test_project_relative_nested_suffix() {
-        assert_eq!(
-            to_project_relative("./mod.rs", Path::new("src/deep")),
-            "src/deep/mod.rs"
-        );
-    }
-
-    // --- to_display_path tests ---
-
-    #[test]
-    fn test_display_path_empty_suffix() {
-        assert_eq!(to_display_path("src/main.rs", Path::new("")), "src/main.rs");
-    }
-
-    #[test]
-    fn test_display_path_strips_prefix() {
-        assert_eq!(to_display_path("src/main.rs", Path::new("src")), "main.rs");
-    }
-
-    #[test]
-    fn test_display_path_strips_nested_prefix() {
-        assert_eq!(
-            to_display_path("src/deep/mod.rs", Path::new("src/deep")),
-            "mod.rs"
-        );
-    }
-
-    #[test]
-    fn test_display_path_outside_subtree() {
-        // cwd is src/, path is lib/foo.rs → ../lib/foo.rs
-        assert_eq!(
-            to_display_path("lib/foo.rs", Path::new("src")),
-            "../lib/foo.rs"
-        );
-    }
-
-    #[test]
-    fn test_display_path_sibling_deep() {
-        // cwd is src/a/, path is src/b/foo.rs → ../b/foo.rs
-        assert_eq!(
-            to_display_path("src/b/foo.rs", Path::new("src/a")),
-            "../b/foo.rs"
-        );
-    }
-
-    #[test]
-    fn test_display_path_root_file_from_subdir() {
-        // cwd is src/, path is README.md → ../README.md
-        assert_eq!(
-            to_display_path("README.md", Path::new("src")),
-            "../README.md"
-        );
-    }
-
-    // --- make_relative tests ---
-
-    #[test]
-    fn test_make_relative_same_dir() {
-        assert_eq!(
-            make_relative(Path::new("src"), Path::new("src/main.rs")),
-            "main.rs"
-        );
-    }
-
-    #[test]
-    fn test_make_relative_sibling() {
-        assert_eq!(
-            make_relative(Path::new("src"), Path::new("lib/foo.rs")),
-            "../lib/foo.rs"
-        );
-    }
-
-    #[test]
-    fn test_make_relative_deep_to_shallow() {
-        assert_eq!(
-            make_relative(Path::new("src/a/b"), Path::new("README.md")),
-            "../../../README.md"
-        );
-    }
-
-    #[test]
-    fn test_make_relative_no_common_prefix() {
-        assert_eq!(
-            make_relative(Path::new("aaa"), Path::new("bbb/file.rs")),
-            "../bbb/file.rs"
-        );
-    }
-
-    #[test]
-    fn test_make_relative_shared_prefix() {
-        assert_eq!(
-            make_relative(Path::new("src/a"), Path::new("src/b/c.rs")),
-            "../b/c.rs"
-        );
     }
 }

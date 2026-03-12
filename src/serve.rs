@@ -8,20 +8,10 @@ use url::Url;
 use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::output::format_json_result;
-use crate::pipeline;
+use crate::pipeline::StreamingIndexer;
 use crate::search;
 use crate::types::Chunk;
 use crate::walker::WalkedFile;
-
-/// Convert a walker-relative path to a project-root-relative path.
-fn to_project_relative(walker_path: &str, cwd_suffix: &std::path::Path) -> String {
-    let stripped = walker_path.strip_prefix("./").unwrap_or(walker_path);
-    if cwd_suffix.as_os_str().is_empty() {
-        stripped.to_string()
-    } else {
-        format!("{}/{}", cwd_suffix.display(), stripped)
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_streaming(
@@ -55,58 +45,19 @@ pub fn run_streaming(
         .parse()
         .expect("valid header");
 
-    // Load initial data from index
     let (mut chunks, mut embedding_matrix) = idx.load_all()?;
-    let mut indexing_done = false;
-    let mut indexed_count: usize = 0;
-    let mut last_reload = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut indexer = StreamingIndexer::new(rx, chunk_size, chunk_overlap, cwd_suffix);
+    let mut indexing_announced = false;
 
     loop {
-        // 1. Drain files from channel (non-blocking)
-        if !indexing_done {
-            let mut batch: Vec<(WalkedFile, String)> = Vec::new();
-            loop {
-                match rx.try_recv() {
-                    Ok(mut file) => {
-                        file.rel_path = to_project_relative(&file.rel_path, cwd_suffix);
-                        let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
-                        let needs_index = match idx.get_file_hash(&file.rel_path) {
-                            Ok(Some(stored_hash)) => stored_hash != hash,
-                            _ => true,
-                        };
-                        if needs_index {
-                            batch.push((file, hash));
-                        }
-                        if batch.len() >= 4 {
-                            break;
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        indexing_done = true;
-                        break;
-                    }
-                }
-            }
-            if !batch.is_empty() {
-                indexed_count += batch.len();
-                pipeline::process_batch(embedder, idx, &batch, chunk_size, chunk_overlap)?;
-                if last_reload.elapsed() >= std::time::Duration::from_secs(2) {
-                    let (new_chunks, new_matrix) = idx.load_all()?;
-                    chunks = new_chunks;
-                    embedding_matrix = new_matrix;
-                    last_reload = std::time::Instant::now();
-                }
-            }
-            if indexing_done {
-                if indexed_count > 0 {
-                    let (new_chunks, new_matrix) = idx.load_all()?;
-                    chunks = new_chunks;
-                    embedding_matrix = new_matrix;
-                }
+        // 1. Process streaming indexing
+        if !indexer.indexing_done {
+            indexer.poll(embedder, idx, &mut chunks, &mut embedding_matrix)?;
+            if indexer.indexing_done && !indexing_announced {
+                indexing_announced = true;
                 eprintln!(
                     "Indexing complete. {} files indexed, {} chunks ready.",
-                    indexed_count,
+                    indexer.indexed_count,
                     chunks.len()
                 );
             }
@@ -452,10 +403,10 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(json["root"], "/test/root");
-        assert!(json.get("file").is_some());
-        assert!(json.get("score").is_some());
-        assert!(json.get("text").is_some());
-        assert!(json.get("start_line").is_some());
+        assert!(json["file"].as_str().unwrap().ends_with(".rs"));
+        assert!(json["score"].as_f64().unwrap() > 0.0);
+        assert!(!json["text"].as_str().unwrap().is_empty());
+        assert!(json["start_line"].as_u64().unwrap() >= 1);
         assert!(json.get("end_line").is_some());
     }
 

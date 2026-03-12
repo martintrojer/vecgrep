@@ -21,16 +21,20 @@ pub struct WalkOptions {
     pub max_depth: Option<usize>,
 }
 
-/// Walk the given paths, respecting .gitignore and filters.
-pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile>> {
-    let mut files = Vec::new();
-
+/// Walk paths and call `on_file` for each discovered file.
+/// Return `false` from the callback to stop walking early.
+fn walk_with<F>(paths: &[String], opts: &WalkOptions, mut on_file: F) -> Result<()>
+where
+    F: FnMut(WalkedFile) -> bool,
+{
     for search_path in paths {
         let search_path = Path::new(search_path);
 
         if search_path.is_file() {
             if let Some(f) = read_file(search_path)? {
-                files.push(f);
+                if !on_file(f) {
+                    return Ok(());
+                }
             }
             continue;
         }
@@ -48,7 +52,6 @@ pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile
             builder.max_depth(Some(depth));
         }
 
-        // Add type filters (select and negate)
         if opts.file_types.is_some() || opts.file_types_not.is_some() {
             let mut type_builder = ignore::types::TypesBuilder::new();
             type_builder.add_defaults();
@@ -66,7 +69,6 @@ pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile
             builder.types(types_matcher);
         }
 
-        // Add glob filters
         if let Some(ref glob_patterns) = opts.globs {
             let mut overrides = ignore::overrides::OverrideBuilder::new(search_path);
             for pattern in glob_patterns {
@@ -78,6 +80,7 @@ pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile
             builder.overrides(ov);
         }
 
+        let mut stopped = false;
         for entry in builder.build() {
             let entry = match entry {
                 Ok(e) => e,
@@ -87,18 +90,33 @@ pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile
                 }
             };
 
-            // Skip directories
             if entry.file_type().is_none_or(|ft| !ft.is_file()) {
                 continue;
             }
 
             let path = entry.path();
             if let Some(f) = read_file(path)? {
-                files.push(f);
+                if !on_file(f) {
+                    stopped = true;
+                    break;
+                }
             }
+        }
+        if stopped {
+            return Ok(());
         }
     }
 
+    Ok(())
+}
+
+/// Walk the given paths, respecting .gitignore and filters.
+pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile>> {
+    let mut files = Vec::new();
+    walk_with(paths, opts, |f| {
+        files.push(f);
+        true
+    })?;
     Ok(files)
 }
 
@@ -110,84 +128,13 @@ pub fn walk_paths_streaming(
     sender: std::sync::mpsc::SyncSender<WalkedFile>,
 ) -> Result<usize> {
     let mut count = 0;
-
-    for search_path in paths {
-        let search_path = Path::new(search_path);
-
-        if search_path.is_file() {
-            if let Some(f) = read_file(search_path)? {
-                if sender.send(f).is_err() {
-                    return Ok(count);
-                }
-                count += 1;
-            }
-            continue;
+    walk_with(paths, opts, |f| {
+        if sender.send(f).is_err() {
+            return false;
         }
-
-        let mut builder = WalkBuilder::new(search_path);
-        builder
-            .hidden(!opts.hidden)
-            .follow_links(opts.follow)
-            .git_ignore(!opts.no_ignore)
-            .git_global(!opts.no_ignore)
-            .git_exclude(!opts.no_ignore)
-            .ignore(!opts.no_ignore);
-
-        if let Some(depth) = opts.max_depth {
-            builder.max_depth(Some(depth));
-        }
-
-        if opts.file_types.is_some() || opts.file_types_not.is_some() {
-            let mut type_builder = ignore::types::TypesBuilder::new();
-            type_builder.add_defaults();
-            if let Some(ref types) = opts.file_types {
-                for t in types {
-                    type_builder.select(t);
-                }
-            }
-            if let Some(ref types) = opts.file_types_not {
-                for t in types {
-                    type_builder.negate(t);
-                }
-            }
-            let types_matcher = type_builder.build().map_err(|e| anyhow::anyhow!("{}", e))?;
-            builder.types(types_matcher);
-        }
-
-        if let Some(ref glob_patterns) = opts.globs {
-            let mut overrides = ignore::overrides::OverrideBuilder::new(search_path);
-            for pattern in glob_patterns {
-                overrides
-                    .add(pattern)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-            }
-            let ov = overrides.build().map_err(|e| anyhow::anyhow!("{}", e))?;
-            builder.overrides(ov);
-        }
-
-        for entry in builder.build() {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("Walk error: {}", e);
-                    continue;
-                }
-            };
-
-            if entry.file_type().is_none_or(|ft| !ft.is_file()) {
-                continue;
-            }
-
-            let path = entry.path();
-            if let Some(f) = read_file(path)? {
-                if sender.send(f).is_err() {
-                    return Ok(count);
-                }
-                count += 1;
-            }
-        }
-    }
-
+        count += 1;
+        true
+    })?;
     Ok(count)
 }
 
@@ -412,7 +359,7 @@ mod tests {
         assert_eq!(streamed.len(), batch_files.len());
 
         let mut batch_names: Vec<&str> = batch_files.iter().map(|f| f.rel_path.as_str()).collect();
-        let mut stream_names: Vec<String> = streamed.iter().map(|f| f.rel_path.clone()).collect();
+        let mut stream_names: Vec<&str> = streamed.iter().map(|f| f.rel_path.as_str()).collect();
         batch_names.sort();
         stream_names.sort();
         assert_eq!(batch_names, stream_names);
@@ -439,8 +386,8 @@ mod tests {
         let _first = rx.recv();
         drop(rx);
 
-        // Walker thread should exit gracefully (not panic)
-        let result = handle.join().unwrap();
-        assert!(result.is_ok());
+        // Walker thread should exit gracefully (not panic) and report partial count
+        let count = handle.join().unwrap().unwrap();
+        assert!(count < 100, "expected early exit, got {count} files");
     }
 }
