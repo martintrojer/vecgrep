@@ -148,6 +148,15 @@ fn run() -> Result<bool> {
 
     // Find project root and compute path relationships
     let project_root = find_project_root(&index_root);
+
+    // Handle --show-root (no model or index needed)
+    if args.show_root {
+        let canon = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.clone());
+        println!("{}", canon.display());
+        return Ok(true);
+    }
     let project_root_canon = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.clone());

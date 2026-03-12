@@ -15,7 +15,7 @@ pub enum ColorChoice {
 )]
 pub struct Args {
     /// The search query (natural language or code snippet).
-    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive", "serve"])]
+    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive", "serve", "show_root"])]
     pub query: Option<String>,
 
     /// Paths to search (files or directories). Defaults to current directory.
@@ -123,6 +123,10 @@ pub struct Args {
     /// Set to 0 to disable.
     #[arg(long, default_value_t = 1000)]
     pub index_warn_threshold: usize,
+
+    /// Print the resolved project root and exit.
+    #[arg(long)]
+    pub show_root: bool,
 
     /// Start HTTP server mode.
     #[arg(long)]
