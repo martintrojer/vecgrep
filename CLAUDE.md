@@ -28,12 +28,14 @@ cargo clippy -- -D warnings
 
 vecgrep is a semantic grep tool: it embeds a query and file chunks into vectors using a local ONNX model, then ranks chunks by cosine similarity.
 
-**Data pipeline** (orchestrated in `main.rs`):
+**Data pipeline** (orchestrated in `main.rs`, streamed via `std::sync::mpsc`):
 
 ```
-walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  output/tui/serve
-(files)    (chunks)    (vectors)    (cache)             (rank)     (display)
+walker (thread) →  channel(32)  →  pipeline::process_batch  →  index (SQLite)  →  search  →  output/tui/serve
+(files)            (backpressure)   (chunk + embed + upsert)    (cache)            (rank)     (display)
 ```
+
+The walker runs on a background thread feeding files through a bounded `sync_channel(32)`. The channel backpressure means the walker blocks if the embedder falls behind. In **CLI mode**, files are indexed inline as they arrive — the threshold prompt fires mid-stream when the count crosses the limit ("N files need indexing so far, still scanning"). In **TUI/serve mode**, indexing is interleaved with user interaction — files are drained non-blockingly (up to 4 per iteration), processed via `pipeline::process_batch()`, and the index is reloaded every 2 seconds so results appear progressively.
 
 **Key design decisions:**
 
@@ -51,9 +53,10 @@ walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  outp
 |---|---|
 | `embedder.rs` | ONNX session + tokenizer, batch inference with mean-pooling |
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries |
+| `pipeline.rs` | Shared `process_batch()`: chunk → embed → upsert for a batch of files. Used by CLI, TUI, and serve |
 | `index.rs` | SQLite schema (`meta`/`files`/`chunks`), upsert, stale removal, bulk load into ndarray |
 | `search.rs` | Matrix dot-product scoring, top-k partial sort, threshold filter |
-| `walker.rs` | `ignore` crate for .gitignore-aware file discovery with type/glob filters |
+| `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_paths_streaming()` for channel-based walking |
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
-| `serve.rs` | `tiny_http` server for `--serve` mode; loads model once, serves queries over HTTP |
-| `tui.rs` | `ratatui` interactive mode with debounced re-embedding on keystrokes |
+| `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` interleaves indexing with request handling |
+| `tui.rs` | `ratatui` interactive mode; `run_streaming()` interleaves indexing with the event loop |

@@ -6,9 +6,210 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use url::Url;
 
 use crate::embedder::Embedder;
+use crate::index::Index;
 use crate::output::format_json_result;
+use crate::pipeline;
 use crate::search;
 use crate::types::Chunk;
+use crate::walker::WalkedFile;
+
+/// Convert a walker-relative path to a project-root-relative path.
+fn to_project_relative(walker_path: &str, cwd_suffix: &std::path::Path) -> String {
+    let stripped = walker_path.strip_prefix("./").unwrap_or(walker_path);
+    if cwd_suffix.as_os_str().is_empty() {
+        stripped.to_string()
+    } else {
+        format!("{}/{}", cwd_suffix.display(), stripped)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_streaming(
+    embedder: &mut Embedder,
+    idx: &Index,
+    rx: std::sync::mpsc::Receiver<WalkedFile>,
+    port: Option<u16>,
+    default_top_k: usize,
+    default_threshold: f32,
+    quiet: bool,
+    chunk_size: usize,
+    chunk_overlap: usize,
+    cwd_suffix: &std::path::Path,
+) -> Result<()> {
+    let port = port.unwrap_or(0);
+    let listener =
+        TcpListener::bind(("127.0.0.1", port)).context("Failed to bind HTTP listener")?;
+    let actual_port = listener.local_addr()?.port();
+
+    let server = Server::from_listener(listener, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
+
+    let _ = quiet;
+    eprintln!("Listening on http://127.0.0.1:{actual_port}");
+
+    let json_content_type: Header = "Content-Type: application/x-ndjson"
+        .parse()
+        .expect("valid header");
+    let json_error_type: Header = "Content-Type: application/json"
+        .parse()
+        .expect("valid header");
+
+    // Load initial data from index
+    let (mut chunks, mut embedding_matrix) = idx.load_all()?;
+    let mut indexing_done = false;
+    let mut indexed_count: usize = 0;
+    let mut last_reload = std::time::Instant::now() - std::time::Duration::from_secs(10);
+
+    loop {
+        // 1. Drain files from channel (non-blocking)
+        if !indexing_done {
+            let mut batch: Vec<(WalkedFile, String)> = Vec::new();
+            loop {
+                match rx.try_recv() {
+                    Ok(mut file) => {
+                        file.rel_path = to_project_relative(&file.rel_path, cwd_suffix);
+                        let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+                        let needs_index = match idx.get_file_hash(&file.rel_path) {
+                            Ok(Some(stored_hash)) => stored_hash != hash,
+                            _ => true,
+                        };
+                        if needs_index {
+                            batch.push((file, hash));
+                        }
+                        if batch.len() >= 4 {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        indexing_done = true;
+                        break;
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                indexed_count += batch.len();
+                pipeline::process_batch(embedder, idx, &batch, chunk_size, chunk_overlap)?;
+                if last_reload.elapsed() >= std::time::Duration::from_secs(2) {
+                    let (new_chunks, new_matrix) = idx.load_all()?;
+                    chunks = new_chunks;
+                    embedding_matrix = new_matrix;
+                    last_reload = std::time::Instant::now();
+                }
+            }
+            if indexing_done {
+                if indexed_count > 0 {
+                    let (new_chunks, new_matrix) = idx.load_all()?;
+                    chunks = new_chunks;
+                    embedding_matrix = new_matrix;
+                }
+                eprintln!(
+                    "Indexing complete. {} files indexed, {} chunks ready.",
+                    indexed_count,
+                    chunks.len()
+                );
+            }
+        }
+
+        // 2. Handle HTTP request (non-blocking)
+        let request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Some(req)) => req,
+            Ok(None) | Err(_) => continue,
+        };
+
+        if request.method() != &Method::Get {
+            let body = r#"{"error":"method not allowed"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(405))
+                .with_header(json_error_type.clone());
+            let _ = request.respond(resp);
+            continue;
+        }
+
+        let raw_url = request.url().to_string();
+        let full_url = format!("http://localhost{raw_url}");
+        let parsed = match Url::parse(&full_url) {
+            Ok(u) => u,
+            Err(_) => {
+                let body = r#"{"error":"invalid URL"}"#;
+                let resp = Response::from_string(body)
+                    .with_status_code(StatusCode(400))
+                    .with_header(json_error_type.clone());
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        if parsed.path() != "/search" {
+            let body = r#"{"error":"not found"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(404))
+                .with_header(json_error_type.clone());
+            let _ = request.respond(resp);
+            continue;
+        }
+
+        let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        let q = params
+            .iter()
+            .find(|(k, _)| k == "q")
+            .map(|(_, v)| v.clone());
+
+        let q = match q {
+            Some(q) if !q.is_empty() => q,
+            _ => {
+                let body = r#"{"error":"missing or empty 'q' parameter"}"#;
+                let resp = Response::from_string(body)
+                    .with_status_code(StatusCode(400))
+                    .with_header(json_error_type.clone());
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        let top_k: usize = params
+            .iter()
+            .find(|(k, _)| k == "k")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(default_top_k);
+
+        let threshold: f32 = params
+            .iter()
+            .find(|(k, _)| k == "threshold")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(default_threshold);
+
+        let query_embedding = match embedder.embed(&q) {
+            Ok(e) => e,
+            Err(e) => {
+                let body = serde_json::json!({"error": format!("{e:#}")}).to_string();
+                let resp = Response::from_string(body)
+                    .with_status_code(StatusCode(500))
+                    .with_header(json_error_type.clone());
+                let _ = request.respond(resp);
+                continue;
+            }
+        };
+
+        let results = search::search(
+            &query_embedding,
+            &embedding_matrix,
+            top_k,
+            threshold,
+            &chunks,
+        );
+
+        let mut body = String::new();
+        for result in &results {
+            let json = format_json_result(result);
+            body.push_str(&json.to_string());
+            body.push('\n');
+        }
+
+        let resp = Response::from_string(body).with_header(json_content_type.clone());
+        let _ = request.respond(resp);
+    }
+}
 
 pub fn run(
     embedder: &mut Embedder,

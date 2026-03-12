@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::Index;
 use vecgrep::types::IndexConfig;
-use vecgrep::{chunker, output, search, serve, tui, walker};
+use vecgrep::{output, pipeline, search, serve, tui, walker};
 
 /// Print a status message to stderr unless --quiet is set.
 macro_rules! status {
@@ -218,137 +218,137 @@ fn run() -> Result<bool> {
     }
     idx.set_config(&config)?;
 
-    // Walk files
+    // Stream files from walker thread through a channel
     status!(quiet, "Scanning files...");
     let walk_opts = walker::WalkOptions {
-        file_types: &args.file_type,
-        file_types_not: &args.file_type_not,
-        globs: &args.glob,
+        file_types: args.file_type.clone(),
+        file_types_not: args.file_type_not.clone(),
+        globs: args.glob.clone(),
         hidden: args.hidden,
         follow: args.follow,
         no_ignore: args.no_ignore,
         max_depth: args.max_depth,
     };
-    let files = walker::walk_paths(&args.paths, &walk_opts)?;
 
-    // Convert walker paths to project-root-relative
-    let files: Vec<walker::WalkedFile> = files
-        .into_iter()
-        .map(|mut f| {
-            f.rel_path = to_project_relative(&f.rel_path, &cwd_suffix);
-            f
-        })
-        .collect();
-    status!(quiet, "Found {} files.", files.len());
+    let batch_size = 32;
+    // 2× batch_size so the walker stays ahead of the embedder — keeps the
+    // model fed even on slow I/O (NFS, spinning disks, etc.).
+    let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(batch_size * 2);
+    let walk_paths = args.paths.clone();
+    let walker_join_handle =
+        std::thread::spawn(move || walker::walk_paths_streaming(&walk_paths, &walk_opts, tx));
 
-    // Remove stale files from index (scoped to walk prefix when in a subdirectory)
-    let current_paths: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
-    let removed = if walk_prefix.as_os_str().is_empty() {
-        idx.remove_stale_files(&current_paths)?
+    let mut all_paths = Vec::new();
+    let mut batch: Vec<(walker::WalkedFile, String)> = Vec::new();
+    let mut needs_indexing_count = 0;
+    let mut total_indexed = 0;
+    let mut threshold_prompted = false;
+    let threshold = args.index_warn_threshold;
+
+    // For TUI/serve streaming, pass the receiver along instead of draining here.
+    let is_streaming_mode = args.interactive || args.serve;
+    let (streaming_rx, walker_handle) = if is_streaming_mode {
+        (Some(rx), Some(walker_join_handle))
     } else {
-        let prefix = format!("{}/", walk_prefix.display());
-        idx.remove_stale_files_under(&current_paths, &prefix)?
-    };
-    if removed > 0 {
-        status!(quiet, "Removed {} stale files from index.", removed);
-    }
+        // Standard CLI path: stream files from walker, index in batches inline.
+        // The walker thread overlaps file I/O with embedding compute.
+        // The threshold prompt fires mid-stream when the count crosses the limit.
+        for mut file in rx.iter() {
+            file.rel_path = to_project_relative(&file.rel_path, &cwd_suffix);
+            all_paths.push(file.rel_path.clone());
 
-    // Find files that need (re-)indexing (with pre-computed hashes)
-    let files_to_index: Vec<(&walker::WalkedFile, String)> = files
-        .iter()
-        .filter_map(|f| {
-            let hash = blake3::hash(f.content.as_bytes()).to_hex().to_string();
-            let needs_index = match idx.get_file_hash(&f.rel_path) {
+            let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+            let needs_index = match idx.get_file_hash(&file.rel_path) {
                 Ok(Some(stored_hash)) => stored_hash != hash,
                 _ => true,
             };
-            if needs_index {
-                Some((f, hash))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if !files_to_index.is_empty() {
-        status!(quiet, "Indexing {} files...", files_to_index.len());
-
-        let batch_size = 32;
-        let file_batches: Vec<&[(&walker::WalkedFile, String)]> =
-            files_to_index.chunks(batch_size).collect();
-
-        for (batch_idx, file_batch) in file_batches.iter().enumerate() {
-            let mut all_chunks = Vec::new();
-            let mut chunk_file_info: Vec<(String, String)> = Vec::new();
-
-            for (file, content_hash) in *file_batch {
-                let file_chunks = chunker::chunk_file(
-                    &file.rel_path,
-                    &file.content,
-                    args.chunk_size,
-                    args.chunk_overlap,
-                    embedder.tokenizer(),
-                );
-
-                for _ in &file_chunks {
-                    chunk_file_info.push((file.rel_path.clone(), content_hash.clone()));
-                }
-                all_chunks.extend(file_chunks);
-            }
-
-            if all_chunks.is_empty() {
+            if !needs_index {
                 continue;
             }
 
-            // Embed all chunks in sub-batches
-            let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
-            let embed_batch_size = 64;
-            let mut all_embeddings = Vec::new();
-            for text_batch in texts.chunks(embed_batch_size) {
-                let embeddings = embedder.embed_batch(text_batch)?;
-                all_embeddings.extend(embeddings);
-            }
+            needs_indexing_count += 1;
 
-            // Group chunks by file and insert into index
-            let mut current_file: Option<String> = None;
-            let mut file_chunks = Vec::new();
-            let mut file_embeddings = Vec::new();
-            let mut file_hash = String::new();
-
-            for (i, chunk) in all_chunks.iter().enumerate() {
-                let (ref path, ref hash) = chunk_file_info[i];
-
-                if current_file.as_ref() != Some(path) {
-                    if let Some(ref prev_path) = current_file {
-                        idx.upsert_file(prev_path, &file_hash, &file_chunks, &file_embeddings)?;
-                    }
-                    current_file = Some(path.clone());
-                    file_hash = hash.clone();
-                    file_chunks = Vec::new();
-                    file_embeddings = Vec::new();
-                }
-
-                file_chunks.push(chunk.clone());
-                file_embeddings.push(all_embeddings[i].clone());
-            }
-
-            if let Some(ref prev_path) = current_file {
-                idx.upsert_file(prev_path, &file_hash, &file_chunks, &file_embeddings)?;
-            }
-
-            if !quiet && std::io::stderr().is_terminal() {
-                eprint!(
-                    "\rIndexed {}/{} files...",
-                    ((batch_idx + 1) * batch_size).min(files_to_index.len()),
-                    files_to_index.len()
+            // Threshold check — fires when crossing the limit
+            if !threshold_prompted && threshold > 0 && needs_indexing_count >= threshold {
+                threshold_prompted = true;
+                eprintln!(
+                    "Warning: {} files need indexing so far (still scanning).",
+                    needs_indexing_count
                 );
+                if std::io::stdin().is_terminal() {
+                    eprint!("Continue? [y/N] ");
+                    std::io::stderr().flush().ok();
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if !input.trim().eq_ignore_ascii_case("y") {
+                        eprintln!("Aborted.");
+                        return Ok(false);
+                    }
+                }
+            }
+
+            batch.push((file, hash));
+            if batch.len() >= batch_size {
+                pipeline::process_batch(
+                    &mut embedder,
+                    &idx,
+                    &batch,
+                    args.chunk_size,
+                    args.chunk_overlap,
+                )?;
+                total_indexed += batch.len();
+                if !quiet && std::io::stderr().is_terminal() {
+                    eprint!("\rIndexed {} files...", total_indexed);
+                }
+                batch.clear();
             }
         }
 
-        status!(quiet, "\nIndexing complete.");
-    } else {
-        status!(quiet, "Index is up to date.");
-    }
+        // Flush remaining batch
+        if !batch.is_empty() {
+            pipeline::process_batch(
+                &mut embedder,
+                &idx,
+                &batch,
+                args.chunk_size,
+                args.chunk_overlap,
+            )?;
+            total_indexed += batch.len();
+            batch.clear();
+        }
+
+        // Join walker thread
+        match walker_join_handle.join() {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => anyhow::bail!("Walker thread panicked"),
+        }
+
+        status!(quiet, "Found {} files.", all_paths.len());
+
+        // Remove stale files from index
+        let removed = if walk_prefix.as_os_str().is_empty() {
+            idx.remove_stale_files(&all_paths)?
+        } else {
+            let prefix = format!("{}/", walk_prefix.display());
+            idx.remove_stale_files_under(&all_paths, &prefix)?
+        };
+        if removed > 0 {
+            status!(quiet, "Removed {} stale files from index.", removed);
+        }
+
+        if total_indexed > 0 {
+            status!(
+                quiet,
+                "\nIndexing complete. Indexed {} files.",
+                total_indexed
+            );
+        } else {
+            status!(quiet, "Index is up to date.");
+        }
+        (None, None)
+    };
 
     // Handle --index-only
     if args.index_only {
@@ -373,34 +373,79 @@ fn run() -> Result<bool> {
         None => return Ok(true),
     };
 
-    // Load all embeddings for search
-    let (chunks, embedding_matrix) = idx.load_all()?;
-    status!(quiet, "Loaded {} chunks for search.", chunks.len());
-
     if args.serve {
-        serve::run(
-            &mut embedder,
-            &chunks,
-            &embedding_matrix,
-            args.port,
-            args.top_k,
-            args.threshold,
-            quiet,
-        )?;
+        if let Some(rx) = streaming_rx {
+            serve::run_streaming(
+                &mut embedder,
+                &idx,
+                rx,
+                args.port,
+                args.top_k,
+                args.threshold,
+                quiet,
+                args.chunk_size,
+                args.chunk_overlap,
+                &cwd_suffix,
+            )?;
+            if let Some(h) = walker_handle {
+                let _ = h.join();
+            }
+        } else {
+            let (chunks, embedding_matrix) = idx.load_all()?;
+            let stats = idx.stats()?;
+            status!(
+                quiet,
+                "Serving index: {} files, {} chunks.",
+                stats.file_count,
+                stats.chunk_count
+            );
+            serve::run(
+                &mut embedder,
+                &chunks,
+                &embedding_matrix,
+                args.port,
+                args.top_k,
+                args.threshold,
+                quiet,
+            )?;
+        }
         return Ok(true);
     }
 
     if args.interactive {
-        tui::interactive::run(
-            &mut embedder,
-            &chunks,
-            &embedding_matrix,
-            &query,
-            args.top_k,
-            args.threshold,
-        )?;
+        if let Some(rx) = streaming_rx {
+            tui::interactive::run_streaming(
+                &mut embedder,
+                &idx,
+                rx,
+                &query,
+                args.top_k,
+                args.threshold,
+                args.chunk_size,
+                args.chunk_overlap,
+                &cwd_suffix,
+            )?;
+            if let Some(h) = walker_handle {
+                let _ = h.join();
+            }
+        } else {
+            let (chunks, embedding_matrix) = idx.load_all()?;
+            status!(quiet, "Loaded {} chunks for search.", chunks.len());
+            tui::interactive::run(
+                &mut embedder,
+                &chunks,
+                &embedding_matrix,
+                &query,
+                args.top_k,
+                args.threshold,
+            )?;
+        }
         return Ok(true);
     }
+
+    // Load all embeddings for search
+    let (chunks, embedding_matrix) = idx.load_all()?;
+    status!(quiet, "Loaded {} chunks for search.", chunks.len());
 
     // Embed query
     let query_embedding = embedder.embed(&query)?;

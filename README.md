@@ -41,11 +41,13 @@ vecgrep --index-only ./src   # build index without searching
 
 ## How it works
 
-1. **Walk** — discovers files using the same engine as ripgrep (`.gitignore`-aware, binary detection)
+1. **Walk** — discovers files on a background thread using the same engine as ripgrep (`.gitignore`-aware, binary detection), streaming them through a bounded channel
 2. **Chunk** — splits files into overlapping token-window chunks, snapped to line boundaries
 3. **Embed** — runs each chunk through the ONNX model to produce a 384-dimensional vector
 4. **Index** — caches embeddings in a local SQLite database (`.vecgrep/index.db`), keyed by BLAKE3 content hash so only changed files are re-embedded on subsequent runs
 5. **Search** — computes cosine similarity between your query embedding and all cached chunk embeddings, returns top-k results
+
+Walking and indexing overlap — the embedder processes files as the walker discovers them. In interactive (`-i`) and server (`--serve`) modes, results appear progressively as files are indexed.
 
 ## Why local-only?
 
