@@ -26,6 +26,12 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Handle --type-list (no model or index needed)
+    if args.type_list {
+        walker::print_type_list();
+        return Ok(());
+    }
+
     // Configure rayon thread pool
     if let Some(threads) = args.threads {
         rayon::ThreadPoolBuilder::new()
@@ -33,6 +39,8 @@ fn main() -> Result<()> {
             .build_global()
             .ok();
     }
+
+    let color_choice = output::resolve_color_choice(&args.color);
 
     // Determine the index root (first path, or cwd)
     let index_root = if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
@@ -89,7 +97,16 @@ fn main() -> Result<()> {
 
     // Walk files
     eprintln!("Scanning files...");
-    let files = walker::walk_paths(&args.paths, &args.file_type, &args.glob)?;
+    let walk_opts = walker::WalkOptions {
+        file_types: &args.file_type,
+        file_types_not: &args.file_type_not,
+        globs: &args.glob,
+        hidden: args.hidden,
+        follow: args.follow,
+        no_ignore: args.no_ignore,
+        max_depth: args.max_depth,
+    };
+    let files = walker::walk_paths(&args.paths, &walk_opts)?;
     eprintln!("Found {} files.", files.len());
 
     // Remove stale files from index
@@ -235,7 +252,7 @@ fn main() -> Result<()> {
                 if args.json {
                     output::print_json(&[result])?;
                 } else {
-                    output::print_results(&[result], args.context)?;
+                    output::print_results(&[result], args.context, color_choice)?;
                 }
             }
             None => {
@@ -261,8 +278,12 @@ fn main() -> Result<()> {
 
     if args.json {
         output::print_json(&results)?;
+    } else if args.files_with_matches {
+        output::print_files_with_matches(&results, color_choice)?;
+    } else if args.count {
+        output::print_count(&results, color_choice)?;
     } else {
-        output::print_results(&results, args.context)?;
+        output::print_results(&results, args.context, color_choice)?;
     }
 
     Ok(())

@@ -1,32 +1,43 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
+use crate::cli;
 use crate::types::SearchResult;
 
+pub fn resolve_color_choice(color: &cli::ColorChoice) -> ColorChoice {
+    match color {
+        cli::ColorChoice::Always => ColorChoice::Always,
+        cli::ColorChoice::Never => ColorChoice::Never,
+        cli::ColorChoice::Auto => {
+            if atty::is(atty::Stream::Stdout) {
+                ColorChoice::Auto
+            } else {
+                ColorChoice::Never
+            }
+        }
+    }
+}
+
 /// Print search results in colored ripgrep-style format.
-pub fn print_results(results: &[SearchResult], context_lines: usize) -> std::io::Result<()> {
-    let color_choice = if atty::is(atty::Stream::Stdout) {
-        ColorChoice::Auto
-    } else {
-        ColorChoice::Never
-    };
-    let mut stdout = StandardStream::stdout(color_choice);
+pub fn print_results(
+    results: &[SearchResult],
+    _context_lines: usize,
+    color: ColorChoice,
+) -> std::io::Result<()> {
+    let mut stdout = StandardStream::stdout(color);
 
     for (i, result) in results.iter().enumerate() {
         if i > 0 {
             writeln!(stdout)?;
         }
-        print_result(&mut stdout, result, context_lines)?;
+        print_result(&mut stdout, result)?;
     }
 
     Ok(())
 }
 
-fn print_result(
-    stdout: &mut StandardStream,
-    result: &SearchResult,
-    _context_lines: usize,
-) -> std::io::Result<()> {
+fn print_result(stdout: &mut StandardStream, result: &SearchResult) -> std::io::Result<()> {
     // File path in magenta
     stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
     write!(stdout, "{}", result.chunk.file_path)?;
@@ -57,6 +68,46 @@ fn print_result(
         stdout.reset()?;
         stdout.set_color(ColorSpec::new().set_fg(Some(Color::White)))?;
         writeln!(stdout, "{}", line)?;
+        stdout.reset()?;
+    }
+
+    Ok(())
+}
+
+/// Print only unique file paths from results.
+pub fn print_files_with_matches(
+    results: &[SearchResult],
+    color: ColorChoice,
+) -> std::io::Result<()> {
+    let mut stdout = StandardStream::stdout(color);
+    let mut seen = std::collections::HashSet::new();
+
+    for result in results {
+        if seen.insert(&result.chunk.file_path) {
+            stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
+            writeln!(stdout, "{}", result.chunk.file_path)?;
+            stdout.reset()?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Print count of matching chunks per file.
+pub fn print_count(results: &[SearchResult], color: ColorChoice) -> std::io::Result<()> {
+    let mut stdout = StandardStream::stdout(color);
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for result in results {
+        *counts.entry(&result.chunk.file_path).or_insert(0) += 1;
+    }
+
+    for (path, count) in &counts {
+        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
+        write!(stdout, "{}", path)?;
+        stdout.reset()?;
+        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+        writeln!(stdout, ":{}", count)?;
         stdout.reset()?;
     }
 
