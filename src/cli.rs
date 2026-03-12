@@ -83,6 +83,10 @@ pub struct Args {
     pub chunk_overlap: usize,
 
     // --- rg-compatible flags ---
+    /// Suppress all status messages on stderr.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
     /// Search hidden files and directories.
     #[arg(short = '.', long)]
     pub hidden: bool,
