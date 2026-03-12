@@ -1,4 +1,11 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -8,7 +15,7 @@ use clap::Parser;
 )]
 pub struct Args {
     /// The search query (natural language or code snippet).
-    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only"])]
+    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list"])]
     pub query: Option<String>,
 
     /// Paths to search (files or directories). Defaults to current directory.
@@ -20,18 +27,22 @@ pub struct Args {
     pub top_k: usize,
 
     /// Minimum similarity threshold (0.0–1.0).
-    #[arg(short = 't', long, default_value_t = 0.3)]
+    #[arg(long, default_value_t = 0.3)]
     pub threshold: f32,
 
     /// Interactive TUI mode.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
-    /// Filter by file type (e.g., rust, python, js).
-    #[arg(short = 'T', long = "type")]
+    /// Filter by file type (e.g., rust, python, js). Can be specified multiple times.
+    #[arg(short = 't', long = "type")]
     pub file_type: Option<Vec<String>>,
 
-    /// Filter by glob pattern.
+    /// Negative file type filter. Can be specified multiple times.
+    #[arg(short = 'T', long = "type-not")]
+    pub file_type_not: Option<Vec<String>>,
+
+    /// Filter by glob pattern. Can be specified multiple times.
     #[arg(short = 'g', long)]
     pub glob: Option<Vec<String>>,
 
@@ -70,4 +81,37 @@ pub struct Args {
     /// Overlap tokens between chunks.
     #[arg(long, default_value_t = 100)]
     pub chunk_overlap: usize,
+
+    // --- rg-compatible flags ---
+    /// Search hidden files and directories.
+    #[arg(short = '.', long)]
+    pub hidden: bool,
+
+    /// Follow symbolic links.
+    #[arg(short = 'L', long)]
+    pub follow: bool,
+
+    /// Print only the paths of files with matches (no content).
+    #[arg(short = 'l', long)]
+    pub files_with_matches: bool,
+
+    /// Print a count of matching chunks per file.
+    #[arg(short = 'c', long)]
+    pub count: bool,
+
+    /// Don't respect ignore files (.gitignore, .ignore, etc.).
+    #[arg(long)]
+    pub no_ignore: bool,
+
+    /// Limit directory traversal depth.
+    #[arg(short = 'd', long)]
+    pub max_depth: Option<usize>,
+
+    /// Show all supported file types.
+    #[arg(long)]
+    pub type_list: bool,
+
+    /// When to use colored output.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
 }

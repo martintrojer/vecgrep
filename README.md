@@ -57,12 +57,21 @@ Arguments:
 
 Options:
   -k, --top-k <N>              Number of results [default: 10]
-  -t, --threshold <F>          Minimum similarity 0.0–1.0 [default: 0.3]
+      --threshold <F>           Minimum similarity 0.0–1.0 [default: 0.3]
   -i, --interactive             Interactive TUI mode
-  -T, --type <TYPE>             Filter by file type (rust, python, js, ...)
+  -t, --type <TYPE>             Filter by file type (rust, python, js, ...)
+  -T, --type-not <TYPE>         Exclude file type
   -g, --glob <PATTERN>          Filter by glob
   -C, --context <N>             Context lines around match [default: 3]
   -j, --threads <N>             Indexing threads
+  -l, --files-with-matches      Print only file paths with matches
+  -c, --count                   Print count of matching chunks per file
+  -., --hidden                  Search hidden files and directories
+  -L, --follow                  Follow symbolic links
+  -d, --max-depth <N>           Limit directory traversal depth
+      --no-ignore               Don't respect .gitignore
+      --type-list               Show all supported file types
+      --color <WHEN>            When to use color (auto, always, never)
       --reindex                 Force full re-index
       --index-only              Build index without searching
       --stats                   Show index statistics

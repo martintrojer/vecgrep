@@ -43,6 +43,8 @@ walker  →  chunker  →  embedder  →  index (SQLite)  →  search  →  outp
 - **Cache invalidation**: BLAKE3 content hash per file. If model name or chunk params change (stored in `meta` table as JSON), the entire index is rebuilt.
 - **Index location**: `.vecgrep/index.db` in the search root directory. Automatically added to `.gitignore`.
 - **Embeddings stored as BLOB**: `Vec<f32>` → little-endian bytes in SQLite, reconstituted into `ndarray::Array2<f32>` for search.
+- **CLI flags follow ripgrep conventions**: `-t` for type, `-g` for glob, `-C` for context, `-l` for files-with-matches, `-c` for count, `-.` for hidden, `-L` for follow, etc. Any new CLI flag must be checked against `rg --help` for compatibility — do not reuse a short flag that means something different in rg.
+
 **Module responsibilities:**
 
 | Module | Role |
