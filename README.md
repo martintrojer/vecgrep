@@ -75,6 +75,10 @@ The model is downloaded once at build time from HuggingFace, cached locally, and
 
 ## Install
 
+Pre-built binaries for macOS and Linux are available on the [releases page](https://github.com/mtrojer/vecgrep/releases). Download the appropriate archive, extract it, and place the `vecgrep` binary on your `PATH`.
+
+To build from source:
+
 ```bash
 cargo install --path .
 ```
