@@ -4,7 +4,7 @@ pub mod interactive {
     use crate::types::{Chunk, SearchResult};
     use anyhow::Result;
     use crossterm::{
-        event::{self, Event, KeyCode, KeyModifiers},
+        event::{self, Event, KeyCode},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
@@ -14,7 +14,7 @@ pub mod interactive {
         layout::{Constraint, Direction, Layout},
         style::{Color, Modifier, Style},
         text::{Line, Span},
-        widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+        widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
         Terminal,
     };
     use std::io;
@@ -27,7 +27,7 @@ pub mod interactive {
         initial_query: &str,
         top_k: usize,
         threshold: f32,
-    ) -> Result<Option<SearchResult>> {
+    ) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
@@ -59,7 +59,7 @@ pub mod interactive {
         initial_query: &str,
         top_k: usize,
         threshold: f32,
-    ) -> Result<Option<SearchResult>> {
+    ) -> Result<()> {
         let mut query = initial_query.to_string();
         let mut results: Vec<SearchResult> = Vec::new();
         let mut list_state = ListState::default();
@@ -67,6 +67,11 @@ pub mod interactive {
         let mut last_search = Instant::now() - Duration::from_secs(1);
         let mut needs_search = true;
         let debounce = Duration::from_millis(300);
+
+        // Preview state
+        let mut preview_file_cache: Option<(String, String)> = None; // (path, content)
+        let mut preview_scroll: u16 = 0;
+        let mut last_selected: Option<usize> = None;
 
         // Initial search
         if !query.is_empty() {
@@ -80,6 +85,33 @@ pub mod interactive {
         }
 
         loop {
+            // Detect selection change and update preview cache/scroll
+            let current_selected = list_state.selected();
+            if current_selected != last_selected {
+                last_selected = current_selected;
+                if let Some(idx) = current_selected {
+                    if let Some(result) = results.get(idx) {
+                        let path = &result.chunk.file_path;
+                        let needs_load = match &preview_file_cache {
+                            Some((cached_path, _)) => cached_path != path,
+                            None => true,
+                        };
+                        if needs_load {
+                            if let Ok(content) = std::fs::read_to_string(path) {
+                                preview_file_cache = Some((path.clone(), content));
+                            } else {
+                                preview_file_cache = None;
+                            }
+                        }
+                        // Auto-scroll to chunk (3 lines above start_line)
+                        preview_scroll = (result.chunk.start_line.saturating_sub(4)) as u16;
+                    }
+                }
+            }
+
+            let preview_scroll_val = preview_scroll;
+            let preview_cache_ref = &preview_file_cache;
+
             terminal.draw(|f| {
                 let main_chunks = Layout::default()
                     .direction(Direction::Vertical)
@@ -108,7 +140,14 @@ pub mod interactive {
                         .split(main_chunks[1]);
 
                     render_list(f, &results, &mut list_state, result_area[0]);
-                    render_preview(f, &results, &list_state, result_area[1]);
+                    render_preview(
+                        f,
+                        &results,
+                        &list_state,
+                        result_area[1],
+                        preview_cache_ref,
+                        preview_scroll_val,
+                    );
                 } else {
                     render_list(f, &results, &mut list_state, main_chunks[1]);
                 }
@@ -128,7 +167,7 @@ pub mod interactive {
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(":select "),
+                    Span::raw(":view "),
                     Span::styled(
                         "Tab",
                         Style::default()
@@ -137,12 +176,12 @@ pub mod interactive {
                     ),
                     Span::raw(":preview "),
                     Span::styled(
-                        "Ctrl+O",
+                        "PgUp/PgDn",
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(":editor "),
+                    Span::raw(":scroll "),
                     Span::raw(format!(" | {} results", results.len())),
                 ]);
                 let status_bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
@@ -153,10 +192,27 @@ pub mod interactive {
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
-                        KeyCode::Esc => return Ok(None),
+                        KeyCode::Esc => return Ok(()),
                         KeyCode::Enter => {
                             if let Some(idx) = list_state.selected() {
-                                return Ok(results.get(idx).cloned());
+                                if let Some(result) = results.get(idx) {
+                                    let line = result.chunk.start_line;
+                                    let file = result.chunk.file_path.clone();
+
+                                    // Exit TUI
+                                    disable_raw_mode()?;
+                                    execute!(io::stdout(), LeaveAlternateScreen)?;
+
+                                    // Open pager
+                                    let pager = std::env::var("PAGER")
+                                        .unwrap_or_else(|_| "less".to_string());
+                                    let _ = std::process::Command::new(&pager)
+                                        .arg(format!("+{}G", line))
+                                        .arg(&file)
+                                        .status();
+
+                                    return Ok(());
+                                }
                             }
                         }
                         KeyCode::Tab => {
@@ -176,28 +232,11 @@ pub mod interactive {
                                 }
                             }
                         }
-                        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            // Open in editor
-                            if let Some(idx) = list_state.selected() {
-                                if let Some(result) = results.get(idx) {
-                                    let editor = std::env::var("EDITOR")
-                                        .unwrap_or_else(|_| "vim".to_string());
-                                    let line = result.chunk.start_line;
-                                    let file = &result.chunk.file_path;
-
-                                    // Temporarily exit TUI
-                                    disable_raw_mode()?;
-                                    execute!(io::stdout(), LeaveAlternateScreen)?;
-
-                                    let _ = std::process::Command::new(&editor)
-                                        .arg(format!("+{}", line))
-                                        .arg(file)
-                                        .status();
-
-                                    enable_raw_mode()?;
-                                    execute!(io::stdout(), EnterAlternateScreen)?;
-                                }
-                            }
+                        KeyCode::PageUp => {
+                            preview_scroll = preview_scroll.saturating_sub(10);
+                        }
+                        KeyCode::PageDown => {
+                            preview_scroll = preview_scroll.saturating_add(10);
                         }
                         KeyCode::Backspace => {
                             query.pop();
@@ -225,6 +264,8 @@ pub mod interactive {
                     }
                 }
                 needs_search = false;
+                // Reset selection tracking so preview updates
+                last_selected = None;
             }
         }
     }
@@ -279,21 +320,41 @@ pub mod interactive {
         results: &[SearchResult],
         list_state: &ListState,
         area: ratatui::layout::Rect,
+        file_cache: &Option<(String, String)>,
+        scroll: u16,
     ) {
         let content = if let Some(idx) = list_state.selected() {
             if let Some(result) = results.get(idx) {
-                let mut lines = Vec::new();
-                for (i, line) in result.chunk.text.lines().enumerate() {
-                    let line_num = result.chunk.start_line + i;
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{:>5} ", line_num),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::raw(line),
-                    ]));
+                if let Some((_, ref file_content)) = file_cache {
+                    let chunk_start = result.chunk.start_line;
+                    let chunk_end = result.chunk.end_line;
+                    let highlight_style = Style::default().bg(Color::DarkGray);
+
+                    file_content
+                        .lines()
+                        .enumerate()
+                        .map(|(i, line)| {
+                            let line_num = i + 1; // 1-based
+                            let in_chunk = line_num >= chunk_start && line_num <= chunk_end;
+                            let num_style = if in_chunk {
+                                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            };
+                            let text_style = if in_chunk {
+                                highlight_style
+                            } else {
+                                Style::default()
+                            };
+                            Line::from(vec![
+                                Span::styled(format!("{:>5} ", line_num), num_style),
+                                Span::styled(line, text_style),
+                            ])
+                        })
+                        .collect()
+                } else {
+                    vec![Line::raw("Unable to read file")]
                 }
-                lines
             } else {
                 vec![Line::raw("No selection")]
             }
@@ -303,7 +364,7 @@ pub mod interactive {
 
         let preview = Paragraph::new(content)
             .block(Block::default().borders(Borders::ALL).title(" Preview "))
-            .wrap(Wrap { trim: false });
+            .scroll((scroll, 0));
 
         f.render_widget(preview, area);
     }
