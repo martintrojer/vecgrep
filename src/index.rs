@@ -29,6 +29,14 @@ impl Index {
         Ok(index)
     }
 
+    /// Open an in-memory database (for testing).
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
+        let index = Self { conn };
+        index.create_tables()?;
+        Ok(index)
+    }
+
     fn create_tables(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
@@ -265,7 +273,7 @@ pub struct IndexStats {
 }
 
 /// Convert f32 embedding to bytes for SQLite BLOB storage.
-fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+pub(crate) fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(embedding.len() * 4);
     for &val in embedding {
         bytes.extend_from_slice(&val.to_le_bytes());
@@ -274,13 +282,13 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
 }
 
 /// Convert bytes from SQLite BLOB to f32 embedding.
-fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+pub(crate) fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
 }
 
-fn ensure_gitignore_entry(gitignore_path: &Path) {
+pub(crate) fn ensure_gitignore_entry(gitignore_path: &Path) {
     let entry = ".vecgrep/";
     let content = std::fs::read_to_string(gitignore_path).unwrap_or_default();
     if !content.lines().any(|line| line.trim() == entry) {
@@ -291,5 +299,313 @@ fn ensure_gitignore_entry(gitignore_path: &Path) {
         new_content.push_str(entry);
         new_content.push('\n');
         let _ = std::fs::write(gitignore_path, new_content);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Chunk, IndexConfig};
+    use tempfile::TempDir;
+
+    // --- Unit tests for blob conversion ---
+
+    #[test]
+    fn test_embedding_blob_roundtrip() {
+        let original = vec![1.0f32, -0.5, 0.0, 3.14, f32::MIN, f32::MAX];
+        let blob = embedding_to_blob(&original);
+        let recovered = blob_to_embedding(&blob);
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_embedding_blob_empty() {
+        let original: Vec<f32> = vec![];
+        let blob = embedding_to_blob(&original);
+        assert!(blob.is_empty());
+        let recovered = blob_to_embedding(&blob);
+        assert!(recovered.is_empty());
+    }
+
+    // --- Unit tests for ensure_gitignore_entry ---
+
+    #[test]
+    fn test_ensure_gitignore_new_file() {
+        let dir = TempDir::new().unwrap();
+        let gitignore = dir.path().join(".gitignore");
+        ensure_gitignore_entry(&gitignore);
+        let content = std::fs::read_to_string(&gitignore).unwrap();
+        assert!(content.contains(".vecgrep/"));
+    }
+
+    #[test]
+    fn test_ensure_gitignore_already_present() {
+        let dir = TempDir::new().unwrap();
+        let gitignore = dir.path().join(".gitignore");
+        std::fs::write(&gitignore, ".vecgrep/\n").unwrap();
+        ensure_gitignore_entry(&gitignore);
+        let content = std::fs::read_to_string(&gitignore).unwrap();
+        // Should appear exactly once
+        assert_eq!(content.matches(".vecgrep/").count(), 1);
+    }
+
+    #[test]
+    fn test_ensure_gitignore_appends() {
+        let dir = TempDir::new().unwrap();
+        let gitignore = dir.path().join(".gitignore");
+        std::fs::write(&gitignore, "target/\nnode_modules/").unwrap();
+        ensure_gitignore_entry(&gitignore);
+        let content = std::fs::read_to_string(&gitignore).unwrap();
+        assert!(content.contains("target/"));
+        assert!(content.contains(".vecgrep/"));
+        // Should have added a newline before the entry since the file didn't end with one
+        assert!(content.contains("node_modules/\n.vecgrep/"));
+    }
+
+    // --- Integration tests using in-memory DB ---
+
+    #[test]
+    fn test_open_and_create_tables() {
+        let index = Index::open_in_memory().unwrap();
+        // Verify tables exist by querying them
+        let count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_config_roundtrip() {
+        let index = Index::open_in_memory().unwrap();
+        let config = IndexConfig {
+            model_name: "test-model".to_string(),
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+        index.set_config(&config).unwrap();
+        assert!(index.check_config(&config).unwrap());
+    }
+
+    #[test]
+    fn test_config_mismatch() {
+        let index = Index::open_in_memory().unwrap();
+        let config1 = IndexConfig {
+            model_name: "model-a".to_string(),
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+        let config2 = IndexConfig {
+            model_name: "model-b".to_string(),
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+        index.set_config(&config1).unwrap();
+        assert!(!index.check_config(&config2).unwrap());
+    }
+
+    fn make_test_embedding(dim: usize, seed: f32) -> Vec<f32> {
+        (0..dim).map(|i| (i as f32 * seed).sin()).collect()
+    }
+
+    #[test]
+    fn test_upsert_and_load() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let chunks = vec![
+            Chunk {
+                file_path: "test.rs".to_string(),
+                text: "fn main() {}".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            Chunk {
+                file_path: "test.rs".to_string(),
+                text: "fn helper() {}".to_string(),
+                start_line: 3,
+                end_line: 3,
+            },
+        ];
+        let embeddings = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
+
+        index
+            .upsert_file("test.rs", "abc123", &chunks, &embeddings)
+            .unwrap();
+
+        let (loaded_chunks, loaded_matrix) = index.load_all().unwrap();
+        assert_eq!(loaded_chunks.len(), 2);
+        assert_eq!(loaded_matrix.nrows(), 2);
+        assert_eq!(loaded_matrix.ncols(), dim);
+        assert_eq!(loaded_chunks[0].text, "fn main() {}");
+        assert_eq!(loaded_chunks[1].text, "fn helper() {}");
+    }
+
+    #[test]
+    fn test_upsert_replaces() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let chunks_v1 = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "version 1".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb_v1 = vec![make_test_embedding(dim, 1.0)];
+        index
+            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1)
+            .unwrap();
+
+        let chunks_v2 = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "version 2".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb_v2 = vec![make_test_embedding(dim, 2.0)];
+        index
+            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2)
+            .unwrap();
+
+        let (loaded_chunks, _) = index.load_all().unwrap();
+        assert_eq!(loaded_chunks.len(), 1);
+        assert_eq!(loaded_chunks[0].text, "version 2");
+    }
+
+    #[test]
+    fn test_get_file_hash() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let chunks = vec![Chunk {
+            file_path: "test.rs".to_string(),
+            text: "hello".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let embeddings = vec![make_test_embedding(dim, 1.0)];
+        index
+            .upsert_file("test.rs", "myhash", &chunks, &embeddings)
+            .unwrap();
+
+        assert_eq!(
+            index.get_file_hash("test.rs").unwrap(),
+            Some("myhash".to_string())
+        );
+        assert_eq!(index.get_file_hash("nonexistent.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn test_remove_stale_files() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        for name in &["a.rs", "b.rs", "c.rs"] {
+            let chunks = vec![Chunk {
+                file_path: name.to_string(),
+                text: format!("content of {}", name),
+                start_line: 1,
+                end_line: 1,
+            }];
+            let emb = vec![make_test_embedding(dim, 1.0)];
+            index.upsert_file(name, "hash", &chunks, &emb).unwrap();
+        }
+
+        // Only a.rs and c.rs remain on disk
+        let current = vec!["a.rs".to_string(), "c.rs".to_string()];
+        let removed = index.remove_stale_files(&current).unwrap();
+        assert_eq!(removed, 1);
+
+        let (loaded, _) = index.load_all().unwrap();
+        assert_eq!(loaded.len(), 2);
+        let paths: Vec<&str> = loaded.iter().map(|c| c.file_path.as_str()).collect();
+        assert!(paths.contains(&"a.rs"));
+        assert!(paths.contains(&"c.rs"));
+        assert!(!paths.contains(&"b.rs"));
+    }
+
+    #[test]
+    fn test_clear() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let chunks = vec![Chunk {
+            file_path: "test.rs".to_string(),
+            text: "hello".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let embeddings = vec![make_test_embedding(dim, 1.0)];
+        index
+            .upsert_file("test.rs", "hash", &chunks, &embeddings)
+            .unwrap();
+        index
+            .set_config(&IndexConfig {
+                model_name: "m".to_string(),
+                chunk_size: 1,
+                chunk_overlap: 0,
+            })
+            .unwrap();
+
+        index.clear().unwrap();
+
+        let (loaded, _) = index.load_all().unwrap();
+        assert!(loaded.is_empty());
+        assert_eq!(index.get_file_hash("test.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn test_stats() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        // stats() calls db_path() which fails for in-memory DBs, so we test the counts directly
+        let file_count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        let chunk_count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(file_count, 0);
+        assert_eq!(chunk_count, 0);
+
+        // Add some data
+        let chunks = vec![
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "one".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "two".to_string(),
+                start_line: 2,
+                end_line: 2,
+            },
+        ];
+        let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
+        index.upsert_file("a.rs", "hash", &chunks, &emb).unwrap();
+
+        let file_count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        let chunk_count: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(file_count, 1);
+        assert_eq!(chunk_count, 2);
     }
 }

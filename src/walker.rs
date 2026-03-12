@@ -132,3 +132,169 @@ fn read_file(path: &Path) -> Result<Option<WalkedFile>> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn default_opts<'a>() -> WalkOptions<'a> {
+        WalkOptions {
+            file_types: &None,
+            file_types_not: &None,
+            globs: &None,
+            hidden: false,
+            follow: false,
+            no_ignore: false,
+            max_depth: None,
+        }
+    }
+
+    #[test]
+    fn test_walk_single_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "hello world").unwrap();
+
+        let paths = vec![file.to_string_lossy().to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].content, "hello world");
+    }
+
+    #[test]
+    fn test_walk_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "aaa").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "bbb").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/c.txt"), "ccc").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert_eq!(files.len(), 3);
+    }
+
+    #[test]
+    fn test_walk_skips_binary() {
+        let dir = TempDir::new().unwrap();
+        let bin_path = dir.path().join("data.bin");
+        let mut f = std::fs::File::create(&bin_path).unwrap();
+        f.write_all(&[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81]).unwrap();
+
+        // Also create a valid text file to ensure we get at least one result
+        std::fs::write(dir.path().join("valid.txt"), "text content").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("valid.txt")));
+        // Binary file should not appear (either skipped by read or by ignore crate)
+        assert!(!names.iter().any(|n| n.contains("data.bin")));
+    }
+
+    #[test]
+    fn test_walk_skips_empty() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("empty.txt"), "").unwrap();
+        std::fs::write(dir.path().join("notempty.txt"), "content").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].rel_path.contains("notempty.txt"));
+    }
+
+    #[test]
+    fn test_walk_respects_gitignore() {
+        let dir = TempDir::new().unwrap();
+        // Initialize a git repo so .gitignore is respected
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(dir.path().join("app.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("debug.log"), "log data").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("app.rs")));
+        assert!(!names.iter().any(|n| n.contains("debug.log")));
+    }
+
+    #[test]
+    fn test_walk_hidden_flag() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".hidden"), "secret").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "hello").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+
+        // Without hidden flag: should not find hidden files
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(!names.iter().any(|n| n.contains(".hidden")));
+
+        // With hidden flag: should find hidden files
+        let opts = WalkOptions {
+            hidden: true,
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains(".hidden")));
+    }
+
+    #[test]
+    fn test_walk_max_depth() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("top.txt"), "top level").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/deep.txt"), "deep").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = WalkOptions {
+            max_depth: Some(1),
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].rel_path.contains("top.txt"));
+    }
+
+    #[test]
+    fn test_walk_type_filter() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("code.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("readme.md"), "# Hello").unwrap();
+        std::fs::write(dir.path().join("data.json"), "{}").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let rust_type = Some(vec!["rust".to_string()]);
+        let opts = WalkOptions {
+            file_types: &rust_type,
+            file_types_not: &None,
+            globs: &None,
+            hidden: false,
+            follow: false,
+            no_ignore: false,
+            max_depth: None,
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].rel_path.contains("code.rs"));
+    }
+}

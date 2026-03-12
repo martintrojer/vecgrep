@@ -118,4 +118,82 @@ mod tests {
         let results = search(&query, &embeddings, 10, 0.0, &chunks);
         assert!(results.is_empty());
     }
+
+    #[test]
+    fn test_search_top_k_larger_than_results() {
+        let dim = 4;
+        let embeddings = Array2::from_shape_vec(
+            (3, dim),
+            vec![
+                1.0, 0.0, 0.0, 0.0, // chunk 0
+                0.0, 1.0, 0.0, 0.0, // chunk 1
+                0.5, 0.5, 0.0, 0.0, // chunk 2
+            ],
+        )
+        .unwrap();
+        let chunks = vec![
+            dummy_chunk("chunk 0"),
+            dummy_chunk("chunk 1"),
+            dummy_chunk("chunk 2"),
+        ];
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        // top_k=100 but only 3 chunks — should return all 3
+        let results = search(&query, &embeddings, 100, 0.0, &chunks);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_search_descending_order() {
+        let dim = 4;
+        let embeddings = Array2::from_shape_vec(
+            (4, dim),
+            vec![
+                0.0, 0.0, 1.0, 0.0, // chunk 0: sim = 0.0
+                0.5, 0.5, 0.0, 0.0, // chunk 1: sim = 0.5
+                1.0, 0.0, 0.0, 0.0, // chunk 2: sim = 1.0
+                0.7, 0.3, 0.0, 0.0, // chunk 3: sim = 0.7
+            ],
+        )
+        .unwrap();
+        let chunks = vec![
+            dummy_chunk("chunk 0"),
+            dummy_chunk("chunk 1"),
+            dummy_chunk("chunk 2"),
+            dummy_chunk("chunk 3"),
+        ];
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        let results = search(&query, &embeddings, 10, 0.0, &chunks);
+        // Verify descending order
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].score >= results[i].score,
+                "Results not in descending order: {} < {}",
+                results[i - 1].score,
+                results[i].score
+            );
+        }
+        // First result should be chunk 2 (sim = 1.0)
+        assert_eq!(results[0].chunk.text, "chunk 2");
+    }
+
+    #[test]
+    fn test_search_all_below_threshold() {
+        let dim = 4;
+        let embeddings = Array2::from_shape_vec(
+            (2, dim),
+            vec![
+                0.0, 1.0, 0.0, 0.0, // chunk 0: sim = 0.0
+                0.0, 0.0, 1.0, 0.0, // chunk 1: sim = 0.0
+            ],
+        )
+        .unwrap();
+        let chunks = vec![dummy_chunk("chunk 0"), dummy_chunk("chunk 1")];
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+
+        // Threshold of 0.5 — both have sim = 0.0
+        let results = search(&query, &embeddings, 10, 0.5, &chunks);
+        assert!(results.is_empty());
+    }
 }

@@ -1,21 +1,12 @@
-mod chunker;
-mod cli;
-mod embedder;
-mod index;
-mod output;
-mod search;
-mod tui;
-mod types;
-mod walker;
-
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::Path;
 
-use cli::Args;
-use embedder::Embedder;
-use index::Index;
-use types::IndexConfig;
+use vecgrep::cli::Args;
+use vecgrep::embedder::Embedder;
+use vecgrep::index::Index;
+use vecgrep::types::IndexConfig;
+use vecgrep::{chunker, output, search, tui, walker};
 
 fn main() -> Result<()> {
     // Initialize tracing from VECGREP_LOG env var

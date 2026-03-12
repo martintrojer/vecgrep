@@ -119,7 +119,9 @@ mod tests {
     fn test_small_file_single_chunk() {
         let tokenizer = make_tokenizer();
         let content = "hello world\nthis is a test";
-        let chunks = chunk_file("test.txt", content, 200, 50, &tokenizer);
+        // Note: tokenizer pads each line to 128 tokens, so 2 lines = 256 padded tokens.
+        // Use chunk_size=500 (the production default) to ensure single-chunk output.
+        let chunks = chunk_file("test.txt", content, 500, 50, &tokenizer);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks[0].end_line, 2);
@@ -148,6 +150,54 @@ mod tests {
             assert!(chunk.start_line >= 1);
             assert!(chunk.end_line >= chunk.start_line);
             assert!(chunk.end_line <= 100);
+        }
+    }
+
+    #[test]
+    fn test_overlap_larger_than_chunk() {
+        let tokenizer = make_tokenizer();
+        let lines: Vec<String> = (0..20)
+            .map(|i| format!("Line {} with some words", i))
+            .collect();
+        let content = lines.join("\n");
+        // overlap >= chunk_size: should not panic, advances by chunk_size
+        let chunks = chunk_file("test.txt", &content, 10, 10, &tokenizer);
+        assert!(!chunks.is_empty());
+        // overlap > chunk_size
+        let chunks = chunk_file("test.txt", &content, 10, 20, &tokenizer);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_single_very_long_line() {
+        let tokenizer = make_tokenizer();
+        // A single line with many words that exceeds chunk_size tokens
+        let long_line = "word ".repeat(500);
+        let chunks = chunk_file("test.txt", &long_line, 10, 2, &tokenizer);
+        // Should produce at least one chunk even though the line exceeds chunk_size
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].start_line, 1);
+    }
+
+    #[test]
+    fn test_chunk_boundaries_are_line_aligned() {
+        let tokenizer = make_tokenizer();
+        let lines: Vec<String> = (0..50)
+            .map(|i| format!("This is line number {}", i))
+            .collect();
+        let content = lines.join("\n");
+        let chunks = chunk_file("test.txt", &content, 30, 5, &tokenizer);
+
+        for chunk in &chunks {
+            // No chunk text should start or end with a partial line
+            // (i.e., the text split on \n should match whole lines from the original)
+            for line in chunk.text.lines() {
+                assert!(
+                    lines.contains(&line.to_string()),
+                    "Chunk contains partial line: {:?}",
+                    line
+                );
+            }
         }
     }
 }

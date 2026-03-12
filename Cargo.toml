@@ -40,6 +40,9 @@ nucleo = "0.5"
 cuda = []
 coreml = []
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
 sha2 = "0.10"

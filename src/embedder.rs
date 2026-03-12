@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_embed_single() {
-        let embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new().unwrap();
         let embedding = embedder.embed("hello world").unwrap();
         assert_eq!(embedding.len(), EMBEDDING_DIM);
 
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_embed_batch() {
-        let embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new().unwrap();
         let embeddings = embedder
             .embed_batch(&["hello world", "semantic search"])
             .unwrap();
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_semantic_similarity() {
-        let embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new().unwrap();
         let e1 = embedder.embed("error handling in network code").unwrap();
         let e2 = embedder
             .embed("dealing with exceptions in networking")
