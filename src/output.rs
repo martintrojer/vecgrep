@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
+use std::io::IsTerminal;
+
 use crate::cli;
 use crate::types::SearchResult;
 
@@ -10,7 +12,7 @@ pub fn resolve_color_choice(color: &cli::ColorChoice) -> ColorChoice {
         cli::ColorChoice::Always => ColorChoice::Always,
         cli::ColorChoice::Never => ColorChoice::Never,
         cli::ColorChoice::Auto => {
-            if atty::is(atty::Stream::Stdout) {
+            if std::io::stdout().is_terminal() {
                 ColorChoice::Auto
             } else {
                 ColorChoice::Never

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::io::IsTerminal;
 use std::path::Path;
 
 use vecgrep::cli::Args;
@@ -8,7 +9,33 @@ use vecgrep::index::Index;
 use vecgrep::types::IndexConfig;
 use vecgrep::{chunker, output, search, tui, walker};
 
-fn main() -> Result<()> {
+/// Print a status message to stderr unless --quiet is set.
+macro_rules! status {
+    ($quiet:expr, $($arg:tt)*) => {
+        if !$quiet {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+fn main() {
+    std::process::exit(match run() {
+        Ok(matched) => {
+            if matched {
+                0
+            } else {
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("{:#}", e);
+            2
+        }
+    });
+}
+
+/// Returns Ok(true) if matches were found, Ok(false) if no matches.
+fn run() -> Result<bool> {
     // Initialize tracing from VECGREP_LOG env var
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_env("VECGREP_LOG"))
@@ -20,7 +47,7 @@ fn main() -> Result<()> {
     // Handle --type-list (no model or index needed)
     if args.type_list {
         walker::print_type_list();
-        return Ok(());
+        return Ok(true);
     }
 
     // Configure rayon thread pool
@@ -40,17 +67,19 @@ fn main() -> Result<()> {
         std::env::current_dir()?
     };
 
+    let quiet = args.quiet;
+
     // Handle --clear-cache
     if args.clear_cache {
         let cache_dir = index_root.join(".vecgrep");
         if cache_dir.exists() {
             std::fs::remove_dir_all(&cache_dir)?;
-            eprintln!("Cache cleared.");
+            status!(quiet, "Cache cleared.");
         } else {
-            eprintln!("No cache found.");
+            status!(quiet, "No cache found.");
         }
         if args.query.is_none() {
-            return Ok(());
+            return Ok(true);
         }
     }
 
@@ -59,13 +88,13 @@ fn main() -> Result<()> {
         let idx = Index::open(&index_root)?;
         let stats = idx.stats()?;
         output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
-        return Ok(());
+        return Ok(true);
     }
 
     // Initialize embedder
-    eprintln!("Loading model...");
+    status!(quiet, "Loading model...");
     let mut embedder = Embedder::new().context("Failed to initialize embedder")?;
-    eprintln!("Model loaded.");
+    status!(quiet, "Model loaded.");
 
     // Open or create index
     let idx = Index::open(&index_root)?;
@@ -80,14 +109,14 @@ fn main() -> Result<()> {
     let config_valid = idx.check_config(&config)?;
     if !config_valid || args.reindex {
         if !config_valid {
-            eprintln!("Index configuration changed, rebuilding...");
+            status!(quiet, "Index configuration changed, rebuilding...");
         }
         idx.clear()?;
     }
     idx.set_config(&config)?;
 
     // Walk files
-    eprintln!("Scanning files...");
+    status!(quiet, "Scanning files...");
     let walk_opts = walker::WalkOptions {
         file_types: &args.file_type,
         file_types_not: &args.file_type_not,
@@ -98,13 +127,13 @@ fn main() -> Result<()> {
         max_depth: args.max_depth,
     };
     let files = walker::walk_paths(&args.paths, &walk_opts)?;
-    eprintln!("Found {} files.", files.len());
+    status!(quiet, "Found {} files.", files.len());
 
     // Remove stale files from index
     let current_paths: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
     let removed = idx.remove_stale_files(&current_paths)?;
     if removed > 0 {
-        eprintln!("Removed {} stale files from index.", removed);
+        status!(quiet, "Removed {} stale files from index.", removed);
     }
 
     // Find files that need (re-)indexing
@@ -120,7 +149,7 @@ fn main() -> Result<()> {
         .collect();
 
     if !files_to_index.is_empty() {
-        eprintln!("Indexing {} files...", files_to_index.len());
+        status!(quiet, "Indexing {} files...", files_to_index.len());
 
         let tokenizer_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/models/tokenizer.json"));
         let tokenizer = tokenizers::Tokenizer::from_bytes(tokenizer_bytes)
@@ -189,23 +218,25 @@ fn main() -> Result<()> {
                 idx.upsert_file(prev_path, &file_hash, &file_chunks, &file_embeddings)?;
             }
 
-            eprint!(
-                "\rIndexed {}/{} files...",
-                ((batch_idx + 1) * batch_size).min(files_to_index.len()),
-                files_to_index.len()
-            );
+            if !quiet && std::io::stderr().is_terminal() {
+                eprint!(
+                    "\rIndexed {}/{} files...",
+                    ((batch_idx + 1) * batch_size).min(files_to_index.len()),
+                    files_to_index.len()
+                );
+            }
         }
 
-        eprintln!("\nIndexing complete.");
+        status!(quiet, "\nIndexing complete.");
     } else {
-        eprintln!("Index is up to date.");
+        status!(quiet, "Index is up to date.");
     }
 
     // Handle --index-only
     if args.index_only {
         let stats = idx.stats()?;
         output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
-        return Ok(());
+        return Ok(true);
     }
 
     // Handle --stats after indexing
@@ -213,7 +244,7 @@ fn main() -> Result<()> {
         let stats = idx.stats()?;
         output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
         if args.query.is_none() {
-            return Ok(());
+            return Ok(true);
         }
     }
 
@@ -221,12 +252,12 @@ fn main() -> Result<()> {
     let query = match &args.query {
         Some(q) => q.clone(),
         None if args.interactive => String::new(),
-        None => return Ok(()),
+        None => return Ok(true),
     };
 
     // Load all embeddings for search
     let (chunks, embedding_matrix) = idx.load_all()?;
-    eprintln!("Loaded {} chunks for search.", chunks.len());
+    status!(quiet, "Loaded {} chunks for search.", chunks.len());
 
     if args.interactive {
         tui::interactive::run(
@@ -237,7 +268,7 @@ fn main() -> Result<()> {
             args.top_k,
             args.threshold,
         )?;
-        return Ok(());
+        return Ok(true);
     }
 
     // Embed query
@@ -253,8 +284,8 @@ fn main() -> Result<()> {
     );
 
     if results.is_empty() {
-        eprintln!("No results found.");
-        return Ok(());
+        status!(quiet, "No results found.");
+        return Ok(false);
     }
 
     if args.json {
@@ -267,5 +298,5 @@ fn main() -> Result<()> {
         output::print_results(&results, args.context, color_choice)?;
     }
 
-    Ok(())
+    Ok(true)
 }
