@@ -125,11 +125,11 @@ pub(crate) fn score_to_color(score: f32) -> Color {
 }
 
 /// Print results as JSONL for scripting.
-pub fn print_json(results: &[SearchResult]) -> std::io::Result<()> {
+pub fn print_json(results: &[SearchResult], root: &str) -> std::io::Result<()> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     for result in results {
-        let json = format_json_result(result);
+        let json = format_json_result(result, root);
         writeln!(handle, "{}", json)?;
     }
     Ok(())
@@ -147,8 +147,9 @@ pub(crate) fn format_size(bytes: u64) -> String {
 }
 
 /// Format a search result as a JSON value.
-pub(crate) fn format_json_result(result: &SearchResult) -> serde_json::Value {
+pub(crate) fn format_json_result(result: &SearchResult, root: &str) -> serde_json::Value {
     serde_json::json!({
+        "root": root,
         "file": result.chunk.file_path,
         "start_line": result.chunk.start_line,
         "end_line": result.chunk.end_line,
@@ -245,7 +246,8 @@ mod tests {
     #[test]
     fn test_format_json_result() {
         let result = make_result("test.rs", 0.85);
-        let json = format_json_result(&result);
+        let json = format_json_result(&result, "/projects/myapp");
+        assert_eq!(json["root"], "/projects/myapp");
         assert_eq!(json["file"], "test.rs");
         assert_eq!(json["start_line"], 1);
         assert_eq!(json["end_line"], 5);

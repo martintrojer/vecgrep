@@ -395,6 +395,7 @@ fn run() -> Result<bool> {
                 args.chunk_size,
                 args.chunk_overlap,
                 &cwd_suffix,
+                &project_root_canon.to_string_lossy(),
             )?;
             if let Some(h) = walker_handle {
                 let _ = h.join();
@@ -416,6 +417,7 @@ fn run() -> Result<bool> {
                 args.top_k,
                 args.threshold,
                 quiet,
+                &project_root_canon.to_string_lossy(),
             )?;
         }
         return Ok(true);
@@ -483,7 +485,7 @@ fn run() -> Result<bool> {
     }
 
     if args.json {
-        output::print_json(&results)?;
+        output::print_json(&results, &project_root_canon.to_string_lossy())?;
     } else if args.files_with_matches {
         output::print_files_with_matches(&results, color_choice)?;
     } else if args.count {

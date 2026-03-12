@@ -35,6 +35,7 @@ pub fn run_streaming(
     chunk_size: usize,
     chunk_overlap: usize,
     cwd_suffix: &std::path::Path,
+    root: &str,
 ) -> Result<()> {
     let port = port.unwrap_or(0);
     let listener =
@@ -201,7 +202,7 @@ pub fn run_streaming(
 
         let mut body = String::new();
         for result in &results {
-            let json = format_json_result(result);
+            let json = format_json_result(result, root);
             body.push_str(&json.to_string());
             body.push('\n');
         }
@@ -211,6 +212,7 @@ pub fn run_streaming(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     embedder: &mut Embedder,
     chunks: &[Chunk],
@@ -219,6 +221,7 @@ pub fn run(
     default_top_k: usize,
     default_threshold: f32,
     quiet: bool,
+    root: &str,
 ) -> Result<()> {
     let port = port.unwrap_or(0);
     let listener =
@@ -323,7 +326,7 @@ pub fn run(
 
         let mut body = String::new();
         for result in &results {
-            let json = format_json_result(result);
+            let json = format_json_result(result, root);
             body.push_str(&json.to_string());
             body.push('\n');
         }
@@ -376,7 +379,17 @@ mod tests {
                 let flat: Vec<f32> = embeddings.into_iter().flatten().collect();
                 let matrix = Array2::from_shape_vec((chunks.len(), dim), flat).unwrap();
 
-                run(&mut embedder, &chunks, &matrix, Some(port), 10, 0.3, true).unwrap();
+                run(
+                    &mut embedder,
+                    &chunks,
+                    &matrix,
+                    Some(port),
+                    10,
+                    0.3,
+                    true,
+                    "/test/root",
+                )
+                .unwrap();
             });
 
             // Poll until the server is accepting connections.
@@ -438,6 +451,7 @@ mod tests {
         assert!(!lines.is_empty(), "expected at least one result");
 
         let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(json["root"], "/test/root");
         assert!(json.get("file").is_some());
         assert!(json.get("score").is_some());
         assert!(json.get("text").is_some());

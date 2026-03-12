@@ -37,6 +37,7 @@ vecgrep --stats              # show index statistics
 vecgrep --reindex ./src      # force full re-index
 vecgrep --clear-cache        # delete cached index
 vecgrep --index-only ./src   # build index without searching
+vecgrep --show-root          # print resolved project root
 ```
 
 ## How it works
@@ -116,7 +117,8 @@ Options:
       --index-only              Build index without searching
       --stats                   Show index statistics
       --clear-cache             Delete cached index
-      --json                    JSONL output
+      --show-root               Print resolved project root and exit
+      --json                    JSONL output (includes "root" field)
       --serve                   Start HTTP server mode
       --port <PORT>             Port for HTTP server [default: auto]
       --chunk-size <N>          Tokens per chunk [default: 500]
