@@ -33,6 +33,7 @@ pub mod interactive {
         initial_query: &str,
         top_k: usize,
         threshold: f32,
+        cwd_suffix: &Path,
     ) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -48,6 +49,7 @@ pub mod interactive {
             initial_query,
             top_k,
             threshold,
+            cwd_suffix,
         );
 
         disable_raw_mode()?;
@@ -64,6 +66,35 @@ pub mod interactive {
             stripped.to_string()
         } else {
             format!("{}/{}", cwd_suffix.display(), stripped)
+        }
+    }
+
+    /// Convert a project-root-relative path to a cwd-relative path for file I/O.
+    fn to_cwd_path(project_path: &str, cwd_suffix: &Path) -> String {
+        if cwd_suffix.as_os_str().is_empty() {
+            return project_path.to_string();
+        }
+        let prefix = format!("{}/", cwd_suffix.display());
+        if let Some(rest) = project_path.strip_prefix(&prefix) {
+            rest.to_string()
+        } else {
+            // Path is outside cwd subtree, compute relative path
+            let from_comps: Vec<_> = cwd_suffix.components().collect();
+            let to = Path::new(project_path);
+            let to_comps: Vec<_> = to.components().collect();
+            let common = from_comps
+                .iter()
+                .zip(to_comps.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let mut result = std::path::PathBuf::new();
+            for _ in 0..(from_comps.len() - common) {
+                result.push("..");
+            }
+            for comp in &to_comps[common..] {
+                result.push(comp);
+            }
+            result.to_string_lossy().to_string()
         }
     }
 
@@ -205,12 +236,13 @@ pub mod interactive {
                 if let Some(idx) = current_selected {
                     if let Some(result) = results.get(idx) {
                         let path = &result.chunk.file_path;
+                        let fs_path = to_cwd_path(path, cwd_suffix);
                         let needs_load = match &preview_file_cache {
                             Some((cached_path, _)) => cached_path != path,
                             None => true,
                         };
                         if needs_load {
-                            if let Ok(content) = std::fs::read_to_string(path) {
+                            if let Ok(content) = std::fs::read_to_string(&fs_path) {
                                 preview_file_cache = Some((path.clone(), content));
                             } else {
                                 preview_file_cache = None;
@@ -320,7 +352,7 @@ pub mod interactive {
                             if let Some(idx) = list_state.selected() {
                                 if let Some(result) = results.get(idx) {
                                     let line = result.chunk.start_line;
-                                    let file = result.chunk.file_path.clone();
+                                    let file = to_cwd_path(&result.chunk.file_path, cwd_suffix);
 
                                     disable_raw_mode()?;
                                     execute!(io::stdout(), LeaveAlternateScreen)?;
@@ -390,6 +422,7 @@ pub mod interactive {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_loop(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         embedder: &mut Embedder,
@@ -398,6 +431,7 @@ pub mod interactive {
         initial_query: &str,
         top_k: usize,
         threshold: f32,
+        cwd_suffix: &Path,
     ) -> Result<()> {
         let mut query = initial_query.to_string();
         let mut results: Vec<SearchResult> = Vec::new();
@@ -431,12 +465,13 @@ pub mod interactive {
                 if let Some(idx) = current_selected {
                     if let Some(result) = results.get(idx) {
                         let path = &result.chunk.file_path;
+                        let fs_path = to_cwd_path(path, cwd_suffix);
                         let needs_load = match &preview_file_cache {
                             Some((cached_path, _)) => cached_path != path,
                             None => true,
                         };
                         if needs_load {
-                            if let Ok(content) = std::fs::read_to_string(path) {
+                            if let Ok(content) = std::fs::read_to_string(&fs_path) {
                                 preview_file_cache = Some((path.clone(), content));
                             } else {
                                 preview_file_cache = None;
@@ -536,7 +571,7 @@ pub mod interactive {
                             if let Some(idx) = list_state.selected() {
                                 if let Some(result) = results.get(idx) {
                                     let line = result.chunk.start_line;
-                                    let file = result.chunk.file_path.clone();
+                                    let file = to_cwd_path(&result.chunk.file_path, cwd_suffix);
 
                                     // Exit TUI
                                     disable_raw_mode()?;
@@ -706,5 +741,76 @@ pub mod interactive {
             .scroll((scroll, 0));
 
         f.render_widget(preview, area);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // --- to_cwd_path tests ---
+
+        #[test]
+        fn test_cwd_path_at_project_root() {
+            // CWD is project root — path unchanged
+            assert_eq!(to_cwd_path("src/main.rs", Path::new("")), "src/main.rs");
+        }
+
+        #[test]
+        fn test_cwd_path_from_subdirectory() {
+            // CWD is src/ — src/main.rs becomes main.rs
+            assert_eq!(to_cwd_path("src/main.rs", Path::new("src")), "main.rs");
+        }
+
+        #[test]
+        fn test_cwd_path_from_nested_subdirectory() {
+            // CWD is src/deep/ — src/deep/mod.rs becomes mod.rs
+            assert_eq!(
+                to_cwd_path("src/deep/mod.rs", Path::new("src/deep")),
+                "mod.rs"
+            );
+        }
+
+        #[test]
+        fn test_cwd_path_outside_subtree() {
+            // CWD is src/ — lib/foo.rs becomes ../lib/foo.rs
+            assert_eq!(to_cwd_path("lib/foo.rs", Path::new("src")), "../lib/foo.rs");
+        }
+
+        #[test]
+        fn test_cwd_path_root_file_from_subdir() {
+            // CWD is src/ — README.md becomes ../README.md
+            assert_eq!(to_cwd_path("README.md", Path::new("src")), "../README.md");
+        }
+
+        #[test]
+        fn test_cwd_path_sibling_deep() {
+            // CWD is src/a/ — src/b/foo.rs becomes ../b/foo.rs
+            assert_eq!(
+                to_cwd_path("src/b/foo.rs", Path::new("src/a")),
+                "../b/foo.rs"
+            );
+        }
+
+        #[test]
+        fn test_cwd_path_resolves_to_readable_file() {
+            // Create a real file, verify to_cwd_path produces a path that read_to_string can open
+            let dir = tempfile::TempDir::new().unwrap();
+            let sub = dir.path().join("sub");
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::write(sub.join("file.txt"), "hello").unwrap();
+
+            // Simulate: project root is dir, CWD is dir, file is sub/file.txt
+            let cwd_suffix = Path::new("");
+            let fs_path = to_cwd_path("sub/file.txt", cwd_suffix);
+            let full = dir.path().join(&fs_path);
+            assert_eq!(std::fs::read_to_string(full).unwrap(), "hello");
+
+            // Simulate: project root is dir, CWD is dir/sub, file is sub/file.txt
+            let cwd_suffix = Path::new("sub");
+            let fs_path = to_cwd_path("sub/file.txt", cwd_suffix);
+            assert_eq!(fs_path, "file.txt");
+            let full = sub.join(&fs_path);
+            assert_eq!(std::fs::read_to_string(full).unwrap(), "hello");
+        }
     }
 }

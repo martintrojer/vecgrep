@@ -438,6 +438,7 @@ fn run() -> Result<bool> {
                 &query,
                 args.top_k,
                 args.threshold,
+                &cwd_suffix,
             )?;
         }
         return Ok(true);
