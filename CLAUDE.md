@@ -15,6 +15,13 @@ The first build downloads `all-MiniLM-L6-v2` model files from HuggingFace and ca
 
 Debug logging: `VECGREP_LOG=debug cargo run -- "query" ./path`
 
+**Benchmarking models**: When swapping models in `build.rs` for benchmarking, you must clear both caches to avoid stale model files. The download cache uses filename-based keys (`model.onnx`) so different model URLs collide:
+```bash
+rm -rf ~/Library/Caches/vecgrep/models/
+cargo clean
+cargo test --test benchmark_models -- --nocapture
+```
+
 ## Before Committing
 
 Always run these before committing:

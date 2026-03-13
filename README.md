@@ -114,7 +114,7 @@ vecgrep embeds [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/a
 Why this model:
 
 - **Small and fast** — 90 MB (float32 ONNX), runs inference in single-digit milliseconds on CPU. No GPU required.
-- **Good quality for its size** — consistently ranks near the top of [MTEB](https://huggingface.co/spaces/mteb/leaderboard) benchmarks among models under 100 MB. Handles both natural language and code well.
+- **Best code-search accuracy at this size** — outperforms larger models on our [code-search benchmark](BENCHMARK.md) thanks to strong separation between relevant and irrelevant results.
 - **Standard BERT architecture** — wide ONNX Runtime support across platforms (x86, ARM, with optional CoreML/CUDA acceleration).
 - **Battle-tested** — one of the most downloaded sentence-transformers models, with well-understood behaviour.
 

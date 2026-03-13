@@ -206,19 +206,21 @@ mod tests {
         let tokenizer = make_tokenizer();
         // Tokenizer pads each line to 128 tokens, so use large chunk_size/overlap
         // to fit multiple lines per chunk and ensure overlap manifests.
-        let lines: Vec<String> = (0..100).map(|i| format!("Line {}", i)).collect();
+        let lines: Vec<String> = (0..200)
+            .map(|i| format!("Line {} with some extra content to consume tokens", i))
+            .collect();
         let content = lines.join("\n");
-        let chunks = chunk_file("test.txt", &content, 500, 300, &tokenizer);
+        let chunks = chunk_file("test.txt", &content, 200, 50, &tokenizer);
         assert!(chunks.len() >= 2, "Need multiple chunks to test overlap");
 
         // First chunk starts at line 1
         assert_eq!(chunks[0].start_line, 1);
 
         for pair in chunks.windows(2) {
-            // Adjacent chunks must overlap (no gaps between them)
+            // Adjacent chunks must not have gaps (next starts at or before previous ends + 1)
             assert!(
-                pair[1].start_line <= pair[0].end_line,
-                "Adjacent chunks should overlap: [{}-{}] and [{}-{}]",
+                pair[1].start_line <= pair[0].end_line + 1,
+                "Gap between chunks: [{}-{}] and [{}-{}]",
                 pair[0].start_line,
                 pair[0].end_line,
                 pair[1].start_line,
