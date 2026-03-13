@@ -107,6 +107,10 @@ impl Index {
         chunks: &[Chunk],
         embeddings: &[Vec<f32>],
     ) -> Result<()> {
+        // Wrap in a transaction so a crash between DELETE and INSERT
+        // doesn't leave the file missing from the index.
+        self.conn.execute("BEGIN", [])?;
+
         // Delete existing data for this file
         if let Ok(file_id) = self.get_file_id(path) {
             self.conn
@@ -138,6 +142,7 @@ impl Index {
             ])?;
         }
 
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
