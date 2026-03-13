@@ -213,8 +213,19 @@ pub fn process_batch(
     let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
     let embed_batch_size = 64;
     let mut all_embeddings = Vec::new();
-    for text_batch in texts.chunks(embed_batch_size) {
+    for (batch_idx, text_batch) in texts.chunks(embed_batch_size).enumerate() {
         let embeddings = embedder.embed_batch(text_batch)?;
+
+        // Log zero vectors (failed embeddings from remote fallback)
+        for (i, emb) in embeddings.iter().enumerate() {
+            let global_idx = batch_idx * embed_batch_size + i;
+            if emb.iter().all(|&v| v == 0.0) {
+                if let Some((ref path, _)) = chunk_file_info.get(global_idx) {
+                    tracing::warn!("Zero embedding for chunk in file: {}", path);
+                }
+            }
+        }
+
         all_embeddings.extend(embeddings);
     }
 
