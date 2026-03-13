@@ -22,11 +22,15 @@ cargo clean
 cargo test --test benchmark_models -- --nocapture
 ```
 
+**Model benchmarks** (see [BENCHMARK.md](BENCHMARK.md)):
+- Built-in all-MiniLM-L6-v2 wins at small scale (<500 docs) thanks to best separation (0.505)
+- At large scale (6,500+ docs), Ollama models (mxbai-embed-large, embeddinggemma) beat MiniLM by ~3% MRR — richer representations help with more distractors
+- All texts truncated to 1024 chars for fair cross-model comparison
+- `benchmark_large` downloads CodeSearchNet from HuggingFace (cached locally)
+
 **GPU/ANE acceleration**: We tested CoreML execution provider (Apple Neural Engine) via `ort`'s `coreml` feature flag. Findings:
 - CoreML is **significantly slower** than CPU on real workloads (tested on a Markdown vault)
-- CoreML session compilation adds ~1s overhead per session creation
 - For our small model (22M params), CPU inference is already <5ms per query
-- Tests ran ~8× slower with CoreML due to session compilation overhead
 - The data transfer overhead between CPU↔ANE exceeds any compute savings at this model size
 - Conclusion: CPU-only is the right choice. Don't revisit unless the model grows significantly (>100M params)
 

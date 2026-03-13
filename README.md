@@ -117,7 +117,7 @@ vecgrep embeds [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/a
 Why this model:
 
 - **Small and fast** — 90 MB (float32 ONNX), runs inference in single-digit milliseconds on CPU. No GPU required.
-- **Best code-search accuracy at this size** — outperforms larger models on our [code-search benchmark](BENCHMARK.md) thanks to strong separation between relevant and irrelevant results.
+- **Strong code-search accuracy** — best separation between relevant and irrelevant results on our [code-search benchmark](BENCHMARK.md). For large codebases (1,000+ files), `--embedder-url` with a larger model like mxbai-embed-large can improve retrieval further.
 - **Standard BERT architecture** — wide ONNX Runtime support across platforms (x86, ARM, with optional CoreML/CUDA acceleration).
 - **Battle-tested** — one of the most downloaded sentence-transformers models, with well-understood behaviour.
 
