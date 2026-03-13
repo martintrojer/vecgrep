@@ -62,6 +62,7 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 
 **Key design decisions:**
 
+- **Config file hierarchy**: `.vecgrep/config.toml` (project root) > `~/.config/vecgrep/config.toml` (global) > CLI defaults. Loaded via `config::load_config(project_root)` after project root discovery in `main.rs`. All fields are `Option<T>`, merged with `or()` precedence.
 - **Model embedded in binary**: `build.rs` downloads model + tokenizer at build time; they're compiled into the binary via `include_bytes!`. This means the ONNX model (~90MB) lives in `$OUT_DIR/models/` and the binary is self-contained. Alternatively, `--embedder-url` and `--embedder-model` use an external OpenAI-compatible API (Ollama, LM Studio, etc.).
 - **ort API quirks**: `ort` v2.0.0-rc.12 errors are not `Send+Sync`, so `?` with `anyhow` doesn't work — all ort calls must use `.map_err(|e| anyhow::anyhow!("{}", e))`. `Session::run` requires `&mut self`.
 - **Embeddings are L2-normalized**, so cosine similarity = dot product. The search module (`search.rs`) exploits this by doing a simple `embedding_matrix.dot(&query)`.
@@ -75,6 +76,7 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 
 | Module | Role |
 |---|---|
+| `config.rs` | Load `~/.config/vecgrep/config.toml`, all fields `Option<T>`, merged with CLI args in `main.rs` |
 | `embedder.rs` | `Embedder` enum: `Local` (ONNX + tokenizer) or `Remote` (OpenAI-compatible HTTP API). Single queries use CPU, batches use the configured backend |
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries. Uses tokenizer when available, char-based heuristic otherwise |
 | `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `process_batch()` for chunk → embed → upsert |

@@ -66,6 +66,69 @@ fn main() {
     });
 }
 
+/// Apply config file values where CLI flags weren't explicitly provided.
+fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
+    // Option fields: apply if CLI is None
+    if args.embedder_url.is_none() {
+        args.embedder_url.clone_from(&config.embedder_url);
+    }
+    if args.embedder_model.is_none() {
+        args.embedder_model.clone_from(&config.embedder_model);
+    }
+    if args.threads.is_none() {
+        args.threads = config.threads;
+    }
+    if args.max_depth.is_none() {
+        args.max_depth = config.max_depth;
+    }
+
+    // Fields with clap defaults: apply config if value matches the hardcoded default
+    macro_rules! apply_default {
+        ($field:ident, $default:expr) => {
+            if args.$field == $default {
+                if let Some(v) = config.$field {
+                    args.$field = v;
+                }
+            }
+        };
+    }
+
+    apply_default!(top_k, 10);
+    apply_default!(threshold, 0.3);
+    apply_default!(context, 3);
+    apply_default!(chunk_size, 500);
+    apply_default!(chunk_overlap, 100);
+    apply_default!(index_warn_threshold, 1000);
+
+    // Bool fields: apply config if CLI is false (default)
+    macro_rules! apply_bool {
+        ($field:ident) => {
+            if !args.$field {
+                if let Some(true) = config.$field {
+                    args.$field = true;
+                }
+            }
+        };
+    }
+
+    apply_bool!(full_index);
+    apply_bool!(hidden);
+    apply_bool!(follow);
+    apply_bool!(no_ignore);
+    apply_bool!(quiet);
+
+    // Color: apply if CLI is Auto (default)
+    if matches!(args.color, vecgrep::cli::ColorChoice::Auto) {
+        if let Some(ref c) = config.color {
+            match c.as_str() {
+                "always" => args.color = vecgrep::cli::ColorChoice::Always,
+                "never" => args.color = vecgrep::cli::ColorChoice::Never,
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Returns Ok(true) if matches were found, Ok(false) if no matches.
 fn run() -> Result<bool> {
     // Initialize tracing from VECGREP_LOG env var
@@ -74,7 +137,7 @@ fn run() -> Result<bool> {
         .with_writer(std::io::stderr)
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Handle --type-list (no model or index needed)
     if args.type_list {
@@ -102,6 +165,10 @@ fn run() -> Result<bool> {
 
     // Find project root and compute path relationships
     let project_root = find_project_root(&index_root);
+
+    // Apply config: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml) > defaults
+    let config = vecgrep::config::load_config(&project_root);
+    apply_config(&mut args, &config);
 
     // Handle --show-root (no model or index needed)
     if args.show_root {

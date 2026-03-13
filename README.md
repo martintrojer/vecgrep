@@ -2,9 +2,13 @@
 
 Semantic grep — like [ripgrep](https://github.com/BurntSushi/ripgrep), but with vector search.
 
-vecgrep uses a local embedding model ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) to search your codebase by meaning rather than exact text matches. The model is embedded directly in the binary — no external services, no API keys, fully offline.
+Search your codebase, notes, or Obsidian vault by meaning, not just text. Ask for "error handling for network timeouts" and find the relevant code, even if it doesn't contain those exact words.
 
-**Fast by default.** After the first index build, searches return instantly — vecgrep queries the cached index without waiting for re-indexing. Changed files are indexed in the background for next time. Interactive mode (`-i`) and the HTTP server (`--serve`) feel real-time: queries take ~5ms, and results update progressively as new files are indexed.
+**Local-first.** An embedding model ships inside the binary — no external services, no API keys, no GPU required. Your code never leaves your machine.
+
+**Fast by default.** After the first index build, searches return instantly from the cached index. Changed files are indexed in the background. Interactive mode (`-i`) and the HTTP server (`--serve`) update results progressively as new files are indexed.
+
+**Bring your own model.** Optionally connect to [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible embeddings API for access to larger models. See [BENCHMARK.md](BENCHMARK.md) for model comparisons.
 
 ## Usage
 
@@ -12,29 +16,26 @@ vecgrep uses a local embedding model ([all-MiniLM-L6-v2](https://huggingface.co/
 # Search for a concept
 vecgrep "error handling for network timeouts" ./src
 
-# Search with more results and a lower threshold
-vecgrep "database connection pooling" ./src -k 20 -t 0.2
+# Use a code snippet as query to find similar patterns
+vecgrep "match result { Ok(v) => v, Err(e) => return Err(e) }" ./src
 
 # Filter by file type
 vecgrep "sorting algorithm" --type rust
 
-# Use a code snippet as query to find similar patterns
-vecgrep "match result { Ok(v) => v, Err(e) => return Err(e) }" ./src
-
 # Interactive TUI mode
 vecgrep -i "authentication"
-
-# JSON output for scripting
-vecgrep "retry logic" --json | jq '.score'
 
 # Combining with ripgrep — semantic search to find files, then exact match
 vecgrep -l "error handling" ./src | xargs rg "unwrap"
 
-# Reverse — use ripgrep to narrow files, then vecgrep to rank by meaning
+# Reverse — ripgrep to narrow files, vecgrep to rank by meaning
 rg -l "TODO" ./src | xargs vecgrep "technical debt that should be refactored"
 
-# Use an external embedding model via Ollama / LM Studio / any OpenAI-compatible server
-vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model nomic-embed-text "query" ./src
+# JSON output for scripting
+vecgrep "retry logic" --json | jq '.score'
+
+# Use an external embedding model via Ollama
+vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxbai-embed-large "query" ./src
 
 # Index management
 vecgrep --stats              # show index statistics
@@ -62,9 +63,6 @@ vecgrep -l "parsing user input" ./src | xargs rg "eval|exec|unsafe"
 # Find files about a concept and open them in your editor
 vecgrep -l "authentication and session management" ./src | xargs $EDITOR
 
-# Count how many files deal with a concept
-vecgrep -l "user authentication" ./src | wc -l
-
 # Count how many chunks in each file relate to error handling
 vecgrep -c "error handling" ./src
 
@@ -89,39 +87,40 @@ vecgrep -l "error handling" ./src | entr -r cargo test
 
 ## How it works
 
-1. **Walk** — discovers files on a background thread using the same engine as ripgrep (`.gitignore`-aware, binary detection), streaming them through a bounded channel
+1. **Walk** — discovers files using the same engine as ripgrep (`.gitignore`-aware, binary detection)
 2. **Chunk** — splits files into overlapping token-window chunks, snapped to line boundaries
-3. **Embed** — runs each chunk through the ONNX model to produce a 384-dimensional vector
-4. **Index** — caches embeddings in a local SQLite database (`.vecgrep/index.db`), keyed by BLAKE3 content hash so only changed files are re-embedded on subsequent runs
-5. **Search** — computes cosine similarity between your query embedding and all cached chunk embeddings, returns top-k results
+3. **Embed** — runs each chunk through the embedding model (built-in or external) to produce a vector
+4. **Index** — caches embeddings in a local SQLite database (`.vecgrep/index.db`), keyed by BLAKE3 content hash so only changed files are re-embedded
+5. **Search** — cosine similarity between query and all cached embeddings, returned as top-k results
 
-Walking and indexing overlap — the embedder processes files as the walker discovers them. Searches run against the cached index immediately; changed files are indexed in the background. Use `--full-index` to wait for indexing to complete before searching.
+Search is a single matrix dot product against embeddings loaded in memory — no database in the hot path. This makes interactive mode and the HTTP server responsive enough for on-every-keystroke use.
 
-Search is a single matrix dot product against cached embeddings loaded in memory — no database in the hot path. This makes interactive mode and the HTTP server responsive enough for on-every-keystroke use.
+## Embedding models
 
-## Why local-only?
+### Built-in: all-MiniLM-L6-v2
 
-vecgrep runs entirely on your machine. There are no API calls, no cloud services, no telemetry. Your code never leaves your computer.
+The binary ships with [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), a 22M-parameter model that produces 384-dimensional embeddings. It runs in single-digit milliseconds on CPU, indexes thousands of files in seconds, and has the best score separation on our [benchmark](BENCHMARK.md) — meaning `--threshold` works reliably.
 
-This matters for:
+### External: Ollama / LM Studio / any OpenAI-compatible API
 
-- **Privacy** — proprietary codebases stay private
-- **Speed** — no network round-trips; search is a local matrix multiply that takes <5ms
-- **Availability** — works offline, on planes, behind firewalls, in air-gapped environments
-- **Cost** — no API fees, no usage limits
+For large codebases (1,000+ files), larger models improve retrieval accuracy. Use `--embedder-url` and `--embedder-model` to connect to a local embedding server:
 
-## Model choice
+```bash
+# Ollama
+vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxbai-embed-large "query"
 
-vecgrep embeds [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) directly in the binary. This is a 22M-parameter sentence transformer that produces 384-dimensional embeddings.
+# LM Studio
+vecgrep --embedder-url http://localhost:1234/v1/embeddings --embedder-model mxbai-embed-large "query"
+```
 
-Why this model:
+Or set it once in `~/.config/vecgrep/config.toml`:
 
-- **Small and fast** — 90 MB (float32 ONNX), runs inference in single-digit milliseconds on CPU. No GPU required.
-- **Strong code-search accuracy** — best separation between relevant and irrelevant results on our [code-search benchmark](BENCHMARK.md). For large codebases (1,000+ files), `--embedder-url` with a larger model like mxbai-embed-large can improve retrieval further.
-- **Standard BERT architecture** — wide ONNX Runtime support across platforms (x86, ARM, with optional CoreML/CUDA acceleration).
-- **Battle-tested** — one of the most downloaded sentence-transformers models, with well-understood behaviour.
+```toml
+embedder_url = "http://localhost:11434/v1/embeddings"
+embedder_model = "mxbai-embed-large"
+```
 
-The model is downloaded once at build time from HuggingFace, cached locally, and compiled into the binary via `include_bytes!`. The resulting binary is fully self-contained.
+The index automatically rebuilds when the model changes. See [BENCHMARK.md](BENCHMARK.md) for model comparisons.
 
 ## Install
 
@@ -135,6 +134,29 @@ cargo install --path .
 
 The first build downloads the ONNX model (~90 MB) from HuggingFace and caches it locally. Subsequent builds reuse the cached model.
 
+## Configuration
+
+Default values for CLI flags can be set in TOML config files. Two locations are checked, with this precedence:
+
+1. **CLI flags** — always win
+2. **Project config** — `.vecgrep/config.toml` in the project root
+3. **Global config** — `~/.config/vecgrep/config.toml`
+
+```toml
+# External embedder (e.g., Ollama)
+embedder_url = "http://localhost:11434/v1/embeddings"
+embedder_model = "mxbai-embed-large"
+
+# Search defaults
+top_k = 20
+threshold = 0.25
+context = 5
+
+# File discovery
+hidden = true
+```
+
+Project-level config is useful for per-repo settings (e.g., a different model or chunk size). Global config sets your personal defaults.
 
 ## Options
 
@@ -167,7 +189,7 @@ Options:
       --type-list               Show all supported file types
       --color <WHEN>            When to use color (auto, always, never)
       --embedder-url <URL>      OpenAI-compatible embeddings API URL
-      --embedder-model <NAME>  Model name for --embedder-url
+      --embedder-model <NAME>   Model name for --embedder-url
       --reindex                 Force full re-index
       --full-index              Wait for indexing to complete before searching
       --index-only              Build index without searching

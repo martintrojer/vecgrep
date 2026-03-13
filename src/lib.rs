@@ -1,5 +1,6 @@
 pub mod chunker;
 pub mod cli;
+pub mod config;
 pub mod embedder;
 pub mod index;
 pub mod output;

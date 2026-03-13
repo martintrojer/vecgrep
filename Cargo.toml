@@ -1,6 +1,6 @@
 [package]
 name = "vecgrep"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Semantic grep — like ripgrep, but with vector search"
 authors = ["Martin Trojer <martin.trojer@gmail.com>"]
@@ -37,6 +37,7 @@ nucleo = "0.5"
 tiny_http = "0.12"
 url = "2"
 ureq = "3"
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
