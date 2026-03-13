@@ -1,9 +1,13 @@
 use crate::types::Chunk;
 use tokenizers::Tokenizer;
 
-/// Estimate token count from text length (heuristic: ~4 chars per token).
+/// Estimate token count from text length.
+/// Uses ~2.5 chars/token — URLs, markdown, and code tokenize more densely
+/// than plain English (~4 chars/token). Conservative to avoid exceeding
+/// remote model context limits.
 fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)
+    // Multiply by 2 then divide by 5 to approximate dividing by 2.5
+    (text.len() * 2).div_ceil(5)
 }
 
 /// Chunk a file's content into overlapping token-window chunks, snapping to line boundaries.
@@ -233,6 +237,81 @@ mod tests {
                 pair[0].end_line,
                 pair[1].start_line,
                 pair[1].end_line
+            );
+        }
+    }
+
+    // --- estimate_tokens tests ---
+
+    #[test]
+    fn test_estimate_tokens_short() {
+        // 5 chars → 2 tokens (5 * 2 / 5 = 2)
+        assert_eq!(estimate_tokens("hello"), 2);
+    }
+
+    #[test]
+    fn test_estimate_tokens_empty() {
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_conservative() {
+        // 1280 chars should estimate to 512 tokens (1280 * 2 / 5 = 512)
+        // This matches Ollama's 512-token context limit
+        let text = "x".repeat(1280);
+        assert_eq!(estimate_tokens(&text), 512);
+    }
+
+    #[test]
+    fn test_estimate_tokens_url_heavy() {
+        // URL-heavy text should produce more tokens per char
+        // estimate_tokens is conservative so it over-counts, which is safe
+        let url_text = "https://example.com/path/to/resource?param=value&other=123\n";
+        let estimated = estimate_tokens(url_text);
+        // The estimate should be >= what the actual tokenizer would produce
+        // At 2.5 chars/token, 58 chars → ~23 tokens
+        assert!(
+            estimated >= 20,
+            "estimated {estimated} too low for URL text"
+        );
+    }
+
+    // --- chunking without tokenizer (remote embedder path) ---
+
+    #[test]
+    fn test_chunk_without_tokenizer_respects_size() {
+        // Without tokenizer, chunk_size=100 tokens ≈ 250 chars at 2.5 chars/token
+        let lines: Vec<String> = (0..50)
+            .map(|i| format!("Line {} with some content", i))
+            .collect();
+        let content = lines.join("\n");
+        let chunks = chunk_file("test.txt", &content, 100, 20, None);
+
+        assert!(chunks.len() > 1, "should produce multiple chunks");
+        // All chunks should have text shorter than ~250 chars (100 tokens * 2.5)
+        for chunk in &chunks {
+            let estimated = estimate_tokens(&chunk.text);
+            assert!(
+                estimated <= 120, // some slack for line snapping
+                "chunk has {estimated} estimated tokens, expected <=120"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chunk_without_tokenizer_covers_file() {
+        let lines: Vec<String> = (0..30).map(|i| format!("Line {}", i)).collect();
+        let content = lines.join("\n");
+        let chunks = chunk_file("test.txt", &content, 20, 5, None);
+
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].start_line, 1);
+
+        // Check coverage — no gaps
+        for pair in chunks.windows(2) {
+            assert!(
+                pair[1].start_line <= pair[0].end_line + 1,
+                "Gap between chunks"
             );
         }
     }

@@ -233,6 +233,18 @@ fn run() -> Result<bool> {
             e.embed("probe")
                 .context("Failed to connect to external embedder")?;
             status!(quiet, "Embedding dimension: {}", e.embedding_dim());
+            // Cap chunk_size to remote model's context length
+            if let Some(ctx) = e.context_tokens() {
+                if args.chunk_size > ctx {
+                    status!(
+                        quiet,
+                        "Reducing chunk_size from {} to {} (model context limit)",
+                        args.chunk_size,
+                        ctx
+                    );
+                    args.chunk_size = ctx;
+                }
+            }
             e
         } else {
             status!(quiet, "Loading model...");
