@@ -334,6 +334,94 @@ mod tests {
     }
 
     #[test]
+    fn test_walk_multiple_paths_mixed() {
+        let dir = TempDir::new().unwrap();
+        // Create two directories and a standalone file
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn lib() {}").unwrap();
+        std::fs::create_dir(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("tests/test.rs"), "fn test() {}").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Hello").unwrap();
+
+        // Pass two directories and one file
+        let paths = vec![
+            dir.path().join("src").to_string_lossy().to_string(),
+            dir.path().join("tests").to_string_lossy().to_string(),
+            dir.path().join("README.md").to_string_lossy().to_string(),
+        ];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        assert_eq!(files.len(), 4);
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("main.rs")));
+        assert!(names.iter().any(|n| n.contains("lib.rs")));
+        assert!(names.iter().any(|n| n.contains("test.rs")));
+        assert!(names.iter().any(|n| n.contains("README.md")));
+    }
+
+    #[test]
+    fn test_walk_multiple_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "aaa").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "bbb").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "ccc").unwrap();
+
+        // Pass individual files, not a directory
+        let paths = vec![
+            dir.path().join("a.txt").to_string_lossy().to_string(),
+            dir.path().join("c.txt").to_string_lossy().to_string(),
+        ];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        assert_eq!(files.len(), 2);
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("a.txt")));
+        assert!(names.iter().any(|n| n.contains("c.txt")));
+        assert!(!names.iter().any(|n| n.contains("b.txt")));
+    }
+
+    #[test]
+    fn test_walk_nonexistent_path() {
+        let paths = vec!["/nonexistent/path/that/doesnt/exist".to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_walk_empty_directory() {
+        let dir = TempDir::new().unwrap();
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_walk_multiple_directories() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("alpha")).unwrap();
+        std::fs::write(dir.path().join("alpha/one.txt"), "one").unwrap();
+        std::fs::create_dir(dir.path().join("beta")).unwrap();
+        std::fs::write(dir.path().join("beta/two.txt"), "two").unwrap();
+
+        let paths = vec![
+            dir.path().join("alpha").to_string_lossy().to_string(),
+            dir.path().join("beta").to_string_lossy().to_string(),
+        ];
+        let opts = default_opts();
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        assert_eq!(files.len(), 2);
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("one.txt")));
+        assert!(names.iter().any(|n| n.contains("two.txt")));
+    }
+
+    #[test]
     fn test_walk_streaming_matches_walk_paths() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "aaa").unwrap();
