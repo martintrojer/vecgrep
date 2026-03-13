@@ -25,41 +25,6 @@ pub mod interactive {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    pub fn run(
-        embedder: &mut Embedder,
-        chunks: &[Chunk],
-        embedding_matrix: &Array2<f32>,
-        initial_query: &str,
-        top_k: usize,
-        threshold: f32,
-        cwd_suffix: &Path,
-    ) -> Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let result = event_loop(
-            &mut terminal,
-            embedder,
-            chunks.to_vec(),
-            embedding_matrix.clone(),
-            initial_query,
-            top_k,
-            threshold,
-            cwd_suffix,
-            None,
-            None,
-        );
-
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        terminal.show_cursor()?;
-
-        result
-    }
-
     pub fn run_streaming(
         embedder: &mut Embedder,
         idx: &Index,

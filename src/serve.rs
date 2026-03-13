@@ -2,7 +2,7 @@ use std::net::TcpListener;
 
 use anyhow::{Context, Result};
 use ndarray::Array2;
-use tiny_http::{Header, Method, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::Url;
 
 use crate::embedder::Embedder;
@@ -11,6 +11,119 @@ use crate::output::format_json_result;
 use crate::pipeline::StreamingIndexer;
 use crate::search;
 use crate::types::Chunk;
+
+fn json_content_header() -> Header {
+    "Content-Type: application/x-ndjson"
+        .parse()
+        .expect("valid header")
+}
+
+fn json_error_header() -> Header {
+    "Content-Type: application/json"
+        .parse()
+        .expect("valid header")
+}
+
+/// Handle a single HTTP search request. Returns Ok(()) after responding.
+fn handle_request(
+    request: Request,
+    embedder: &mut Embedder,
+    chunks: &[Chunk],
+    embedding_matrix: &Array2<f32>,
+    default_top_k: usize,
+    default_threshold: f32,
+    root: &str,
+) -> Result<()> {
+    let json_content_type = json_content_header();
+    let json_error_type = json_error_header();
+
+    if request.method() != &Method::Get {
+        let body = r#"{"error":"method not allowed"}"#;
+        let resp = Response::from_string(body)
+            .with_status_code(StatusCode(405))
+            .with_header(json_error_type);
+        let _ = request.respond(resp);
+        return Ok(());
+    }
+
+    let raw_url = request.url().to_string();
+    let full_url = format!("http://localhost{raw_url}");
+    let parsed = match Url::parse(&full_url) {
+        Ok(u) => u,
+        Err(_) => {
+            let body = r#"{"error":"invalid URL"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(400))
+                .with_header(json_error_type);
+            let _ = request.respond(resp);
+            return Ok(());
+        }
+    };
+
+    if parsed.path() != "/search" {
+        let body = r#"{"error":"not found"}"#;
+        let resp = Response::from_string(body)
+            .with_status_code(StatusCode(404))
+            .with_header(json_error_type);
+        let _ = request.respond(resp);
+        return Ok(());
+    }
+
+    let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+    let q = params
+        .iter()
+        .find(|(k, _)| k == "q")
+        .map(|(_, v)| v.clone());
+
+    let q = match q {
+        Some(q) if !q.is_empty() => q,
+        _ => {
+            let body = r#"{"error":"missing or empty 'q' parameter"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(400))
+                .with_header(json_error_type);
+            let _ = request.respond(resp);
+            return Ok(());
+        }
+    };
+
+    let top_k: usize = params
+        .iter()
+        .find(|(k, _)| k == "k")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(default_top_k);
+
+    let threshold: f32 = params
+        .iter()
+        .find(|(k, _)| k == "threshold")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(default_threshold);
+
+    let query_embedding = match embedder.embed(&q) {
+        Ok(e) => e,
+        Err(e) => {
+            let body = serde_json::json!({"error": format!("{e:#}")}).to_string();
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(500))
+                .with_header(json_error_type);
+            let _ = request.respond(resp);
+            return Ok(());
+        }
+    };
+
+    let results = search::search(&query_embedding, embedding_matrix, top_k, threshold, chunks);
+
+    let mut body = String::new();
+    for result in &results {
+        let json = format_json_result(result, root);
+        body.push_str(&json.to_string());
+        body.push('\n');
+    }
+
+    let resp = Response::from_string(body).with_header(json_content_type);
+    let _ = request.respond(resp);
+    Ok(())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_streaming(
@@ -34,18 +147,10 @@ pub fn run_streaming(
     let _ = quiet;
     eprintln!("Listening on http://127.0.0.1:{actual_port}");
 
-    let json_content_type: Header = "Content-Type: application/x-ndjson"
-        .parse()
-        .expect("valid header");
-    let json_error_type: Header = "Content-Type: application/json"
-        .parse()
-        .expect("valid header");
-
     let (mut chunks, mut embedding_matrix) = idx.load_all()?;
     let mut indexing_announced = false;
 
     loop {
-        // 1. Process streaming indexing
         if !indexer.indexing_done {
             indexer.poll(embedder, idx, &mut chunks, &mut embedding_matrix)?;
             if indexer.indexing_done && !indexing_announced {
@@ -58,103 +163,20 @@ pub fn run_streaming(
             }
         }
 
-        // 2. Handle HTTP request (non-blocking)
         let request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(Some(req)) => req,
             Ok(None) | Err(_) => continue,
         };
 
-        if request.method() != &Method::Get {
-            let body = r#"{"error":"method not allowed"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(405))
-                .with_header(json_error_type.clone());
-            let _ = request.respond(resp);
-            continue;
-        }
-
-        let raw_url = request.url().to_string();
-        let full_url = format!("http://localhost{raw_url}");
-        let parsed = match Url::parse(&full_url) {
-            Ok(u) => u,
-            Err(_) => {
-                let body = r#"{"error":"invalid URL"}"#;
-                let resp = Response::from_string(body)
-                    .with_status_code(StatusCode(400))
-                    .with_header(json_error_type.clone());
-                let _ = request.respond(resp);
-                continue;
-            }
-        };
-
-        if parsed.path() != "/search" {
-            let body = r#"{"error":"not found"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(404))
-                .with_header(json_error_type.clone());
-            let _ = request.respond(resp);
-            continue;
-        }
-
-        let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
-        let q = params
-            .iter()
-            .find(|(k, _)| k == "q")
-            .map(|(_, v)| v.clone());
-
-        let q = match q {
-            Some(q) if !q.is_empty() => q,
-            _ => {
-                let body = r#"{"error":"missing or empty 'q' parameter"}"#;
-                let resp = Response::from_string(body)
-                    .with_status_code(StatusCode(400))
-                    .with_header(json_error_type.clone());
-                let _ = request.respond(resp);
-                continue;
-            }
-        };
-
-        let top_k: usize = params
-            .iter()
-            .find(|(k, _)| k == "k")
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or(default_top_k);
-
-        let threshold: f32 = params
-            .iter()
-            .find(|(k, _)| k == "threshold")
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or(default_threshold);
-
-        let query_embedding = match embedder.embed(&q) {
-            Ok(e) => e,
-            Err(e) => {
-                let body = serde_json::json!({"error": format!("{e:#}")}).to_string();
-                let resp = Response::from_string(body)
-                    .with_status_code(StatusCode(500))
-                    .with_header(json_error_type.clone());
-                let _ = request.respond(resp);
-                continue;
-            }
-        };
-
-        let results = search::search(
-            &query_embedding,
-            &embedding_matrix,
-            top_k,
-            threshold,
+        handle_request(
+            request,
+            embedder,
             &chunks,
-        );
-
-        let mut body = String::new();
-        for result in &results {
-            let json = format_json_result(result, root);
-            body.push_str(&json.to_string());
-            body.push('\n');
-        }
-
-        let resp = Response::from_string(body).with_header(json_content_type.clone());
-        let _ = request.respond(resp);
+            &embedding_matrix,
+            default_top_k,
+            default_threshold,
+            root,
+        )?;
     }
 }
 
@@ -177,108 +199,19 @@ pub fn run(
     let server = Server::from_listener(listener, None)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
 
-    // Always print the listen address so tooling can discover the port.
-    let _ = quiet; // intentionally ignored
+    let _ = quiet;
     eprintln!("Listening on http://127.0.0.1:{actual_port}");
 
-    let json_content_type: Header = "Content-Type: application/x-ndjson"
-        .parse()
-        .expect("valid header");
-    let json_error_type: Header = "Content-Type: application/json"
-        .parse()
-        .expect("valid header");
-
     for request in server.incoming_requests() {
-        // Only allow GET
-        if request.method() != &Method::Get {
-            let body = r#"{"error":"method not allowed"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(405))
-                .with_header(json_error_type.clone());
-            let _ = request.respond(resp);
-            continue;
-        }
-
-        // Parse URL — tiny_http gives us the raw URL path+query
-        let raw_url = request.url().to_string();
-        let full_url = format!("http://localhost{raw_url}");
-        let parsed = match Url::parse(&full_url) {
-            Ok(u) => u,
-            Err(_) => {
-                let body = r#"{"error":"invalid URL"}"#;
-                let resp = Response::from_string(body)
-                    .with_status_code(StatusCode(400))
-                    .with_header(json_error_type.clone());
-                let _ = request.respond(resp);
-                continue;
-            }
-        };
-
-        // Route: only /search is supported
-        if parsed.path() != "/search" {
-            let body = r#"{"error":"not found"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(404))
-                .with_header(json_error_type.clone());
-            let _ = request.respond(resp);
-            continue;
-        }
-
-        // Extract query params
-        let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
-        let q = params
-            .iter()
-            .find(|(k, _)| k == "q")
-            .map(|(_, v)| v.clone());
-
-        let q = match q {
-            Some(q) if !q.is_empty() => q,
-            _ => {
-                let body = r#"{"error":"missing or empty 'q' parameter"}"#;
-                let resp = Response::from_string(body)
-                    .with_status_code(StatusCode(400))
-                    .with_header(json_error_type.clone());
-                let _ = request.respond(resp);
-                continue;
-            }
-        };
-
-        let top_k: usize = params
-            .iter()
-            .find(|(k, _)| k == "k")
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or(default_top_k);
-
-        let threshold: f32 = params
-            .iter()
-            .find(|(k, _)| k == "threshold")
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or(default_threshold);
-
-        // Embed + search
-        let query_embedding = match embedder.embed(&q) {
-            Ok(e) => e,
-            Err(e) => {
-                let body = serde_json::json!({"error": format!("{e:#}")}).to_string();
-                let resp = Response::from_string(body)
-                    .with_status_code(StatusCode(500))
-                    .with_header(json_error_type.clone());
-                let _ = request.respond(resp);
-                continue;
-            }
-        };
-
-        let results = search::search(&query_embedding, embedding_matrix, top_k, threshold, chunks);
-
-        let mut body = String::new();
-        for result in &results {
-            let json = format_json_result(result, root);
-            body.push_str(&json.to_string());
-            body.push('\n');
-        }
-
-        let resp = Response::from_string(body).with_header(json_content_type.clone());
-        let _ = request.respond(resp);
+        handle_request(
+            request,
+            embedder,
+            chunks,
+            embedding_matrix,
+            default_top_k,
+            default_threshold,
+            root,
+        )?;
     }
 
     Ok(())
@@ -299,7 +232,6 @@ mod tests {
     /// Start a shared test server (once) and return its port.
     fn test_port() -> u16 {
         *SERVER_PORT.get_or_init(|| {
-            // Grab a free port, then release it so the server can bind.
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             drop(listener);
@@ -338,7 +270,6 @@ mod tests {
                 .unwrap();
             });
 
-            // Poll until the server is accepting connections.
             for _ in 0..50 {
                 if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
                     return port;
@@ -349,7 +280,6 @@ mod tests {
         })
     }
 
-    /// Send an HTTP request and return (status_code, body, content_type).
     fn http_request(method: &str, port: u16, path: &str) -> (u16, String, String) {
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
         stream
