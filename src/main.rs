@@ -220,8 +220,58 @@ fn run() -> Result<bool> {
         None => return Ok(true),
     };
 
-    // TUI and serve take ownership of the indexer and interleave indexing
-    // with their event loops (non-blocking poll).
+    let mut indexer = indexer;
+    let mut walker_handle = Some(walker_join_handle);
+
+    // --full-index / --index-only: drain all files before proceeding.
+    // Applies to all modes (CLI, TUI, serve).
+    if args.full_index || args.index_only {
+        let mut threshold_prompted = false;
+        indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
+            if !threshold_prompted && threshold > 0 && indexed_so_far >= threshold {
+                threshold_prompted = true;
+                eprintln!(
+                    "Warning: {} files need indexing so far (still scanning).",
+                    indexed_so_far
+                );
+                if std::io::stdin().is_terminal() {
+                    eprint!("Continue? [y/N] ");
+                    std::io::stderr().flush().ok();
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if !input.trim().eq_ignore_ascii_case("y") {
+                        eprintln!("Aborted.");
+                        return Ok(false);
+                    }
+                }
+            }
+            if !quiet && std::io::stderr().is_terminal() {
+                eprint!("\rIndexed {} files...", indexed_so_far);
+            }
+            Ok(true)
+        })?;
+
+        finish_indexing(&mut indexer, &idx, &walk_prefix, quiet, &mut walker_handle)?;
+    }
+
+    // Handle --index-only
+    if args.index_only {
+        let stats = idx.stats()?;
+        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
+        return Ok(true);
+    }
+
+    // Handle --stats after indexing
+    if args.stats {
+        let stats = idx.stats()?;
+        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
+        if args.query.is_none() {
+            return Ok(true);
+        }
+    }
+
+    // TUI and serve: pass the indexer for progressive indexing.
+    // If --full-index was used, the indexer is already drained.
     if args.serve {
         serve::run_streaming(
             &mut embedder,
@@ -233,7 +283,9 @@ fn run() -> Result<bool> {
             quiet,
             &root_str,
         )?;
-        let _ = walker_join_handle.join();
+        if let Some(h) = walker_handle.take() {
+            let _ = h.join();
+        }
         return Ok(true);
     }
 
@@ -247,49 +299,82 @@ fn run() -> Result<bool> {
             args.threshold,
             &cwd_suffix,
         )?;
-        let _ = walker_join_handle.join();
+        if let Some(h) = walker_handle.take() {
+            let _ = h.join();
+        }
         return Ok(true);
     }
 
-    // Standard CLI path: blocking drain. The walker thread overlaps file I/O
-    // with embedding compute. The threshold prompt fires mid-stream.
-    let mut indexer = indexer;
-    let mut threshold_prompted = false;
-    indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
-        if !threshold_prompted && threshold > 0 && indexed_so_far >= threshold {
-            threshold_prompted = true;
-            eprintln!(
-                "Warning: {} files need indexing so far (still scanning).",
-                indexed_so_far
-            );
-            if std::io::stdin().is_terminal() {
-                eprint!("Continue? [y/N] ");
-                std::io::stderr().flush().ok();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                if !input.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("Aborted.");
-                    return Ok(false);
-                }
+    // CLI: search with current index (immediate results from cached data)
+    let (chunks, embedding_matrix) = idx.load_all()?;
+    status!(quiet, "Loaded {} chunks for search.", chunks.len());
+
+    let query_embedding = embedder.embed(&query)?;
+
+    let results = search::search(
+        &query_embedding,
+        &embedding_matrix,
+        args.top_k,
+        args.threshold,
+        &chunks,
+    );
+
+    // Print results
+    let found = !results.is_empty();
+    if found {
+        let mut results = results;
+        if !args.json && !cwd_suffix.as_os_str().is_empty() {
+            for r in &mut results {
+                r.chunk.file_path = paths::to_cwd_relative(&r.chunk.file_path, &cwd_suffix);
             }
         }
-        if !quiet && std::io::stderr().is_terminal() {
-            eprint!("\rIndexed {} files...", indexed_so_far);
-        }
-        Ok(true)
-    })?;
 
-    // Join walker thread
-    match walker_join_handle.join() {
-        Ok(result) => {
-            result?;
+        if args.json {
+            output::print_json(&results, &root_str)?;
+        } else if args.files_with_matches {
+            output::print_files_with_matches(&results, color_choice)?;
+        } else if args.count {
+            output::print_count(&results, color_choice)?;
+        } else {
+            output::print_results(&results, args.context, color_choice)?;
         }
-        Err(_) => anyhow::bail!("Walker thread panicked"),
+    } else {
+        status!(quiet, "No results found.");
+    }
+
+    // If we haven't drained yet (default mode), index remaining files in the background
+    if !indexer.indexing_done {
+        indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
+            if !quiet && std::io::stderr().is_terminal() {
+                eprint!("\rIndexing {} files...", indexed_so_far);
+            }
+            Ok(true)
+        })?;
+
+        finish_indexing(&mut indexer, &idx, &walk_prefix, quiet, &mut walker_handle)?;
+    }
+
+    Ok(found)
+}
+
+fn finish_indexing(
+    indexer: &mut pipeline::StreamingIndexer,
+    idx: &Index,
+    walk_prefix: &Path,
+    quiet: bool,
+    walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
+) -> Result<()> {
+    if let Some(handle) = walker_handle.take() {
+        match handle.join() {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => anyhow::bail!("Walker thread panicked"),
+        }
     }
 
     status!(quiet, "Found {} files.", indexer.all_paths.len());
 
-    // Remove stale files from index
     let removed = if walk_prefix.as_os_str().is_empty() {
         idx.remove_stale_files(&indexer.all_paths)?
     } else {
@@ -310,62 +395,7 @@ fn run() -> Result<bool> {
         status!(quiet, "Index is up to date.");
     }
 
-    // Handle --index-only
-    if args.index_only {
-        let stats = idx.stats()?;
-        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
-        return Ok(true);
-    }
-
-    // Handle --stats after indexing
-    if args.stats {
-        let stats = idx.stats()?;
-        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
-        if args.query.is_none() {
-            return Ok(true);
-        }
-    }
-
-    // Load all embeddings for search
-    let (chunks, embedding_matrix) = idx.load_all()?;
-    status!(quiet, "Loaded {} chunks for search.", chunks.len());
-
-    // Embed query
-    let query_embedding = embedder.embed(&query)?;
-
-    // Batch search
-    let results = search::search(
-        &query_embedding,
-        &embedding_matrix,
-        args.top_k,
-        args.threshold,
-        &chunks,
-    );
-
-    if results.is_empty() {
-        status!(quiet, "No results found.");
-        return Ok(false);
-    }
-
-    // For non-JSON CLI output, convert paths from project-root-relative to cwd-relative
-    let mut results = results;
-    if !args.json && !cwd_suffix.as_os_str().is_empty() {
-        for r in &mut results {
-            r.chunk.file_path = paths::to_cwd_relative(&r.chunk.file_path, &cwd_suffix);
-        }
-    }
-
-    if args.json {
-        output::print_json(&results, &root_str)?;
-    } else if args.files_with_matches {
-        output::print_files_with_matches(&results, color_choice)?;
-    } else if args.count {
-        output::print_count(&results, color_choice)?;
-    } else {
-        output::print_results(&results, args.context, color_choice)?;
-    }
-
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(test)]

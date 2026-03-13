@@ -4,6 +4,8 @@ Semantic grep — like [ripgrep](https://github.com/BurntSushi/ripgrep), but wit
 
 vecgrep uses a local embedding model ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) to search your codebase by meaning rather than exact text matches. The model is embedded directly in the binary — no external services, no API keys, fully offline.
 
+**Fast by default.** After the first index build, searches return instantly — vecgrep queries the cached index without waiting for re-indexing. Changed files are indexed in the background for next time. Interactive mode (`-i`) and the HTTP server (`--serve`) feel real-time: queries take ~5ms, and results update progressively as new files are indexed.
+
 ## Usage
 
 ```bash
@@ -48,9 +50,9 @@ vecgrep --show-root          # print resolved project root
 4. **Index** — caches embeddings in a local SQLite database (`.vecgrep/index.db`), keyed by BLAKE3 content hash so only changed files are re-embedded on subsequent runs
 5. **Search** — computes cosine similarity between your query embedding and all cached chunk embeddings, returns top-k results
 
-Walking and indexing overlap — the embedder processes files as the walker discovers them. In interactive (`-i`) and server (`--serve`) modes, results appear progressively as files are indexed.
+Walking and indexing overlap — the embedder processes files as the walker discovers them. Searches run against the cached index immediately; changed files are indexed in the background. Use `--full-index` to wait for indexing to complete before searching.
 
-Once the index is built, searching is fast — the only work per query is embedding it (~5ms) and a matrix dot product against the cached embeddings. The SQLite database is not in the hot path; all embeddings are loaded into memory once. This makes interactive mode feel instant and the HTTP server suitable for editor integrations that query on every keystroke.
+Search is a single matrix dot product against cached embeddings loaded in memory — no database in the hot path. This makes interactive mode and the HTTP server responsive enough for on-every-keystroke use.
 
 ## Why local-only?
 
@@ -116,6 +118,7 @@ Options:
       --type-list               Show all supported file types
       --color <WHEN>            When to use color (auto, always, never)
       --reindex                 Force full re-index
+      --full-index              Wait for indexing to complete before searching
       --index-only              Build index without searching
       --stats                   Show index statistics
       --clear-cache             Delete cached index

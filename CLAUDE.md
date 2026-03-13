@@ -31,11 +31,15 @@ vecgrep is a semantic grep tool: it embeds a query and file chunks into vectors 
 **Data pipeline** (orchestrated in `main.rs`, streamed via `std::sync::mpsc`):
 
 ```
-walker (thread) →  channel(32)  →  pipeline::process_batch  →  index (SQLite)  →  search  →  output/tui/serve
-(files)            (backpressure)   (chunk + embed + upsert)    (cache)            (rank)     (display)
+walker (thread) →  channel(64)  →  StreamingIndexer  →  index (SQLite)  →  search  →  output/tui/serve
+(files)            (backpressure)   (chunk + embed)      (cache)            (rank)     (display)
 ```
 
-The walker runs on a background thread feeding files through a bounded `sync_channel(32)`. The channel backpressure means the walker blocks if the embedder falls behind. All three modes (CLI, TUI, serve) use `pipeline::StreamingIndexer` to consume the channel. In **CLI mode**, `drain_all()` blocks until the channel closes, with a callback for the threshold prompt and progress. In **TUI/serve mode**, `poll()` drains non-blockingly (up to `STREAMING_BATCH_SIZE` per iteration), and the index is reloaded every 2 seconds so results appear progressively.
+The walker runs on a background thread feeding files through a bounded `sync_channel(batch_size * 2)`. All three modes use `pipeline::StreamingIndexer` to consume the channel:
+
+- **CLI default**: searches immediately against the cached index, then `drain_all()` indexes remaining files in the background for next time.
+- **CLI `--full-index`**: `drain_all()` blocks until all files are indexed (with threshold prompt), then searches.
+- **TUI/serve**: `poll()` drains non-blockingly (up to `STREAMING_BATCH_SIZE` per iteration), reloading the index every 2 seconds so results appear progressively.
 
 **Key design decisions:**
 
@@ -54,10 +58,11 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 |---|---|
 | `embedder.rs` | ONNX session + tokenizer, batch inference with mean-pooling |
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries |
-| `pipeline.rs` | Shared `process_batch()`: chunk → embed → upsert for a batch of files. Used by CLI, TUI, and serve |
+| `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `process_batch()` for chunk → embed → upsert |
+| `paths.rs` | Path conversions: `to_project_relative()`, `to_cwd_relative()` |
 | `index.rs` | SQLite schema (`meta`/`files`/`chunks`), upsert, stale removal, bulk load into ndarray |
 | `search.rs` | Matrix dot-product scoring, top-k partial sort, threshold filter |
-| `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_paths_streaming()` for channel-based walking |
+| `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_with()` helper, `walk_paths_streaming()` for channel-based walking |
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
 | `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` interleaves indexing with request handling |
 | `tui.rs` | `ratatui` interactive mode; `run_streaming()` interleaves indexing with the event loop |

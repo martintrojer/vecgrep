@@ -196,3 +196,79 @@ fn test_show_root_no_marker_falls_back_to_cwd() {
     let expected = dir.path().canonicalize().unwrap();
     assert_eq!(stdout.trim(), expected.display().to_string());
 }
+
+#[test]
+fn test_full_index_indexes_before_search() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("hello.rs"),
+        "fn hello() { println!(\"hello world\"); }",
+    )
+    .unwrap();
+
+    // --full-index on a fresh repo: should index then find the file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "hello world"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("hello.rs"),
+        "expected hello.rs in results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_default_mode_uses_cached_index() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("cached.rs"),
+        "fn cached_function() { return 42; }",
+    )
+    .unwrap();
+
+    // First run: build the index with --full-index
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Second run: default mode should find cached results instantly
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["cached function"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("cached.rs"),
+        "expected cached.rs in results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_default_mode_without_index_returns_no_results() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("new.rs"), "fn brand_new() {}").unwrap();
+
+    // Default mode on a fresh repo: no cached index, so no results
+    // (files are indexed in the background for next time)
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["brand new function"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Exit code 1 = no matches found
+    assert_eq!(output.status.code(), Some(1));
+}

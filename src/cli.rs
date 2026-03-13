@@ -58,6 +58,12 @@ pub struct Args {
     #[arg(long)]
     pub reindex: bool,
 
+    /// Wait for indexing to complete before searching.
+    /// By default, vecgrep searches immediately with the cached index
+    /// and indexes changed files in the background.
+    #[arg(long)]
+    pub full_index: bool,
+
     /// Build index without searching.
     #[arg(long)]
     pub index_only: bool,
