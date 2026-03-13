@@ -272,3 +272,195 @@ fn test_default_mode_without_index_returns_no_results() {
     // Exit code 1 = no matches found
     assert_eq!(output.status.code(), Some(1));
 }
+
+// --- Index scoping tests ---
+
+#[test]
+fn test_index_shared_across_subdirectories() {
+    // Index from src/, then search from tests/ — both should be in the same index
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("tests")).unwrap();
+    std::fs::write(
+        dir.path().join("src/app.rs"),
+        "fn application_startup() { initialize(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("tests/app_test.rs"),
+        "fn test_application_startup() { assert!(true); }",
+    )
+    .unwrap();
+
+    // Index src/
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only", "./src"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Index tests/
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only", "./tests"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search from project root — should find files from both directories
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "application startup"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("src/app.rs"),
+        "expected src/app.rs in results, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("tests/app_test.rs"),
+        "expected tests/app_test.rs in results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_subdirectory_index_does_not_remove_other_dirs() {
+    // Index the whole project, then re-index only src/ — tests/ entries should survive
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("tests")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main_entry_point() { run(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("tests/integration.rs"),
+        "fn integration_test_suite() { verify(); }",
+    )
+    .unwrap();
+
+    // Index everything from project root
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Re-index only src/ (should NOT remove tests/ entries)
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only", "./src"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search should still find files from both directories
+    // Use --threshold 0.0 to ensure all indexed files appear regardless of score
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--json", "--threshold", "0.0", "function"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("src/main.rs"),
+        "expected src/main.rs in results after re-indexing src/, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("tests/integration.rs"),
+        "expected tests/integration.rs to survive src/-only re-index, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_stale_file_removed_within_walked_dir() {
+    // Index src/ with two files, delete one, re-index src/ — deleted file should be gone
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/keep.rs"), "fn keep_this() {}").unwrap();
+    std::fs::write(
+        dir.path().join("src/remove.rs"),
+        "fn remove_this_later() {}",
+    )
+    .unwrap();
+
+    // Index src/
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only", "./src"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Delete one file and re-index
+    std::fs::remove_file(dir.path().join("src/remove.rs")).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only", "./src"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search should only find the remaining file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--json", "keep or remove"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("remove.rs"),
+        "deleted file should not appear in results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_search_from_subdirectory_shows_relative_paths() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "fn library_function() { compute(); }",
+    )
+    .unwrap();
+
+    // Index from project root
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search from src/ — paths should be relative to cwd
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "library function"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Should show "lib.rs" not "src/lib.rs" since we're running from src/
+    assert!(
+        stdout.contains("lib.rs"),
+        "expected lib.rs in results, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("src/lib.rs"),
+        "path should be relative to cwd (src/), not project root, got: {stdout}"
+    );
+}
