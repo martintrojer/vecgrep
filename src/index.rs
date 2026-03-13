@@ -214,7 +214,8 @@ impl Index {
 
         let n = rows.len();
         let mut chunks = Vec::with_capacity(n);
-        let mut embeddings_flat = Vec::with_capacity(n * EMBEDDING_DIM);
+        let mut embeddings_flat = Vec::new();
+        let mut dim = EMBEDDING_DIM;
 
         for (text, start_line, end_line, blob, path) in rows {
             chunks.push(Chunk {
@@ -224,13 +225,17 @@ impl Index {
                 end_line: end_line as usize,
             });
             let embedding = blob_to_embedding(&blob);
+            if embeddings_flat.is_empty() {
+                dim = embedding.len();
+                embeddings_flat.reserve(n * dim);
+            }
             embeddings_flat.extend_from_slice(&embedding);
         }
 
         let embedding_matrix = if n > 0 {
-            ndarray::Array2::from_shape_vec((n, EMBEDDING_DIM), embeddings_flat)?
+            ndarray::Array2::from_shape_vec((n, dim), embeddings_flat)?
         } else {
-            ndarray::Array2::zeros((0, EMBEDDING_DIM))
+            ndarray::Array2::zeros((0, dim))
         };
 
         Ok((chunks, embedding_matrix))

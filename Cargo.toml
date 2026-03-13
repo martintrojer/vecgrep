@@ -1,6 +1,6 @@
 [package]
 name = "vecgrep"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Semantic grep — like ripgrep, but with vector search"
 authors = ["Martin Trojer <martin.trojer@gmail.com>"]

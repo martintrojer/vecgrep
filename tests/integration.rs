@@ -274,6 +274,59 @@ fn test_default_mode_without_index_returns_no_results() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+// --- Embedding dimension tests ---
+
+#[test]
+fn test_load_all_with_non_default_embedding_dim() {
+    // Simulate an index built with a remote model (e.g., 1024-dim mxbai-embed-large)
+    let index = Index::open_in_memory().unwrap();
+    let dim = 1024; // Not the default 384
+
+    let chunks = vec![
+        Chunk {
+            file_path: "main.rs".to_string(),
+            text: "fn main() {}".to_string(),
+            start_line: 1,
+            end_line: 1,
+        },
+        Chunk {
+            file_path: "lib.rs".to_string(),
+            text: "pub fn lib() {}".to_string(),
+            start_line: 1,
+            end_line: 1,
+        },
+    ];
+
+    let embeddings = vec![make_embedding(dim, 1.0), make_embedding(dim, 2.0)];
+
+    index
+        .upsert_file("main.rs", "hash1", &chunks[0..1], &embeddings[0..1])
+        .unwrap();
+    index
+        .upsert_file("lib.rs", "hash2", &chunks[1..2], &embeddings[1..2])
+        .unwrap();
+
+    // load_all should infer dim=1024 from stored blobs, not assume 384
+    let (loaded_chunks, embedding_matrix) = index.load_all().unwrap();
+    assert_eq!(loaded_chunks.len(), 2);
+    assert_eq!(embedding_matrix.nrows(), 2);
+    assert_eq!(embedding_matrix.ncols(), dim);
+
+    // Search should work with the correct dimension
+    let results = search::search(&embeddings[0], &embedding_matrix, 2, 0.0, &loaded_chunks);
+    assert!(!results.is_empty());
+    assert!(results[0].score > 0.99); // should find itself
+}
+
+#[test]
+fn test_load_all_empty_index_uses_default_dim() {
+    let index = Index::open_in_memory().unwrap();
+    let (chunks, matrix) = index.load_all().unwrap();
+    assert!(chunks.is_empty());
+    assert_eq!(matrix.nrows(), 0);
+    assert_eq!(matrix.ncols(), EMBEDDING_DIM); // falls back to default
+}
+
 // --- Index scoping tests ---
 
 #[test]
