@@ -25,6 +25,7 @@ pub struct SearchResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexConfig {
     pub model_name: String,
+    pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
 }

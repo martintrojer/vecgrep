@@ -77,6 +77,7 @@ fn test_incremental_indexing() {
 
     let config = IndexConfig {
         model_name: "test-model".to_string(),
+        embedding_dim: EMBEDDING_DIM,
         chunk_size: 500,
         chunk_overlap: 100,
     };

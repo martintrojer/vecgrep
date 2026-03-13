@@ -167,6 +167,7 @@ fn run() -> Result<bool> {
 
     let config = IndexConfig {
         model_name: "all-MiniLM-L6-v2".to_string(),
+        embedding_dim: vecgrep::embedder::EMBEDDING_DIM,
         chunk_size: args.chunk_size,
         chunk_overlap: args.chunk_overlap,
     };

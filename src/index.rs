@@ -410,6 +410,7 @@ mod tests {
         let index = Index::open_in_memory().unwrap();
         let config = IndexConfig {
             model_name: "test-model".to_string(),
+            embedding_dim: 384,
             chunk_size: 500,
             chunk_overlap: 100,
         };
@@ -422,11 +423,13 @@ mod tests {
         let index = Index::open_in_memory().unwrap();
         let config1 = IndexConfig {
             model_name: "model-a".to_string(),
+            embedding_dim: 384,
             chunk_size: 500,
             chunk_overlap: 100,
         };
         let config2 = IndexConfig {
             model_name: "model-b".to_string(),
+            embedding_dim: 384,
             chunk_size: 500,
             chunk_overlap: 100,
         };
@@ -601,6 +604,7 @@ mod tests {
         index
             .set_config(&IndexConfig {
                 model_name: "m".to_string(),
+                embedding_dim: 384,
                 chunk_size: 1,
                 chunk_overlap: 0,
             })
