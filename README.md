@@ -18,14 +18,33 @@ vecgrep "database connection pooling" ./src -k 20 -t 0.2
 # Filter by file type
 vecgrep "sorting algorithm" --type rust
 
+# Use a code snippet as query to find similar patterns
+vecgrep "match result { Ok(v) => v, Err(e) => return Err(e) }" ./src
+
 # Interactive TUI mode
 vecgrep -i "authentication"
 
 # JSON output for scripting
 vecgrep "retry logic" --json | jq '.score'
 
+# Combining with ripgrep — semantic search to find files, then exact match
+vecgrep -l "error handling" ./src | xargs rg "unwrap"
+
+# Reverse — use ripgrep to narrow files, then vecgrep to rank by meaning
+rg -l "TODO" ./src | xargs vecgrep "technical debt that should be refactored"
+
+# Index management
+vecgrep --stats              # show index statistics
+vecgrep --reindex ./src      # force full re-index
+vecgrep --clear-cache        # delete cached index
+vecgrep --index-only ./src   # build index without searching
+vecgrep --show-root          # print resolved project root
+```
+
+## More examples
+
+```bash
 # HTTP server mode (load model once, query via curl)
-# Omit --port to auto-pick a free port; the URL is printed to stderr
 vecgrep --serve --port 8080 ./src
 # => Listening on http://127.0.0.1:8080
 curl -s "http://localhost:8080/search?q=error+handling&k=5"
@@ -34,12 +53,35 @@ curl -s "http://localhost:8080/search?q=error+handling&k=5"
 vecgrep --serve --port 8080 ./src &
 fzf --bind "change:reload:curl -s 'http://localhost:8080/search?q={q}'" --preview 'echo {}'
 
-# Index management
-vecgrep --stats              # show index statistics
-vecgrep --reindex ./src      # force full re-index
-vecgrep --clear-cache        # delete cached index
-vecgrep --index-only ./src   # build index without searching
-vecgrep --show-root          # print resolved project root
+# Security audit — find input handling code, then grep for dangerous patterns
+vecgrep -l "parsing user input" ./src | xargs rg "eval|exec|unsafe"
+
+# Find files about a concept and open them in your editor
+vecgrep -l "authentication and session management" ./src | xargs $EDITOR
+
+# Count how many files deal with a concept
+vecgrep -l "user authentication" ./src | wc -l
+
+# Count how many chunks in each file relate to error handling
+vecgrep -c "error handling" ./src
+
+# Filter high-confidence results and format as file:line
+vecgrep --json "error handling" ./src | jq -r 'select(.score > 0.5) | "\(.file):\(.start_line)"'
+
+# Find who wrote security-related code
+vecgrep --json "authentication" ./src | jq -r '.file' | sort -u | xargs git blame
+
+# Recent changes to files about database access
+vecgrep -l "database queries" ./src | xargs git log --oneline -5 --
+
+# Pretty-print matching files with bat
+vecgrep -l "configuration parsing" ./src | xargs bat --style=header,grid
+
+# Generate a markdown TODO list from semantic matches
+vecgrep --json "TODO" ./src | jq -r '"- [ ] \(.file):\(.start_line) — \(.text | split("\n") | first)"'
+
+# Re-run tests when error-handling code changes
+vecgrep -l "error handling" ./src | entr -r cargo test
 ```
 
 ## How it works
@@ -98,7 +140,11 @@ vecgrep [OPTIONS] <QUERY> [PATHS]...
 
 Arguments:
   <QUERY>     Search query (natural language or code snippet)
-  [PATHS]...  Paths to search [default: .]
+  [PATHS]...  Files or directories to search [default: .]
+              Like ripgrep, you can pass multiple paths. Directories
+              are walked recursively, respecting .gitignore. Files
+              are searched directly. The index is scoped to the
+              project root (discovered via .git/, .vecgrep/, etc.).
 
 Options:
   -k, --top-k <N>              Number of results [default: 10]
