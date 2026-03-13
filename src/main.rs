@@ -201,117 +201,114 @@ fn run() -> Result<bool> {
     let walker_join_handle =
         std::thread::spawn(move || walker::walk_paths_streaming(&walk_paths, &walk_opts, tx));
 
-    let mut all_paths = Vec::new();
-    let mut total_indexed = 0;
     let threshold = args.index_warn_threshold;
     let root_str = project_root_canon.to_string_lossy().to_string();
 
-    // For TUI/serve streaming, pass the receiver along instead of draining here.
-    let (streaming_rx, walker_handle) = if args.interactive || args.serve {
-        (Some(rx), Some(walker_join_handle))
-    } else {
-        // Standard CLI path: stream files from walker, index in batches inline.
-        // The walker thread overlaps file I/O with embedding compute.
-        // The threshold prompt fires mid-stream when the count crosses the limit.
-        let mut batch: Vec<(walker::WalkedFile, String)> = Vec::new();
-        let mut needs_indexing_count = 0;
-        let mut threshold_prompted = false;
-        for mut file in rx.iter() {
-            file.rel_path = paths::to_project_relative(&file.rel_path, &cwd_suffix);
-            all_paths.push(file.rel_path.clone());
+    let indexer = pipeline::StreamingIndexer::new(
+        rx,
+        args.chunk_size,
+        args.chunk_overlap,
+        batch_size,
+        &cwd_suffix,
+    );
 
-            let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
-            let needs_index = match idx.get_file_hash(&file.rel_path) {
-                Ok(Some(stored_hash)) => stored_hash != hash,
-                _ => true,
-            };
-            if !needs_index {
-                continue;
-            }
-
-            needs_indexing_count += 1;
-
-            // Threshold check — fires when crossing the limit
-            if !threshold_prompted && threshold > 0 && needs_indexing_count >= threshold {
-                threshold_prompted = true;
-                eprintln!(
-                    "Warning: {} files need indexing so far (still scanning).",
-                    needs_indexing_count
-                );
-                if std::io::stdin().is_terminal() {
-                    eprint!("Continue? [y/N] ");
-                    std::io::stderr().flush().ok();
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    if !input.trim().eq_ignore_ascii_case("y") {
-                        eprintln!("Aborted.");
-                        return Ok(false);
-                    }
-                }
-            }
-
-            batch.push((file, hash));
-            if batch.len() >= batch_size {
-                pipeline::process_batch(
-                    &mut embedder,
-                    &idx,
-                    &batch,
-                    args.chunk_size,
-                    args.chunk_overlap,
-                )?;
-                total_indexed += batch.len();
-                if !quiet && std::io::stderr().is_terminal() {
-                    eprint!("\rIndexed {} files...", total_indexed);
-                }
-                batch.clear();
-            }
-        }
-
-        // Flush remaining batch
-        if !batch.is_empty() {
-            pipeline::process_batch(
-                &mut embedder,
-                &idx,
-                &batch,
-                args.chunk_size,
-                args.chunk_overlap,
-            )?;
-            total_indexed += batch.len();
-            batch.clear();
-        }
-
-        // Join walker thread
-        match walker_join_handle.join() {
-            Ok(result) => {
-                result?;
-            }
-            Err(_) => anyhow::bail!("Walker thread panicked"),
-        }
-
-        status!(quiet, "Found {} files.", all_paths.len());
-
-        // Remove stale files from index
-        let removed = if walk_prefix.as_os_str().is_empty() {
-            idx.remove_stale_files(&all_paths)?
-        } else {
-            let prefix = format!("{}/", walk_prefix.display());
-            idx.remove_stale_files_under(&all_paths, &prefix)?
-        };
-        if removed > 0 {
-            status!(quiet, "Removed {} stale files from index.", removed);
-        }
-
-        if total_indexed > 0 {
-            status!(
-                quiet,
-                "\nIndexing complete. Indexed {} files.",
-                total_indexed
-            );
-        } else {
-            status!(quiet, "Index is up to date.");
-        }
-        (None, None)
+    // Need a query from here on (unless interactive/serve mode)
+    let query = match &args.query {
+        Some(q) => q.clone(),
+        None if args.interactive => String::new(),
+        None if args.serve || args.index_only || args.stats => String::new(),
+        None => return Ok(true),
     };
+
+    // TUI and serve take ownership of the indexer and interleave indexing
+    // with their event loops (non-blocking poll).
+    if args.serve {
+        serve::run_streaming(
+            &mut embedder,
+            &idx,
+            indexer,
+            args.port,
+            args.top_k,
+            args.threshold,
+            quiet,
+            &root_str,
+        )?;
+        let _ = walker_join_handle.join();
+        return Ok(true);
+    }
+
+    if args.interactive {
+        tui::interactive::run_streaming(
+            &mut embedder,
+            &idx,
+            indexer,
+            &query,
+            args.top_k,
+            args.threshold,
+            &cwd_suffix,
+        )?;
+        let _ = walker_join_handle.join();
+        return Ok(true);
+    }
+
+    // Standard CLI path: blocking drain. The walker thread overlaps file I/O
+    // with embedding compute. The threshold prompt fires mid-stream.
+    let mut indexer = indexer;
+    let mut threshold_prompted = false;
+    indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
+        if !threshold_prompted && threshold > 0 && indexed_so_far >= threshold {
+            threshold_prompted = true;
+            eprintln!(
+                "Warning: {} files need indexing so far (still scanning).",
+                indexed_so_far
+            );
+            if std::io::stdin().is_terminal() {
+                eprint!("Continue? [y/N] ");
+                std::io::stderr().flush().ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Aborted.");
+                    return Ok(false);
+                }
+            }
+        }
+        if !quiet && std::io::stderr().is_terminal() {
+            eprint!("\rIndexed {} files...", indexed_so_far);
+        }
+        Ok(true)
+    })?;
+
+    // Join walker thread
+    match walker_join_handle.join() {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => anyhow::bail!("Walker thread panicked"),
+    }
+
+    status!(quiet, "Found {} files.", indexer.all_paths.len());
+
+    // Remove stale files from index
+    let removed = if walk_prefix.as_os_str().is_empty() {
+        idx.remove_stale_files(&indexer.all_paths)?
+    } else {
+        let prefix = format!("{}/", walk_prefix.display());
+        idx.remove_stale_files_under(&indexer.all_paths, &prefix)?
+    };
+    if removed > 0 {
+        status!(quiet, "Removed {} stale files from index.", removed);
+    }
+
+    if indexer.indexed_count > 0 {
+        status!(
+            quiet,
+            "\nIndexing complete. Indexed {} files.",
+            indexer.indexed_count
+        );
+    } else {
+        status!(quiet, "Index is up to date.");
+    }
 
     // Handle --index-only
     if args.index_only {
@@ -327,86 +324,6 @@ fn run() -> Result<bool> {
         if args.query.is_none() {
             return Ok(true);
         }
-    }
-
-    // Need a query from here on (unless interactive mode)
-    let query = match &args.query {
-        Some(q) => q.clone(),
-        None if args.interactive => String::new(),
-        None => return Ok(true),
-    };
-
-    if args.serve {
-        if let Some(rx) = streaming_rx {
-            serve::run_streaming(
-                &mut embedder,
-                &idx,
-                rx,
-                args.port,
-                args.top_k,
-                args.threshold,
-                quiet,
-                args.chunk_size,
-                args.chunk_overlap,
-                &cwd_suffix,
-                &root_str,
-            )?;
-            if let Some(h) = walker_handle {
-                let _ = h.join();
-            }
-        } else {
-            let (chunks, embedding_matrix) = idx.load_all()?;
-            let stats = idx.stats()?;
-            status!(
-                quiet,
-                "Serving index: {} files, {} chunks.",
-                stats.file_count,
-                stats.chunk_count
-            );
-            serve::run(
-                &mut embedder,
-                &chunks,
-                &embedding_matrix,
-                args.port,
-                args.top_k,
-                args.threshold,
-                quiet,
-                &root_str,
-            )?;
-        }
-        return Ok(true);
-    }
-
-    if args.interactive {
-        if let Some(rx) = streaming_rx {
-            tui::interactive::run_streaming(
-                &mut embedder,
-                &idx,
-                rx,
-                &query,
-                args.top_k,
-                args.threshold,
-                args.chunk_size,
-                args.chunk_overlap,
-                &cwd_suffix,
-            )?;
-            if let Some(h) = walker_handle {
-                let _ = h.join();
-            }
-        } else {
-            let (chunks, embedding_matrix) = idx.load_all()?;
-            status!(quiet, "Loaded {} chunks for search.", chunks.len());
-            tui::interactive::run(
-                &mut embedder,
-                &chunks,
-                &embedding_matrix,
-                &query,
-                args.top_k,
-                args.threshold,
-                &cwd_suffix,
-            )?;
-        }
-        return Ok(true);
     }
 
     // Load all embeddings for search

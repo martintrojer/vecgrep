@@ -11,20 +11,16 @@ use crate::output::format_json_result;
 use crate::pipeline::StreamingIndexer;
 use crate::search;
 use crate::types::Chunk;
-use crate::walker::WalkedFile;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_streaming(
     embedder: &mut Embedder,
     idx: &Index,
-    rx: std::sync::mpsc::Receiver<WalkedFile>,
+    mut indexer: StreamingIndexer,
     port: Option<u16>,
     default_top_k: usize,
     default_threshold: f32,
     quiet: bool,
-    chunk_size: usize,
-    chunk_overlap: usize,
-    cwd_suffix: &std::path::Path,
     root: &str,
 ) -> Result<()> {
     let port = port.unwrap_or(0);
@@ -46,7 +42,6 @@ pub fn run_streaming(
         .expect("valid header");
 
     let (mut chunks, mut embedding_matrix) = idx.load_all()?;
-    let mut indexer = StreamingIndexer::new(rx, chunk_size, chunk_overlap, cwd_suffix);
     let mut indexing_announced = false;
 
     loop {

@@ -6,7 +6,6 @@ pub mod interactive {
     use crate::pipeline::StreamingIndexer;
     use crate::search;
     use crate::types::{Chunk, SearchResult};
-    use crate::walker::WalkedFile;
     use anyhow::Result;
     use crossterm::{
         event::{self, Event, KeyCode},
@@ -24,7 +23,6 @@ pub mod interactive {
     };
     use std::io;
     use std::path::Path;
-    use std::sync::mpsc::Receiver;
     use std::time::{Duration, Instant};
 
     pub fn run(
@@ -62,16 +60,13 @@ pub mod interactive {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn run_streaming(
         embedder: &mut Embedder,
         idx: &Index,
-        rx: Receiver<WalkedFile>,
+        indexer: StreamingIndexer,
         initial_query: &str,
         top_k: usize,
         threshold: f32,
-        chunk_size: usize,
-        chunk_overlap: usize,
         cwd_suffix: &Path,
     ) -> Result<()> {
         enable_raw_mode()?;
@@ -81,7 +76,6 @@ pub mod interactive {
         let mut terminal = Terminal::new(backend)?;
 
         let (chunks, embedding_matrix) = idx.load_all()?;
-        let indexer = StreamingIndexer::new(rx, chunk_size, chunk_overlap, cwd_suffix);
 
         let result = event_loop(
             &mut terminal,

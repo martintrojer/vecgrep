@@ -18,9 +18,12 @@ pub struct StreamingIndexer {
     rx: Receiver<WalkedFile>,
     pub indexing_done: bool,
     pub indexed_count: usize,
+    /// All file paths seen (for stale removal).
+    pub all_paths: Vec<String>,
     last_reload: Instant,
     chunk_size: usize,
     chunk_overlap: usize,
+    batch_size: usize,
     cwd_suffix: Box<Path>,
 }
 
@@ -29,20 +32,61 @@ impl StreamingIndexer {
         rx: Receiver<WalkedFile>,
         chunk_size: usize,
         chunk_overlap: usize,
+        batch_size: usize,
         cwd_suffix: &Path,
     ) -> Self {
         Self {
             rx,
             indexing_done: false,
             indexed_count: 0,
+            all_paths: Vec::new(),
             last_reload: Instant::now() - Duration::from_secs(10),
             chunk_size,
             chunk_overlap,
+            batch_size,
             cwd_suffix: cwd_suffix.into(),
         }
     }
 
-    /// Drain up to STREAMING_BATCH_SIZE files from the channel, process them,
+    /// Receive one file from the channel, hash-check it, and return it if it needs indexing.
+    /// Returns `None` if the file is up-to-date or the channel is empty/closed.
+    fn recv_one(&mut self, idx: &Index, blocking: bool) -> Option<(WalkedFile, String)> {
+        let file = if blocking {
+            match self.rx.recv() {
+                Ok(f) => f,
+                Err(_) => {
+                    self.indexing_done = true;
+                    return None;
+                }
+            }
+        } else {
+            match self.rx.try_recv() {
+                Ok(f) => f,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    self.indexing_done = true;
+                    return None;
+                }
+            }
+        };
+
+        let mut file = file;
+        file.rel_path = paths::to_project_relative(&file.rel_path, &self.cwd_suffix);
+        self.all_paths.push(file.rel_path.clone());
+
+        let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
+        let needs_index = match idx.get_file_hash(&file.rel_path) {
+            Ok(Some(stored_hash)) => stored_hash != hash,
+            _ => true,
+        };
+        if needs_index {
+            Some((file, hash))
+        } else {
+            None
+        }
+    }
+
+    /// Drain up to `batch_size` files from the channel (non-blocking), process them,
     /// and reload the index if enough time has passed.
     /// Returns `true` if the index data was reloaded (caller should re-search).
     pub fn poll(
@@ -57,27 +101,10 @@ impl StreamingIndexer {
         }
 
         let mut batch: Vec<(WalkedFile, String)> = Vec::new();
-        loop {
-            match self.rx.try_recv() {
-                Ok(mut file) => {
-                    file.rel_path = paths::to_project_relative(&file.rel_path, &self.cwd_suffix);
-                    let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
-                    let needs_index = match idx.get_file_hash(&file.rel_path) {
-                        Ok(Some(stored_hash)) => stored_hash != hash,
-                        _ => true,
-                    };
-                    if needs_index {
-                        batch.push((file, hash));
-                    }
-                    if batch.len() >= STREAMING_BATCH_SIZE {
-                        break;
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.indexing_done = true;
-                    break;
-                }
+        while batch.len() < self.batch_size && !self.indexing_done {
+            match self.recv_one(idx, false) {
+                Some(entry) => batch.push(entry),
+                None => break,
             }
         }
 
@@ -104,6 +131,50 @@ impl StreamingIndexer {
         }
 
         Ok(reloaded)
+    }
+
+    /// Blocking drain: process all files from the channel until it closes.
+    /// Calls `on_batch` after each batch is processed, with the count indexed so far.
+    /// Returns the total number of files indexed.
+    pub fn drain_all<F>(
+        &mut self,
+        embedder: &mut Embedder,
+        idx: &Index,
+        mut on_batch: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(usize) -> Result<bool>, // (indexed_so_far) -> continue?
+    {
+        while !self.indexing_done {
+            let mut batch: Vec<(WalkedFile, String)> = Vec::new();
+
+            // First file: blocking recv
+            if let Some(entry) = self.recv_one(idx, true) {
+                batch.push(entry);
+            }
+            if self.indexing_done && batch.is_empty() {
+                break;
+            }
+
+            // Fill rest of batch: non-blocking
+            while batch.len() < self.batch_size && !self.indexing_done {
+                match self.recv_one(idx, false) {
+                    Some(entry) => batch.push(entry),
+                    None => break,
+                }
+            }
+
+            if !batch.is_empty() {
+                self.indexed_count += batch.len();
+                process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
+
+                if !on_batch(self.indexed_count)? {
+                    return Ok(self.indexed_count);
+                }
+            }
+        }
+
+        Ok(self.indexed_count)
     }
 }
 

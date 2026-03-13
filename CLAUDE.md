@@ -35,7 +35,7 @@ walker (thread) →  channel(32)  →  pipeline::process_batch  →  index (SQLi
 (files)            (backpressure)   (chunk + embed + upsert)    (cache)            (rank)     (display)
 ```
 
-The walker runs on a background thread feeding files through a bounded `sync_channel(32)`. The channel backpressure means the walker blocks if the embedder falls behind. In **CLI mode**, files are indexed inline as they arrive — the threshold prompt fires mid-stream when the count crosses the limit ("N files need indexing so far, still scanning"). In **TUI/serve mode**, indexing is interleaved with user interaction — files are drained non-blockingly (up to 4 per iteration), processed via `pipeline::process_batch()`, and the index is reloaded every 2 seconds so results appear progressively.
+The walker runs on a background thread feeding files through a bounded `sync_channel(32)`. The channel backpressure means the walker blocks if the embedder falls behind. All three modes (CLI, TUI, serve) use `pipeline::StreamingIndexer` to consume the channel. In **CLI mode**, `drain_all()` blocks until the channel closes, with a callback for the threshold prompt and progress. In **TUI/serve mode**, `poll()` drains non-blockingly (up to `STREAMING_BATCH_SIZE` per iteration), and the index is reloaded every 2 seconds so results appear progressively.
 
 **Key design decisions:**
 
