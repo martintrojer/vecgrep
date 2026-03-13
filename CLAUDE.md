@@ -22,6 +22,14 @@ cargo clean
 cargo test --test benchmark_models -- --nocapture
 ```
 
+**GPU/ANE acceleration**: We tested CoreML execution provider (Apple Neural Engine) via `ort`'s `coreml` feature flag. Findings:
+- CoreML is **significantly slower** than CPU on real workloads (tested on a Markdown vault)
+- CoreML session compilation adds ~1s overhead per session creation
+- For our small model (22M params), CPU inference is already <5ms per query
+- Tests ran ~8× slower with CoreML due to session compilation overhead
+- The data transfer overhead between CPU↔ANE exceeds any compute savings at this model size
+- Conclusion: CPU-only is the right choice. Don't revisit unless the model grows significantly (>100M params)
+
 ## Before Committing
 
 Always run these before committing:
