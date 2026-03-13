@@ -237,7 +237,7 @@ mod tests {
             drop(listener);
 
             thread::spawn(move || {
-                let mut embedder = Embedder::new().unwrap();
+                let mut embedder = Embedder::new_local().unwrap();
 
                 let texts = ["error handling in rust", "memory management", "HTTP server"];
                 let chunks: Vec<Chunk> = texts

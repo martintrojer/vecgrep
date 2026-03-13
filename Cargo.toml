@@ -36,6 +36,7 @@ crossterm = "0.28"
 nucleo = "0.5"
 tiny_http = "0.12"
 url = "2"
+ureq = "3"
 
 [dev-dependencies]
 tempfile = "3"

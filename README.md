@@ -33,6 +33,9 @@ vecgrep -l "error handling" ./src | xargs rg "unwrap"
 # Reverse — use ripgrep to narrow files, then vecgrep to rank by meaning
 rg -l "TODO" ./src | xargs vecgrep "technical debt that should be refactored"
 
+# Use an external embedding model via Ollama / LM Studio / any OpenAI-compatible server
+vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model nomic-embed-text "query" ./src
+
 # Index management
 vecgrep --stats              # show index statistics
 vecgrep --reindex ./src      # force full re-index
@@ -163,6 +166,8 @@ Options:
       --no-ignore               Don't respect .gitignore
       --type-list               Show all supported file types
       --color <WHEN>            When to use color (auto, always, never)
+      --embedder-url <URL>      OpenAI-compatible embeddings API URL
+      --embedder-model <NAME>  Model name for --embedder-url
       --reindex                 Force full re-index
       --full-index              Wait for indexing to complete before searching
       --index-only              Build index without searching
