@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_process_batch_indexes_files() {
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
         let files = vec![
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_process_batch_empty() {
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
         let chunk_count = process_batch(&mut embedder, &idx, &[], 500, 100).unwrap();
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(batch.len(), 2);
 
         // Process through pipeline
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
         let chunk_count = process_batch(&mut embedder, &idx, &batch, 500, 100).unwrap();
         assert_eq!(chunk_count, 2); // small files = 1 chunk each
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_incremental_streaming_batches() {
         // Simulate the streaming pipeline processing files in multiple batches
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
         // Batch 1
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_process_batch_multi_chunk_file() {
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
         // Generate content large enough for multiple chunks at chunk_size=10
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_streaming_skips_already_indexed() {
-        let mut embedder = Embedder::new().unwrap();
+        let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
         // Pre-index a file

@@ -1,13 +1,19 @@
 use crate::types::Chunk;
 use tokenizers::Tokenizer;
 
+/// Estimate token count from text length (heuristic: ~4 chars per token).
+fn estimate_tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
+}
+
 /// Chunk a file's content into overlapping token-window chunks, snapping to line boundaries.
+/// If `tokenizer` is `None`, uses a character-based heuristic for token counting.
 pub fn chunk_file(
     file_path: &str,
     content: &str,
     chunk_size: usize,
     chunk_overlap: usize,
-    tokenizer: &Tokenizer,
+    tokenizer: Option<&Tokenizer>,
 ) -> Vec<Chunk> {
     if content.is_empty() {
         return vec![];
@@ -18,16 +24,18 @@ pub fn chunk_file(
         return vec![];
     }
 
-    // Tokenize the full content to get token counts per line
-    let line_token_counts: Vec<usize> = lines
-        .iter()
-        .map(|line| {
-            tokenizer
-                .encode(*line, false)
-                .map(|enc| enc.get_ids().len())
-                .unwrap_or(0)
-        })
-        .collect();
+    // Get token counts per line — use tokenizer if available, otherwise estimate
+    let line_token_counts: Vec<usize> = match tokenizer {
+        Some(tok) => lines
+            .iter()
+            .map(|line| {
+                tok.encode(*line, false)
+                    .map(|enc| enc.get_ids().len())
+                    .unwrap_or(0)
+            })
+            .collect(),
+        None => lines.iter().map(|line| estimate_tokens(line)).collect(),
+    };
 
     let total_tokens: usize = line_token_counts.iter().sum();
 
@@ -121,7 +129,7 @@ mod tests {
         let content = "hello world\nthis is a test";
         // Note: tokenizer pads each line to 128 tokens, so 2 lines = 256 padded tokens.
         // Use chunk_size=500 (the production default) to ensure single-chunk output.
-        let chunks = chunk_file("test.txt", content, 500, 50, &tokenizer);
+        let chunks = chunk_file("test.txt", content, 500, 50, Some(&tokenizer));
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks[0].end_line, 2);
@@ -130,7 +138,7 @@ mod tests {
     #[test]
     fn test_empty_content() {
         let tokenizer = make_tokenizer();
-        let chunks = chunk_file("test.txt", "", 200, 50, &tokenizer);
+        let chunks = chunk_file("test.txt", "", 200, 50, Some(&tokenizer));
         assert!(chunks.is_empty());
     }
 
@@ -142,7 +150,7 @@ mod tests {
             .map(|i| format!("This is line number {} with some content to fill tokens", i))
             .collect();
         let content = lines.join("\n");
-        let chunks = chunk_file("test.txt", &content, 50, 10, &tokenizer);
+        let chunks = chunk_file("test.txt", &content, 50, 10, Some(&tokenizer));
         assert!(chunks.len() > 1);
 
         // Verify all chunks have valid line ranges
@@ -161,10 +169,10 @@ mod tests {
             .collect();
         let content = lines.join("\n");
         // overlap >= chunk_size: should not panic, advances by chunk_size
-        let chunks = chunk_file("test.txt", &content, 10, 10, &tokenizer);
+        let chunks = chunk_file("test.txt", &content, 10, 10, Some(&tokenizer));
         assert!(!chunks.is_empty());
         // overlap > chunk_size
-        let chunks = chunk_file("test.txt", &content, 10, 20, &tokenizer);
+        let chunks = chunk_file("test.txt", &content, 10, 20, Some(&tokenizer));
         assert!(!chunks.is_empty());
     }
 
@@ -173,7 +181,7 @@ mod tests {
         let tokenizer = make_tokenizer();
         // A single line with many words that exceeds chunk_size tokens
         let long_line = "word ".repeat(500);
-        let chunks = chunk_file("test.txt", &long_line, 10, 2, &tokenizer);
+        let chunks = chunk_file("test.txt", &long_line, 10, 2, Some(&tokenizer));
         // Should produce at least one chunk even though the line exceeds chunk_size
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].start_line, 1);
@@ -186,7 +194,7 @@ mod tests {
             .map(|i| format!("This is line number {}", i))
             .collect();
         let content = lines.join("\n");
-        let chunks = chunk_file("test.txt", &content, 30, 5, &tokenizer);
+        let chunks = chunk_file("test.txt", &content, 30, 5, Some(&tokenizer));
 
         for chunk in &chunks {
             // No chunk text should start or end with a partial line
@@ -210,7 +218,7 @@ mod tests {
             .map(|i| format!("Line {} with some extra content to consume tokens", i))
             .collect();
         let content = lines.join("\n");
-        let chunks = chunk_file("test.txt", &content, 200, 50, &tokenizer);
+        let chunks = chunk_file("test.txt", &content, 200, 50, Some(&tokenizer));
         assert!(chunks.len() >= 2, "Need multiple chunks to test overlap");
 
         // First chunk starts at line 1

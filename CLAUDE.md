@@ -41,7 +41,7 @@ cargo clippy -- -D warnings
 
 ## Architecture
 
-vecgrep is a semantic grep tool: it embeds a query and file chunks into vectors using a local ONNX model, then ranks chunks by cosine similarity.
+vecgrep is a semantic grep tool: it embeds a query and file chunks into vectors, then ranks chunks by cosine similarity. Embeddings come from either the built-in ONNX model (default) or an external OpenAI-compatible API (`--embedder-url`).
 
 **Data pipeline** (orchestrated in `main.rs`, streamed via `std::sync::mpsc`):
 
@@ -58,7 +58,7 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 
 **Key design decisions:**
 
-- **Model embedded in binary**: `build.rs` downloads model + tokenizer at build time; they're compiled into the binary via `include_bytes!`. This means the ONNX model (~90MB) lives in `$OUT_DIR/models/` and the binary is self-contained.
+- **Model embedded in binary**: `build.rs` downloads model + tokenizer at build time; they're compiled into the binary via `include_bytes!`. This means the ONNX model (~90MB) lives in `$OUT_DIR/models/` and the binary is self-contained. Alternatively, `--embedder-url` and `--embedder-model` use an external OpenAI-compatible API (Ollama, LM Studio, etc.).
 - **ort API quirks**: `ort` v2.0.0-rc.12 errors are not `Send+Sync`, so `?` with `anyhow` doesn't work — all ort calls must use `.map_err(|e| anyhow::anyhow!("{}", e))`. `Session::run` requires `&mut self`.
 - **Embeddings are L2-normalized**, so cosine similarity = dot product. The search module (`search.rs`) exploits this by doing a simple `embedding_matrix.dot(&query)`.
 - **Cache invalidation**: BLAKE3 content hash per file. If model name or chunk params change (stored in `meta` table as JSON), the entire index is rebuilt.
@@ -71,8 +71,8 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 
 | Module | Role |
 |---|---|
-| `embedder.rs` | ONNX session + tokenizer, batch inference with mean-pooling |
-| `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries |
+| `embedder.rs` | `Embedder` enum: `Local` (ONNX + tokenizer) or `Remote` (OpenAI-compatible HTTP API). Single queries use CPU, batches use the configured backend |
+| `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries. Uses tokenizer when available, char-based heuristic otherwise |
 | `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `process_batch()` for chunk → embed → upsert |
 | `paths.rs` | Path conversions: `to_project_relative()`, `to_cwd_relative()` |
 | `index.rs` | SQLite schema (`meta`/`files`/`chunks`), upsert, stale removal, bulk load into ndarray |

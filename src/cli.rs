@@ -134,6 +134,16 @@ pub struct Args {
     #[arg(long)]
     pub show_root: bool,
 
+    /// URL of an OpenAI-compatible embeddings API
+    /// (e.g., http://localhost:11434/v1/embeddings).
+    /// When set, uses the external server instead of the built-in model.
+    #[arg(long, requires = "embedder_model")]
+    pub embedder_url: Option<String>,
+
+    /// Model name to use with --embedder-url.
+    #[arg(long, requires = "embedder_url")]
+    pub embedder_model: Option<String>,
+
     /// Start HTTP server mode.
     #[arg(long)]
     pub serve: bool,

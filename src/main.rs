@@ -158,16 +158,28 @@ fn run() -> Result<bool> {
     }
 
     // Initialize embedder
-    status!(quiet, "Loading model...");
-    let mut embedder = Embedder::new().context("Failed to initialize embedder")?;
-    status!(quiet, "Model loaded.");
+    let mut embedder =
+        if let (Some(ref url), Some(ref model)) = (&args.embedder_url, &args.embedder_model) {
+            status!(quiet, "Using external embedder: {} ({})", url, model);
+            let mut e = Embedder::new_remote(url, model);
+            // Probe to discover embedding dimension before building config
+            e.embed("probe")
+                .context("Failed to connect to external embedder")?;
+            status!(quiet, "Embedding dimension: {}", e.embedding_dim());
+            e
+        } else {
+            status!(quiet, "Loading model...");
+            let e = Embedder::new_local().context("Failed to initialize embedder")?;
+            status!(quiet, "Model loaded.");
+            e
+        };
 
     // Open or create index
     let idx = Index::open(&project_root)?;
 
     let config = IndexConfig {
-        model_name: "all-MiniLM-L6-v2".to_string(),
-        embedding_dim: vecgrep::embedder::EMBEDDING_DIM,
+        model_name: embedder.model_name().to_string(),
+        embedding_dim: embedder.embedding_dim(),
         chunk_size: args.chunk_size,
         chunk_overlap: args.chunk_overlap,
     };
