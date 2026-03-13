@@ -8,6 +8,20 @@
 use serde::Deserialize;
 use vecgrep::embedder::Embedder;
 
+/// Create an embedder from env vars or fall back to local.
+/// Set VECGREP_EMBEDDER_URL and VECGREP_EMBEDDER_MODEL to use a remote embedder.
+fn make_embedder() -> Embedder {
+    if let (Ok(url), Ok(model)) = (
+        std::env::var("VECGREP_EMBEDDER_URL"),
+        std::env::var("VECGREP_EMBEDDER_MODEL"),
+    ) {
+        eprintln!("Using remote embedder: {} ({})", url, model);
+        Embedder::new_remote(&url, &model)
+    } else {
+        Embedder::new_local().unwrap()
+    }
+}
+
 #[derive(Deserialize)]
 struct BenchmarkData {
     corpus: Vec<Document>,
@@ -90,7 +104,7 @@ fn ndcg_at_k(ranked: &[(usize, f32)], relevant_indices: &[usize], k: usize) -> f
 #[test]
 fn benchmark_retrieval() {
     let data = load_data();
-    let mut embedder = Embedder::new().unwrap();
+    let mut embedder = make_embedder();
 
     // Embed corpus
     let corpus_texts: Vec<&str> = data.corpus.iter().map(|d| d.text.as_str()).collect();
@@ -197,7 +211,7 @@ fn benchmark_retrieval() {
 
 #[test]
 fn benchmark_relevance_separation() {
-    let mut embedder = Embedder::new().unwrap();
+    let mut embedder = make_embedder();
 
     println!("\n=== Relevance Separation ===\n");
 
