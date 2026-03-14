@@ -1,11 +1,13 @@
 use anyhow::Result;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
 
 use crate::chunker;
 use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::paths;
+use crate::types::SearchResult;
 use crate::walker::WalkedFile;
 
 /// Manages incremental indexing from a streaming channel.
@@ -17,7 +19,7 @@ pub struct StreamingIndexer {
     pub all_paths: Vec<String>,
     chunk_size: usize,
     chunk_overlap: usize,
-    batch_size: usize,
+    pub(crate) batch_size: usize,
     cwd_suffix: Box<Path>,
 }
 
@@ -145,6 +147,170 @@ impl StreamingIndexer {
         }
 
         Ok(self.indexed_count)
+    }
+}
+
+// --- Background embed worker for non-blocking TUI/serve modes ---
+
+/// Worker batch size — small for responsiveness between search request checks.
+const WORKER_BATCH_SIZE: usize = 2;
+
+enum WorkerRequest {
+    Search {
+        query: String,
+        top_k: usize,
+        threshold: f32,
+    },
+    Shutdown,
+}
+
+#[derive(Debug)]
+pub enum SearchOutcome {
+    Results(Vec<SearchResult>),
+    EmbedError(String),
+}
+
+pub struct IndexProgress {
+    pub indexed_count: usize,
+    pub chunk_count: usize,
+    pub indexing_done: bool,
+}
+
+/// Runs embedding and indexing on a background thread so the UI stays responsive.
+pub struct EmbedWorker {
+    req_tx: mpsc::Sender<WorkerRequest>,
+    result_rx: mpsc::Receiver<SearchOutcome>,
+    progress_rx: mpsc::Receiver<IndexProgress>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EmbedWorker {
+    /// Spawn a background worker that owns the embedder, index, and indexer.
+    pub fn spawn(embedder: Embedder, idx: Index, mut indexer: StreamingIndexer) -> Self {
+        let (req_tx, req_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let (progress_tx, progress_rx) = mpsc::channel();
+
+        indexer.batch_size = WORKER_BATCH_SIZE;
+
+        let handle = std::thread::spawn(move || {
+            worker_loop(embedder, idx, indexer, req_rx, result_tx, progress_tx);
+        });
+
+        Self {
+            req_tx,
+            result_rx,
+            progress_rx,
+            handle: Some(handle),
+        }
+    }
+
+    /// Send a search request to the worker.
+    pub fn search(&self, query: &str, top_k: usize, threshold: f32) {
+        self.req_tx
+            .send(WorkerRequest::Search {
+                query: query.to_string(),
+                top_k,
+                threshold,
+            })
+            .ok();
+    }
+
+    /// Non-blocking check for search results.
+    pub fn try_recv_results(&self) -> Option<SearchOutcome> {
+        self.result_rx.try_recv().ok()
+    }
+
+    /// Blocking wait for search results.
+    pub fn recv_results(&self) -> Option<SearchOutcome> {
+        self.result_rx.recv().ok()
+    }
+
+    /// Drain all pending progress messages, returning the latest.
+    pub fn drain_progress(&self) -> Option<IndexProgress> {
+        let mut last = None;
+        while let Ok(p) = self.progress_rx.try_recv() {
+            last = Some(p);
+        }
+        last
+    }
+}
+
+impl Drop for EmbedWorker {
+    fn drop(&mut self) {
+        self.req_tx.send(WorkerRequest::Shutdown).ok();
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn handle_search(
+    embedder: &mut Embedder,
+    idx: &Index,
+    query: &str,
+    top_k: usize,
+    threshold: f32,
+    result_tx: &mpsc::Sender<SearchOutcome>,
+) {
+    let outcome = match embedder.embed(query) {
+        Ok(emb) => SearchOutcome::Results(idx.search(&emb, top_k, threshold).unwrap_or_default()),
+        Err(e) => SearchOutcome::EmbedError(format!("{e:#}")),
+    };
+    result_tx.send(outcome).ok();
+}
+
+fn worker_loop(
+    mut embedder: Embedder,
+    idx: Index,
+    mut indexer: StreamingIndexer,
+    req_rx: mpsc::Receiver<WorkerRequest>,
+    result_tx: mpsc::Sender<SearchOutcome>,
+    progress_tx: mpsc::Sender<IndexProgress>,
+) {
+    loop {
+        // Priority 1: handle all pending search requests
+        loop {
+            match req_rx.try_recv() {
+                Ok(WorkerRequest::Search {
+                    query,
+                    top_k,
+                    threshold,
+                }) => handle_search(&mut embedder, &idx, &query, top_k, threshold, &result_tx),
+                Ok(WorkerRequest::Shutdown) => return,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+
+        // Priority 2: index a small batch
+        if !indexer.indexing_done {
+            match indexer.poll(&mut embedder, &idx) {
+                Ok(_) => {
+                    progress_tx
+                        .send(IndexProgress {
+                            indexed_count: indexer.indexed_count,
+                            chunk_count: idx.chunk_count().unwrap_or(0),
+                            indexing_done: indexer.indexing_done,
+                        })
+                        .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Indexing error: {e:#}");
+                }
+            }
+        } else {
+            // No more indexing, wait for requests
+            match req_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(WorkerRequest::Search {
+                    query,
+                    top_k,
+                    threshold,
+                }) => handle_search(&mut embedder, &idx, &query, top_k, threshold, &result_tx),
+                Ok(WorkerRequest::Shutdown) => return,
+                Err(_) => {}
+            }
+        }
     }
 }
 
@@ -437,5 +603,146 @@ mod tests {
             "file should have been skipped (hash match)"
         );
         assert_eq!(idx.chunk_count().unwrap(), 1);
+    }
+
+    // --- EmbedWorker tests ---
+
+    /// Helper: create an EmbedWorker with pre-indexed data and no streaming files.
+    fn worker_with_data(texts: &[&str]) -> EmbedWorker {
+        let mut embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        for (i, text) in texts.iter().enumerate() {
+            let emb = embedder.embed(text).unwrap();
+            let chunk = crate::types::Chunk {
+                file_path: format!("file{i}.rs"),
+                text: text.to_string(),
+                start_line: 1,
+                end_line: 1,
+            };
+            idx.upsert_file(
+                &format!("file{i}.rs"),
+                &format!("hash{i}"),
+                &[chunk],
+                &[emb],
+            )
+            .unwrap();
+        }
+
+        let (tx, rx) = mpsc::sync_channel(0);
+        drop(tx); // no files to index
+        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""));
+        EmbedWorker::spawn(embedder, idx, indexer)
+    }
+
+    #[test]
+    fn test_worker_search_after_indexing_done() {
+        let worker = worker_with_data(&["error handling in rust", "memory management"]);
+
+        worker.search("error handling", 5, 0.0);
+        let outcome = worker.recv_results().unwrap();
+        match outcome {
+            SearchOutcome::Results(results) => {
+                assert!(!results.is_empty(), "expected search results");
+                assert!(results[0].score > 0.0);
+            }
+            SearchOutcome::EmbedError(e) => panic!("unexpected embed error: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_worker_search_during_indexing() {
+        let mut embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        // Pre-index one file so search has something to find
+        let emb = embedder.embed("existing content").unwrap();
+        let chunk = crate::types::Chunk {
+            file_path: "existing.rs".to_string(),
+            text: "existing content".to_string(),
+            start_line: 1,
+            end_line: 1,
+        };
+        idx.upsert_file("existing.rs", "hash0", &[chunk], &[emb])
+            .unwrap();
+
+        // Create a channel with files to index (keeps worker busy)
+        let (tx, rx) = mpsc::sync_channel(32);
+        for i in 0..10 {
+            tx.send(WalkedFile {
+                rel_path: format!("new{i}.rs"),
+                content: format!("fn new_function_{i}() {{ }}"),
+            })
+            .unwrap();
+        }
+        // Don't drop tx yet — worker thinks indexing is still in progress
+
+        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""));
+        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+
+        // Search should work even while indexing is happening
+        worker.search("existing content", 5, 0.0);
+        let outcome = worker.recv_results().unwrap();
+        match outcome {
+            SearchOutcome::Results(results) => {
+                assert!(!results.is_empty(), "search should work during indexing");
+                assert_eq!(results[0].chunk.file_path, "existing.rs");
+            }
+            SearchOutcome::EmbedError(e) => panic!("unexpected embed error: {e}"),
+        }
+
+        drop(tx); // let indexing finish
+        drop(worker);
+    }
+
+    #[test]
+    fn test_worker_progress_reporting() {
+        let embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        let (tx, rx) = mpsc::sync_channel(32);
+        for i in 0..3 {
+            tx.send(WalkedFile {
+                rel_path: format!("f{i}.rs"),
+                content: format!("fn func_{i}() {{ }}"),
+            })
+            .unwrap();
+        }
+        drop(tx);
+
+        let indexer = StreamingIndexer::new(rx, 500, 100, 2, std::path::Path::new(""));
+        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+
+        // Wait for indexing to complete (50 × 50ms = 2.5s max)
+        let mut final_progress = None;
+        for _ in 0..50 {
+            if let Some(p) = worker.drain_progress() {
+                if p.indexing_done {
+                    final_progress = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let progress = final_progress.expect("should have received progress with indexing_done");
+        assert_eq!(progress.indexed_count, 3);
+        assert_eq!(progress.chunk_count, 3);
+        assert!(progress.indexing_done);
+    }
+
+    #[test]
+    fn test_worker_shutdown_via_drop() {
+        let worker = worker_with_data(&["test content"]);
+
+        // Verify worker is alive by doing a search
+        worker.search("test", 1, 0.0);
+        match worker.recv_results() {
+            Some(SearchOutcome::Results(_)) => {}
+            other => panic!("expected Results, got: {other:?}"),
+        }
+
+        // Drop should shut down cleanly without hanging
+        drop(worker);
     }
 }
