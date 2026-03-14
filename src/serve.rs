@@ -1,7 +1,6 @@
 use std::net::TcpListener;
 
 use anyhow::{Context, Result};
-use ndarray::Array2;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::Url;
 
@@ -9,8 +8,6 @@ use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::output::format_json_result;
 use crate::pipeline::StreamingIndexer;
-use crate::search;
-use crate::types::Chunk;
 
 fn json_content_header() -> Header {
     "Content-Type: application/x-ndjson"
@@ -28,8 +25,7 @@ fn json_error_header() -> Header {
 fn handle_request(
     request: Request,
     embedder: &mut Embedder,
-    chunks: &[Chunk],
-    embedding_matrix: &Array2<f32>,
+    idx: &Index,
     default_top_k: usize,
     default_threshold: f32,
     root: &str,
@@ -111,7 +107,7 @@ fn handle_request(
         }
     };
 
-    let results = search::search(&query_embedding, embedding_matrix, top_k, threshold, chunks);
+    let results = idx.search(&query_embedding, top_k, threshold)?;
 
     let mut body = String::new();
     for result in &results {
@@ -147,18 +143,17 @@ pub fn run_streaming(
     let _ = quiet;
     eprintln!("Listening on http://127.0.0.1:{actual_port}");
 
-    let (mut chunks, mut embedding_matrix) = idx.load_all()?;
     let mut indexing_announced = false;
 
     loop {
         if !indexer.indexing_done {
-            indexer.poll(embedder, idx, &mut chunks, &mut embedding_matrix)?;
+            indexer.poll(embedder, idx)?;
             if indexer.indexing_done && !indexing_announced {
                 indexing_announced = true;
+                let chunk_count = idx.chunk_count().unwrap_or(0);
                 eprintln!(
                     "Indexing complete. {} files indexed, {} chunks ready.",
-                    indexer.indexed_count,
-                    chunks.len()
+                    indexer.indexed_count, chunk_count
                 );
             }
         }
@@ -171,8 +166,7 @@ pub fn run_streaming(
         handle_request(
             request,
             embedder,
-            &chunks,
-            &embedding_matrix,
+            idx,
             default_top_k,
             default_threshold,
             root,
@@ -180,11 +174,9 @@ pub fn run_streaming(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     embedder: &mut Embedder,
-    chunks: &[Chunk],
-    embedding_matrix: &Array2<f32>,
+    idx: &Index,
     port: Option<u16>,
     default_top_k: usize,
     default_threshold: f32,
@@ -206,8 +198,7 @@ pub fn run(
         handle_request(
             request,
             embedder,
-            chunks,
-            embedding_matrix,
+            idx,
             default_top_k,
             default_threshold,
             root,
@@ -221,6 +212,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::embedder::Embedder;
+    use crate::types::Chunk;
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
     use std::sync::OnceLock;
@@ -238,6 +230,7 @@ mod tests {
 
             thread::spawn(move || {
                 let mut embedder = Embedder::new_local().unwrap();
+                let idx = Index::open_in_memory().unwrap();
 
                 let texts = ["error handling in rust", "memory management", "HTTP server"];
                 let chunks: Vec<Chunk> = texts
@@ -253,21 +246,19 @@ mod tests {
 
                 let embeddings: Vec<Vec<f32>> =
                     texts.iter().map(|t| embedder.embed(t).unwrap()).collect();
-                let dim = embeddings[0].len();
-                let flat: Vec<f32> = embeddings.into_iter().flatten().collect();
-                let matrix = Array2::from_shape_vec((chunks.len(), dim), flat).unwrap();
 
-                run(
-                    &mut embedder,
-                    &chunks,
-                    &matrix,
-                    Some(port),
-                    10,
-                    0.3,
-                    true,
-                    "/test/root",
-                )
-                .unwrap();
+                // Insert each file into the index
+                for (i, (chunk, emb)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+                    idx.upsert_file(
+                        &format!("test{i}.rs"),
+                        &format!("hash{i}"),
+                        &[chunk.clone()],
+                        &[emb.clone()],
+                    )
+                    .unwrap();
+                }
+
+                run(&mut embedder, &idx, Some(port), 10, 0.3, true, "/test/root").unwrap();
             });
 
             for _ in 0..50 {

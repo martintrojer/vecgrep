@@ -6,7 +6,6 @@ pub mod index;
 pub mod output;
 pub mod paths;
 pub mod pipeline;
-pub mod search;
 pub mod serve;
 pub mod tui;
 pub mod types;

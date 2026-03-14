@@ -1,6 +1,6 @@
 [package]
 name = "vecgrep"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "Semantic grep — like ripgrep, but with vector search"
 authors = ["Martin Trojer <martin.trojer@gmail.com>"]
@@ -15,7 +15,9 @@ categories = ["command-line-utilities", "text-processing"]
 clap = { version = "4.5", features = ["derive"] }
 ort = "2.0.0-rc.9"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-ndarray = "0.17"
+sqlite-vec = "0.1"
+zerocopy = { version = "0.8", features = ["derive"] }
+ndarray = "0.16"
 ignore = "0.4"
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 blake3 = "1.6"

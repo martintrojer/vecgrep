@@ -1,9 +1,22 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
+use std::sync::Once;
+use zerocopy::IntoBytes;
 
 use crate::embedder::EMBEDDING_DIM;
-use crate::types::{Chunk, IndexConfig};
+use crate::types::{Chunk, IndexConfig, SearchResult};
+
+static SQLITE_VEC_INIT: Once = Once::new();
+
+fn init_sqlite_vec() {
+    SQLITE_VEC_INIT.call_once(|| unsafe {
+        #[allow(clippy::missing_transmute_annotations)]
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
 
 pub struct Index {
     conn: Connection,
@@ -12,6 +25,8 @@ pub struct Index {
 impl Index {
     /// Open or create the index database at `.vecgrep/index.db` under the given root.
     pub fn open(root: &Path) -> Result<Self> {
+        init_sqlite_vec();
+
         let index_dir = root.join(".vecgrep");
         std::fs::create_dir_all(&index_dir).context("Failed to create .vecgrep directory")?;
 
@@ -31,6 +46,8 @@ impl Index {
 
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> Result<Self> {
+        init_sqlite_vec();
+
         let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
         let index = Self { conn };
         index.create_tables()?;
@@ -38,6 +55,17 @@ impl Index {
     }
 
     fn create_tables(&self) -> Result<()> {
+        // Migrate from old schema: if chunks table has an embedding column, drop data tables
+        let has_old_schema = self
+            .conn
+            .prepare("SELECT embedding FROM chunks LIMIT 0")
+            .is_ok();
+        if has_old_schema {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS files; DELETE FROM meta;",
+            )?;
+        }
+
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
@@ -53,38 +81,60 @@ impl Index {
                 file_id INTEGER NOT NULL REFERENCES files(id),
                 text TEXT NOT NULL,
                 start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL,
-                embedding BLOB NOT NULL
+                end_line INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);",
         )?;
+
+        // Create vec_chunks with default dimension (set_config will recreate if needed)
+        self.conn.execute(
+            &format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(\
+                 chunk_id integer primary key, \
+                 embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
+            ),
+            [],
+        )?;
+
         Ok(())
     }
 
-    /// Check if the index config matches. If not, clear and return false.
+    /// Check if the index config matches. If not, return false.
     pub fn check_config(&self, config: &IndexConfig) -> Result<bool> {
         let stored = self.get_meta("config")?;
         let config_json = serde_json::to_string(config)?;
 
         match stored {
             Some(s) if s == config_json => Ok(true),
-            _ => {
-                // Config changed, need full rebuild
-                Ok(false)
-            }
+            _ => Ok(false),
         }
     }
 
-    /// Store the current config.
+    /// Store the current config and ensure vec_chunks table has correct dimension.
     pub fn set_config(&self, config: &IndexConfig) -> Result<()> {
         let config_json = serde_json::to_string(config)?;
-        self.set_meta("config", &config_json)
+        self.set_meta("config", &config_json)?;
+
+        // Ensure vec_chunks exists with the correct embedding dimension
+        self.conn.execute(
+            &format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(\
+                 chunk_id integer primary key, \
+                 embedding float[{}] distance_metric=cosine)",
+                config.embedding_dim
+            ),
+            [],
+        )?;
+
+        Ok(())
     }
 
     /// Clear all data (for reindex or config change).
     pub fn clear(&self) -> Result<()> {
-        self.conn
-            .execute_batch("DELETE FROM chunks; DELETE FROM files; DELETE FROM meta;")?;
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS vec_chunks; \
+             DELETE FROM chunks; DELETE FROM files; DELETE FROM meta;",
+        )?;
         Ok(())
     }
 
@@ -107,16 +157,11 @@ impl Index {
         chunks: &[Chunk],
         embeddings: &[Vec<f32>],
     ) -> Result<()> {
-        // Wrap in a transaction so a crash between DELETE and INSERT
-        // doesn't leave the file missing from the index.
         self.conn.execute("BEGIN", [])?;
 
         // Delete existing data for this file
         if let Ok(file_id) = self.get_file_id(path) {
-            self.conn
-                .execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
-            self.conn
-                .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+            self.delete_file_by_id(file_id)?;
         }
 
         // Insert file record
@@ -126,24 +171,98 @@ impl Index {
         )?;
         let file_id = self.conn.last_insert_rowid();
 
-        // Insert chunks with embeddings
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO chunks (file_id, text, start_line, end_line, embedding) VALUES (?1, ?2, ?3, ?4, ?5)",
+        // Insert chunks and their vector embeddings
+        let mut chunk_stmt = self.conn.prepare(
+            "INSERT INTO chunks (file_id, text, start_line, end_line) VALUES (?1, ?2, ?3, ?4)",
         )?;
+        let mut vec_stmt = self
+            .conn
+            .prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
 
         for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
-            let embedding_blob = embedding_to_blob(embedding);
-            stmt.execute(params![
+            chunk_stmt.execute(params![
                 file_id,
                 chunk.text,
                 chunk.start_line as i64,
                 chunk.end_line as i64,
-                embedding_blob,
             ])?;
+            let chunk_id = self.conn.last_insert_rowid();
+            vec_stmt.execute(params![chunk_id, embedding.as_slice().as_bytes()])?;
         }
 
         self.conn.execute("COMMIT", [])?;
         Ok(())
+    }
+
+    /// Search for chunks most similar to the query embedding.
+    pub fn search(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: f32,
+    ) -> Result<Vec<SearchResult>> {
+        if top_k == 0 {
+            return Ok(vec![]);
+        }
+
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))?;
+        if count == 0 {
+            return Ok(vec![]);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
+             FROM vec_chunks v \
+             JOIN chunks c ON c.id = v.chunk_id \
+             JOIN files f ON f.id = c.file_id \
+             WHERE v.embedding MATCH ?1 \
+               AND k = ?2 \
+             ORDER BY v.distance",
+        )?;
+
+        let results = stmt
+            .query_map(params![query_embedding.as_bytes(), top_k as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let search_results: Vec<SearchResult> = results
+            .into_iter()
+            .filter_map(|(text, start_line, end_line, path, distance)| {
+                let score = 1.0 - distance as f32;
+                if score >= threshold {
+                    Some(SearchResult {
+                        chunk: Chunk {
+                            file_path: path,
+                            text,
+                            start_line: start_line as usize,
+                            end_line: end_line as usize,
+                        },
+                        score,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(search_results)
+    }
+
+    /// Get the number of chunks in the index.
+    pub fn chunk_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        Ok(count as usize)
     }
 
     /// Remove files that are no longer present on disk.
@@ -156,10 +275,7 @@ impl Index {
         for path in &stored_paths {
             if !current_set.contains(path.as_str()) {
                 if let Ok(file_id) = self.get_file_id(path) {
-                    self.conn
-                        .execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
-                    self.conn
-                        .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+                    self.delete_file_by_id(file_id)?;
                     removed += 1;
                 }
             }
@@ -182,63 +298,12 @@ impl Index {
         for path in &stored_paths {
             if path.starts_with(prefix) && !current_set.contains(path.as_str()) {
                 if let Ok(file_id) = self.get_file_id(path) {
-                    self.conn
-                        .execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
-                    self.conn
-                        .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+                    self.delete_file_by_id(file_id)?;
                     removed += 1;
                 }
             }
         }
         Ok(removed)
-    }
-
-    /// Load all chunks and embeddings from the index.
-    pub fn load_all(&self) -> Result<(Vec<Chunk>, ndarray::Array2<f32>)> {
-        let mut stmt = self.conn.prepare(
-            "SELECT c.text, c.start_line, c.end_line, c.embedding, f.path
-             FROM chunks c JOIN files f ON c.file_id = f.id",
-        )?;
-
-        let rows: Vec<(String, i64, i64, Vec<u8>, String)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let n = rows.len();
-        let mut chunks = Vec::with_capacity(n);
-        let mut embeddings_flat = Vec::new();
-        let mut dim = EMBEDDING_DIM;
-
-        for (text, start_line, end_line, blob, path) in rows {
-            chunks.push(Chunk {
-                file_path: path,
-                text,
-                start_line: start_line as usize,
-                end_line: end_line as usize,
-            });
-            let embedding = blob_to_embedding(&blob);
-            if embeddings_flat.is_empty() {
-                dim = embedding.len();
-                embeddings_flat.reserve(n * dim);
-            }
-            embeddings_flat.extend_from_slice(&embedding);
-        }
-
-        let embedding_matrix = if n > 0 {
-            ndarray::Array2::from_shape_vec((n, dim), embeddings_flat)?
-        } else {
-            ndarray::Array2::zeros((0, dim))
-        };
-
-        Ok((chunks, embedding_matrix))
     }
 
     /// Get index statistics.
@@ -275,6 +340,18 @@ impl Index {
             })?)
     }
 
+    fn delete_file_by_id(&self, file_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+        self.conn
+            .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+        Ok(())
+    }
+
     fn all_file_paths(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT path FROM files")?;
         let paths: Vec<String> = stmt
@@ -306,18 +383,6 @@ pub struct IndexStats {
     pub db_size_bytes: u64,
 }
 
-/// Convert f32 embedding to bytes for SQLite BLOB storage.
-pub(crate) fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
-
-/// Convert bytes from SQLite BLOB to f32 embedding.
-pub(crate) fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
-}
-
 pub(crate) fn ensure_gitignore_entry(gitignore_path: &Path) {
     let entry = ".vecgrep/";
     let content = std::fs::read_to_string(gitignore_path).unwrap_or_default();
@@ -338,25 +403,6 @@ mod tests {
     use crate::types::{Chunk, IndexConfig};
     use tempfile::TempDir;
 
-    // --- Unit tests for blob conversion ---
-
-    #[test]
-    fn test_embedding_blob_roundtrip() {
-        let original = vec![1.0f32, -0.5, 0.0, 3.14, f32::MIN, f32::MAX];
-        let blob = embedding_to_blob(&original);
-        let recovered = blob_to_embedding(&blob);
-        assert_eq!(original, recovered);
-    }
-
-    #[test]
-    fn test_embedding_blob_empty() {
-        let original: Vec<f32> = vec![];
-        let blob = embedding_to_blob(&original);
-        assert!(blob.is_empty());
-        let recovered = blob_to_embedding(&blob);
-        assert!(recovered.is_empty());
-    }
-
     // --- Unit tests for ensure_gitignore_entry ---
 
     #[test]
@@ -375,7 +421,6 @@ mod tests {
         std::fs::write(&gitignore, ".vecgrep/\n").unwrap();
         ensure_gitignore_entry(&gitignore);
         let content = std::fs::read_to_string(&gitignore).unwrap();
-        // Should appear exactly once
         assert_eq!(content.matches(".vecgrep/").count(), 1);
     }
 
@@ -388,16 +433,23 @@ mod tests {
         let content = std::fs::read_to_string(&gitignore).unwrap();
         assert!(content.contains("target/"));
         assert!(content.contains(".vecgrep/"));
-        // Should have added a newline before the entry since the file didn't end with one
         assert!(content.contains("node_modules/\n.vecgrep/"));
     }
 
     // --- Integration tests using in-memory DB ---
 
+    fn make_test_embedding(dim: usize, seed: f32) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim).map(|i| (i as f32 * seed).sin()).collect();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+        for x in &mut v {
+            *x /= norm;
+        }
+        v
+    }
+
     #[test]
     fn test_open_and_create_tables() {
         let index = Index::open_in_memory().unwrap();
-        // Verify tables exist by querying them
         let count: i64 = index
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
@@ -447,12 +499,8 @@ mod tests {
         assert!(!index.check_config(&config2).unwrap());
     }
 
-    fn make_test_embedding(dim: usize, seed: f32) -> Vec<f32> {
-        (0..dim).map(|i| (i as f32 * seed).sin()).collect()
-    }
-
     #[test]
-    fn test_upsert_and_load() {
+    fn test_upsert_and_search() {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
         let chunks = vec![
@@ -475,12 +523,17 @@ mod tests {
             .upsert_file("test.rs", "abc123", &chunks, &embeddings)
             .unwrap();
 
-        let (loaded_chunks, loaded_matrix) = index.load_all().unwrap();
-        assert_eq!(loaded_chunks.len(), 2);
-        assert_eq!(loaded_matrix.nrows(), 2);
-        assert_eq!(loaded_matrix.ncols(), dim);
-        assert_eq!(loaded_chunks[0].text, "fn main() {}");
-        assert_eq!(loaded_chunks[1].text, "fn helper() {}");
+        assert_eq!(index.chunk_count().unwrap(), 2);
+
+        // Search with first embedding — should find itself as top match
+        let results = index.search(&embeddings[0], 2, -1.0).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(
+            results[0].score > 0.99,
+            "top match score should be near 1.0, got {}",
+            results[0].score
+        );
+        assert_eq!(results[0].chunk.text, "fn main() {}");
     }
 
     #[test]
@@ -510,9 +563,11 @@ mod tests {
             .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2)
             .unwrap();
 
-        let (loaded_chunks, _) = index.load_all().unwrap();
-        assert_eq!(loaded_chunks.len(), 1);
-        assert_eq!(loaded_chunks[0].text, "version 2");
+        assert_eq!(index.chunk_count().unwrap(), 1);
+
+        let results = index.search(&emb_v2[0], 1, 0.0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.text, "version 2");
     }
 
     #[test]
@@ -553,17 +608,10 @@ mod tests {
             index.upsert_file(name, "hash", &chunks, &emb).unwrap();
         }
 
-        // Only a.rs and c.rs remain on disk
         let current = vec!["a.rs".to_string(), "c.rs".to_string()];
         let removed = index.remove_stale_files(&current).unwrap();
         assert_eq!(removed, 1);
-
-        let (loaded, _) = index.load_all().unwrap();
-        assert_eq!(loaded.len(), 2);
-        let paths: Vec<&str> = loaded.iter().map(|c| c.file_path.as_str()).collect();
-        assert!(paths.contains(&"a.rs"));
-        assert!(paths.contains(&"c.rs"));
-        assert!(!paths.contains(&"b.rs"));
+        assert_eq!(index.chunk_count().unwrap(), 2);
     }
 
     #[test]
@@ -571,7 +619,6 @@ mod tests {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
 
-        // Index files under different prefixes
         for name in &["src/a.rs", "src/b.rs", "lib/c.rs", "README.md"] {
             let chunks = vec![Chunk {
                 file_path: name.to_string(),
@@ -583,18 +630,10 @@ mod tests {
             index.upsert_file(name, "hash", &chunks, &emb).unwrap();
         }
 
-        // Only src/a.rs remains on disk under src/
         let current = vec!["src/a.rs".to_string()];
         let removed = index.remove_stale_files_under(&current, "src/").unwrap();
-        assert_eq!(removed, 1); // src/b.rs removed
-
-        let (loaded, _) = index.load_all().unwrap();
-        assert_eq!(loaded.len(), 3); // src/a.rs, lib/c.rs, README.md
-        let paths: Vec<&str> = loaded.iter().map(|c| c.file_path.as_str()).collect();
-        assert!(paths.contains(&"src/a.rs"));
-        assert!(!paths.contains(&"src/b.rs"));
-        assert!(paths.contains(&"lib/c.rs")); // untouched
-        assert!(paths.contains(&"README.md")); // untouched
+        assert_eq!(removed, 1);
+        assert_eq!(index.chunk_count().unwrap(), 3);
     }
 
     #[test]
@@ -622,9 +661,51 @@ mod tests {
 
         index.clear().unwrap();
 
-        let (loaded, _) = index.load_all().unwrap();
-        assert!(loaded.is_empty());
+        assert_eq!(index.chunk_count().unwrap(), 0);
         assert_eq!(index.get_file_hash("test.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn test_search_empty() {
+        let index = Index::open_in_memory().unwrap();
+        let query = make_test_embedding(EMBEDDING_DIM, 1.0);
+        let results = index.search(&query, 10, 0.0).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_threshold() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let emb1 = make_test_embedding(dim, 1.0);
+        let emb2 = make_test_embedding(dim, 100.0); // very different
+
+        let chunks = vec![
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "similar".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            Chunk {
+                file_path: "b.rs".to_string(),
+                text: "different".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+        ];
+        index
+            .upsert_file("a.rs", "h1", &chunks[0..1], &[emb1.clone()])
+            .unwrap();
+        index
+            .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2])
+            .unwrap();
+
+        // High threshold — only the near-exact match should pass
+        let results = index.search(&emb1, 10, 0.99).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.text, "similar");
     }
 
     #[test]
@@ -632,7 +713,6 @@ mod tests {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
 
-        // stats() calls db_path() which fails for in-memory DBs, so we test the counts directly
         let file_count: i64 = index
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
@@ -644,7 +724,6 @@ mod tests {
         assert_eq!(file_count, 0);
         assert_eq!(chunk_count, 0);
 
-        // Add some data
         let chunks = vec![
             Chunk {
                 file_path: "a.rs".to_string(),

@@ -7,7 +7,7 @@ use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::Index;
 use vecgrep::types::IndexConfig;
-use vecgrep::{output, paths, pipeline, search, serve, tui, walker};
+use vecgrep::{output, paths, pipeline, serve, tui, walker};
 
 /// Print a status message to stderr unless --quiet is set.
 macro_rules! status {
@@ -398,18 +398,12 @@ fn run() -> Result<bool> {
     }
 
     // CLI: search with current index (immediate results from cached data)
-    let (chunks, embedding_matrix) = idx.load_all()?;
-    status!(quiet, "Loaded {} chunks for search.", chunks.len());
+    let chunk_count = idx.chunk_count()?;
+    status!(quiet, "Loaded {} chunks for search.", chunk_count);
 
     let query_embedding = embedder.embed(&query)?;
 
-    let results = search::search(
-        &query_embedding,
-        &embedding_matrix,
-        args.top_k,
-        args.threshold,
-        &chunks,
-    );
+    let results = idx.search(&query_embedding, args.top_k, args.threshold)?;
 
     // Print results
     let found = !results.is_empty();

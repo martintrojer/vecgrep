@@ -4,15 +4,13 @@ pub mod interactive {
     use crate::output::{SCORE_HIGH_THRESHOLD, SCORE_MEDIUM_THRESHOLD};
     use crate::paths;
     use crate::pipeline::StreamingIndexer;
-    use crate::search;
-    use crate::types::{Chunk, SearchResult};
+    use crate::types::SearchResult;
     use anyhow::Result;
     use crossterm::{
         event::{self, Event, KeyCode},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
-    use ndarray::Array2;
     use ratatui::{
         backend::CrosstermBackend,
         layout::{Constraint, Direction, Layout},
@@ -40,19 +38,15 @@ pub mod interactive {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let (chunks, embedding_matrix) = idx.load_all()?;
-
         let result = event_loop(
             &mut terminal,
             embedder,
-            chunks,
-            embedding_matrix,
+            idx,
             initial_query,
             top_k,
             threshold,
             cwd_suffix,
             Some(indexer),
-            Some(idx),
         );
 
         disable_raw_mode()?;
@@ -66,14 +60,12 @@ pub mod interactive {
     fn event_loop(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         embedder: &mut Embedder,
-        mut chunks: Vec<Chunk>,
-        mut embedding_matrix: Array2<f32>,
+        idx: &Index,
         initial_query: &str,
         top_k: usize,
         threshold: f32,
         cwd_suffix: &Path,
         mut indexer: Option<StreamingIndexer>,
-        idx: Option<&Index>,
     ) -> Result<()> {
         let mut query = initial_query.to_string();
         let mut results: Vec<SearchResult> = Vec::new();
@@ -89,9 +81,9 @@ pub mod interactive {
         let mut last_selected: Option<usize> = None;
 
         // Initial search
-        if !query.is_empty() && !chunks.is_empty() {
+        if !query.is_empty() {
             if let Ok(emb) = embedder.embed(&query) {
-                results = search::search(&emb, &embedding_matrix, top_k, threshold, &chunks);
+                results = idx.search(&emb, top_k, threshold).unwrap_or_default();
                 if !results.is_empty() {
                     list_state.select(Some(0));
                 }
@@ -101,8 +93,8 @@ pub mod interactive {
 
         loop {
             // 1. Process streaming indexing (if active)
-            if let (Some(ref mut si), Some(idx)) = (&mut indexer, idx) {
-                if si.poll(embedder, idx, &mut chunks, &mut embedding_matrix)? {
+            if let Some(ref mut si) = indexer {
+                if si.poll(embedder, idx)? {
                     needs_search = true;
                 }
             }
@@ -134,6 +126,7 @@ pub mod interactive {
             // 3. Render
             let preview_scroll_val = preview_scroll;
             let preview_cache_ref = &preview_file_cache;
+            let chunk_count = idx.chunk_count().unwrap_or(0);
             let status_text = match &indexer {
                 Some(si) if !si.indexing_done => {
                     format!(
@@ -143,11 +136,7 @@ pub mod interactive {
                     )
                 }
                 Some(_) => {
-                    format!(
-                        "{} results | {} chunks indexed",
-                        results.len(),
-                        chunks.len()
-                    )
+                    format!("{} results | {} chunks indexed", results.len(), chunk_count)
                 }
                 None => format!("{} results", results.len()),
             };
@@ -292,7 +281,7 @@ pub mod interactive {
             // 5. Debounced search
             if needs_search && last_search.elapsed() >= debounce && !query.is_empty() {
                 if let Ok(emb) = embedder.embed(&query) {
-                    results = search::search(&emb, &embedding_matrix, top_k, threshold, &chunks);
+                    results = idx.search(&emb, top_k, threshold).unwrap_or_default();
                     if !results.is_empty() {
                         list_state.select(Some(0));
                     } else {
