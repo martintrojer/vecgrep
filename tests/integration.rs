@@ -248,7 +248,7 @@ fn test_default_mode_uses_cached_index() {
 }
 
 #[test]
-fn test_default_mode_without_index_returns_no_results() {
+fn test_first_run_indexes_before_searching() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::write(dir.path().join("new.rs"), "fn brand_new() {}").unwrap();
@@ -259,8 +259,10 @@ fn test_default_mode_without_index_returns_no_results() {
         .output()
         .unwrap();
 
-    // Exit code 1 = no matches found
-    assert_eq!(output.status.code(), Some(1));
+    // First run should build the index and find results
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("brand_new"), "expected match in stdout: {stdout}");
 }
 
 // --- Embedding dimension tests ---

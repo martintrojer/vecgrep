@@ -264,7 +264,8 @@ fn run() -> Result<bool> {
 
     // Check if config changed
     let config_valid = idx.check_config(&config)?;
-    if !config_valid || args.reindex {
+    let index_was_cleared = !config_valid || args.reindex;
+    if index_was_cleared {
         if !config_valid {
             status!(quiet, "Index configuration changed, rebuilding...");
         }
@@ -397,7 +398,19 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    // CLI: search with current index (immediate results from cached data)
+    // If the index is empty (first run or config change), build it before searching
+    if !indexer.indexing_done && (index_was_cleared || idx.chunk_count()? == 0) {
+        status!(quiet, "Building index before first search...");
+        indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
+            if !quiet && std::io::stderr().is_terminal() {
+                eprint!("\rIndexed {} files...", indexed_so_far);
+            }
+            Ok(true)
+        })?;
+        finish_indexing(&mut indexer, &idx, &walk_prefix, quiet, &mut walker_handle)?;
+    }
+
+    // CLI: search with current index
     let chunk_count = idx.chunk_count()?;
     status!(quiet, "Index has {} chunks.", chunk_count);
 
