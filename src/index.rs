@@ -116,7 +116,9 @@ impl Index {
         let config_json = serde_json::to_string(config)?;
         self.set_meta("config", &config_json)?;
 
-        // Ensure vec_chunks exists with the correct embedding dimension
+        // Create vec_chunks if it doesn't exist (new DB or after clear()).
+        // The dimension is correct because clear() drops vec_chunks when
+        // config changes, so this always creates with the right dimension.
         self.conn
             .execute(&vec_table_ddl(config.embedding_dim), [])?;
 
