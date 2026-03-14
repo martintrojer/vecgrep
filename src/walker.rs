@@ -110,16 +110,6 @@ where
     Ok(())
 }
 
-/// Walk the given paths, respecting .gitignore and filters.
-pub fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile>> {
-    let mut files = Vec::new();
-    walk_with(paths, opts, |f| {
-        files.push(f);
-        true
-    })?;
-    Ok(files)
-}
-
 /// Walk the given paths, sending discovered files through a channel.
 /// Returns the count of files sent. If the receiver is dropped, exits gracefully.
 pub fn walk_paths_streaming(
@@ -174,6 +164,15 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    fn walk_paths(paths: &[String], opts: &WalkOptions) -> Result<Vec<WalkedFile>> {
+        let mut files = Vec::new();
+        walk_with(paths, opts, |f| {
+            files.push(f);
+            true
+        })?;
+        Ok(files)
+    }
 
     fn default_opts() -> WalkOptions {
         WalkOptions {

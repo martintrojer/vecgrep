@@ -22,11 +22,7 @@ pub fn resolve_color_choice(color: &cli::ColorChoice) -> ColorChoice {
 }
 
 /// Print search results in colored ripgrep-style format.
-pub fn print_results(
-    results: &[SearchResult],
-    _context_lines: usize,
-    color: ColorChoice,
-) -> std::io::Result<()> {
+pub fn print_results(results: &[SearchResult], color: ColorChoice) -> std::io::Result<()> {
     let mut stdout = StandardStream::stdout(color);
 
     for (i, result) in results.iter().enumerate() {

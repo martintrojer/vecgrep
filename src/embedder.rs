@@ -610,7 +610,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_default_remote_max_chars() {
         assert_eq!(DEFAULT_REMOTE_MAX_CHARS, 1200);
     }

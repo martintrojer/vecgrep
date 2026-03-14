@@ -75,9 +75,6 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
     if args.embedder_model.is_none() {
         args.embedder_model.clone_from(&config.embedder_model);
     }
-    if args.threads.is_none() {
-        args.threads = config.threads;
-    }
     if args.max_depth.is_none() {
         args.max_depth = config.max_depth;
     }
@@ -143,14 +140,6 @@ fn run() -> Result<bool> {
     if args.type_list {
         walker::print_type_list();
         return Ok(true);
-    }
-
-    // Configure rayon thread pool
-    if let Some(threads) = args.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global()
-            .ok();
     }
 
     let color_choice = output::resolve_color_choice(&args.color);
@@ -422,7 +411,7 @@ fn run() -> Result<bool> {
         } else if args.count {
             output::print_count(&results, color_choice)?;
         } else {
-            output::print_results(&results, args.context, color_choice)?;
+            output::print_results(&results, color_choice)?;
         }
     } else {
         status!(quiet, "No results found.");

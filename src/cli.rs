@@ -50,10 +50,6 @@ pub struct Args {
     #[arg(short = 'C', long, default_value_t = 3)]
     pub context: usize,
 
-    /// Number of threads for indexing.
-    #[arg(short = 'j', long)]
-    pub threads: Option<usize>,
-
     /// Force full re-index.
     #[arg(long)]
     pub reindex: bool,

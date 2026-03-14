@@ -2962,7 +2962,6 @@ dependencies = [
  "num_cpus",
  "ort",
  "ratatui",
- "rayon",
  "reqwest",
  "rusqlite",
  "serde",

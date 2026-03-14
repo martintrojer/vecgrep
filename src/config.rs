@@ -21,7 +21,6 @@ pub struct Config {
     pub color: Option<String>,
     pub quiet: Option<bool>,
     pub index_warn_threshold: Option<usize>,
-    pub threads: Option<usize>,
 }
 
 /// Return the global config path (`~/.config/vecgrep/config.toml`).
@@ -65,7 +64,6 @@ fn merge(base: Config, override_config: Config) -> Config {
         index_warn_threshold: override_config
             .index_warn_threshold
             .or(base.index_warn_threshold),
-        threads: override_config.threads.or(base.threads),
     }
 }
 
@@ -105,7 +103,6 @@ mod tests {
             color = "always"
             quiet = false
             index_warn_threshold = 500
-            threads = 8
         "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(
@@ -122,7 +119,6 @@ mod tests {
         assert_eq!(config.hidden, Some(true));
         assert_eq!(config.max_depth, Some(10));
         assert_eq!(config.color.as_deref(), Some("always"));
-        assert_eq!(config.threads, Some(8));
     }
 
     #[test]

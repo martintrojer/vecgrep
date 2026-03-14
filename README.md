@@ -179,7 +179,6 @@ Options:
   -T, --type-not <TYPE>         Exclude file type
   -g, --glob <PATTERN>          Filter by glob
   -C, --context <N>             Context lines around match [default: 3]
-  -j, --threads <N>             Indexing threads
   -l, --files-with-matches      Print only file paths with matches
   -c, --count                   Print count of matching chunks per file
   -., --hidden                  Search hidden files and directories
