@@ -16,6 +16,7 @@ pub struct Config {
     pub full_index: Option<bool>,
     pub hidden: Option<bool>,
     pub follow: Option<bool>,
+    pub ignore_files: Option<Vec<String>>,
     pub no_ignore: Option<bool>,
     pub max_depth: Option<usize>,
     pub color: Option<String>,
@@ -57,6 +58,13 @@ fn merge(base: Config, override_config: Config) -> Config {
         full_index: override_config.full_index.or(base.full_index),
         hidden: override_config.hidden.or(base.hidden),
         follow: override_config.follow.or(base.follow),
+        ignore_files: match (override_config.ignore_files, base.ignore_files) {
+            (Some(mut o), Some(b)) => {
+                o.extend(b);
+                Some(o)
+            }
+            (o, b) => o.or(b),
+        },
         no_ignore: override_config.no_ignore.or(base.no_ignore),
         max_depth: override_config.max_depth.or(base.max_depth),
         color: override_config.color.or(base.color),
