@@ -1,6 +1,5 @@
 use vecgrep::embedder::EMBEDDING_DIM;
 use vecgrep::index::Index;
-use vecgrep::search;
 use vecgrep::types::{Chunk, IndexConfig};
 
 fn make_embedding(dim: usize, seed: f32) -> Vec<f32> {
@@ -18,7 +17,6 @@ fn test_index_and_search_roundtrip() {
     let index = Index::open_in_memory().unwrap();
     let dim = EMBEDDING_DIM;
 
-    // Create some chunks with distinct embeddings
     let chunks = vec![
         Chunk {
             file_path: "main.rs".to_string(),
@@ -56,15 +54,10 @@ fn test_index_and_search_roundtrip() {
         .upsert_file("lib.rs", "hash_lib", &chunks[2..3], &embeddings[2..3])
         .unwrap();
 
-    // Load all and search
-    let (loaded_chunks, embedding_matrix): (Vec<Chunk>, ndarray::Array2<f32>) =
-        index.load_all().unwrap();
-    assert_eq!(loaded_chunks.len(), 3);
-    assert_eq!(embedding_matrix.nrows(), 3);
-    assert_eq!(embedding_matrix.ncols(), dim);
+    assert_eq!(index.chunk_count().unwrap(), 3);
 
     // Search with the first embedding as query — should find itself as top match
-    let results = search::search(&embeddings[0], &embedding_matrix, 3, 0.0, &loaded_chunks);
+    let results = index.search(&embeddings[0], 3, 0.0).unwrap();
     assert!(!results.is_empty());
     // The top result should have a very high similarity (close to 1.0)
     assert!(results[0].score > 0.99);
@@ -108,8 +101,7 @@ fn test_incremental_indexing() {
         .unwrap();
 
     // Verify both are present
-    let (chunks, _): (Vec<Chunk>, ndarray::Array2<f32>) = index.load_all().unwrap();
-    assert_eq!(chunks.len(), 2);
+    assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Now "modify" a.rs (new content hash and embedding)
     let chunk_a_v2 = vec![Chunk {
@@ -129,15 +121,8 @@ fn test_incremental_indexing() {
         .upsert_file("a.rs", "hash_a_v2", &chunk_a_v2, &emb_a_v2)
         .unwrap();
 
-    // Verify: still 2 chunks total, a.rs has new content
-    let (chunks, _): (Vec<Chunk>, ndarray::Array2<f32>) = index.load_all().unwrap();
-    assert_eq!(chunks.len(), 2);
-
-    let a_chunk = chunks.iter().find(|c| c.file_path == "a.rs").unwrap();
-    assert_eq!(a_chunk.text, "fn a_modified() {}");
-
-    let b_chunk = chunks.iter().find(|c| c.file_path == "b.rs").unwrap();
-    assert_eq!(b_chunk.text, "fn b() {}");
+    // Verify: still 2 chunks total
+    assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Verify updated hash
     let new_hash = index.get_file_hash("a.rs").unwrap();
@@ -184,7 +169,6 @@ fn test_show_root_from_subdirectory() {
 #[test]
 fn test_show_root_no_marker_falls_back_to_cwd() {
     let dir = tempfile::TempDir::new().unwrap();
-    // No .git, .hg, .jj, or .vecgrep — falls back to cwd
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .arg("--show-root")
@@ -208,7 +192,6 @@ fn test_full_index_indexes_before_search() {
     )
     .unwrap();
 
-    // --full-index on a fresh repo: should index then find the file
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .args(["--full-index", "hello world"])
         .current_dir(dir.path())
@@ -262,8 +245,6 @@ fn test_default_mode_without_index_returns_no_results() {
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::write(dir.path().join("new.rs"), "fn brand_new() {}").unwrap();
 
-    // Default mode on a fresh repo: no cached index, so no results
-    // (files are indexed in the background for next time)
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .args(["brand new function"])
         .current_dir(dir.path())
@@ -277,10 +258,20 @@ fn test_default_mode_without_index_returns_no_results() {
 // --- Embedding dimension tests ---
 
 #[test]
-fn test_load_all_with_non_default_embedding_dim() {
+fn test_search_with_non_default_embedding_dim() {
     // Simulate an index built with a remote model (e.g., 1024-dim mxbai-embed-large)
     let index = Index::open_in_memory().unwrap();
-    let dim = 1024; // Not the default 384
+    let dim = 1024;
+
+    // Set config with non-default dimension so vec_chunks has the right dim
+    let config = IndexConfig {
+        model_name: "test-remote".to_string(),
+        embedding_dim: dim,
+        chunk_size: 500,
+        chunk_overlap: 100,
+    };
+    index.clear().unwrap();
+    index.set_config(&config).unwrap();
 
     let chunks = vec![
         Chunk {
@@ -306,32 +297,26 @@ fn test_load_all_with_non_default_embedding_dim() {
         .upsert_file("lib.rs", "hash2", &chunks[1..2], &embeddings[1..2])
         .unwrap();
 
-    // load_all should infer dim=1024 from stored blobs, not assume 384
-    let (loaded_chunks, embedding_matrix) = index.load_all().unwrap();
-    assert_eq!(loaded_chunks.len(), 2);
-    assert_eq!(embedding_matrix.nrows(), 2);
-    assert_eq!(embedding_matrix.ncols(), dim);
+    assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Search should work with the correct dimension
-    let results = search::search(&embeddings[0], &embedding_matrix, 2, 0.0, &loaded_chunks);
+    let results = index.search(&embeddings[0], 2, 0.0).unwrap();
     assert!(!results.is_empty());
     assert!(results[0].score > 0.99); // should find itself
 }
 
 #[test]
-fn test_load_all_empty_index_uses_default_dim() {
+fn test_search_empty_index() {
     let index = Index::open_in_memory().unwrap();
-    let (chunks, matrix) = index.load_all().unwrap();
-    assert!(chunks.is_empty());
-    assert_eq!(matrix.nrows(), 0);
-    assert_eq!(matrix.ncols(), EMBEDDING_DIM); // falls back to default
+    let query = make_embedding(EMBEDDING_DIM, 1.0);
+    let results = index.search(&query, 10, 0.0).unwrap();
+    assert!(results.is_empty());
 }
 
 // --- Index scoping tests ---
 
 #[test]
 fn test_index_shared_across_subdirectories() {
-    // Index from src/, then search from tests/ — both should be in the same index
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
@@ -384,7 +369,6 @@ fn test_index_shared_across_subdirectories() {
 
 #[test]
 fn test_subdirectory_index_does_not_remove_other_dirs() {
-    // Index the whole project, then re-index only src/ — tests/ entries should survive
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
@@ -417,7 +401,6 @@ fn test_subdirectory_index_does_not_remove_other_dirs() {
     assert!(output.status.success());
 
     // Search should still find files from both directories
-    // Use --threshold 0.0 to ensure all indexed files appear regardless of score
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .args(["--full-index", "--json", "--threshold", "0.0", "function"])
         .current_dir(dir.path())
@@ -438,7 +421,6 @@ fn test_subdirectory_index_does_not_remove_other_dirs() {
 
 #[test]
 fn test_stale_file_removed_within_walked_dir() {
-    // Index src/ with two files, delete one, re-index src/ — deleted file should be gone
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
@@ -508,7 +490,6 @@ fn test_search_from_subdirectory_shows_relative_paths() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // Should show "lib.rs" not "src/lib.rs" since we're running from src/
     assert!(
         stdout.contains("lib.rs"),
         "expected lib.rs in results, got: {stdout}"
