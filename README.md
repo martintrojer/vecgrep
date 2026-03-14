@@ -150,6 +150,18 @@ The index automatically rebuilds when the model changes. See [BENCHMARK.md](BENC
 
 Pre-built binaries for macOS and Linux are available on the [releases page](https://github.com/mtrojer/vecgrep/releases). Download the appropriate archive, extract it, and place the `vecgrep` binary on your `PATH`.
 
+Install with mise:
+
+```bash
+mise use github:martintrojer/vecgrep
+```
+
+Install with cargo:
+
+```bash
+cargo install vecgrep
+```
+
 To build from source:
 
 ```bash
