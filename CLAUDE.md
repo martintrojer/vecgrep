@@ -54,11 +54,22 @@ walker (thread) →  channel(64)  →  StreamingIndexer  →  index (SQLite)  �
 (files)            (backpressure)   (chunk + embed)      (cache)            (rank)     (display)
 ```
 
-The walker runs on a background thread feeding files through a bounded `sync_channel(batch_size * 2)`. All three modes use `pipeline::StreamingIndexer` to consume the channel:
+The walker runs on a background thread feeding files through a bounded `sync_channel(batch_size * 2)`. The three modes consume the channel differently:
 
-- **CLI default**: searches immediately against the cached index, then `drain_all()` indexes remaining files in the background for next time.
-- **CLI `--full-index`**: `drain_all()` blocks until all files are indexed (with threshold prompt), then searches.
-- **TUI/serve**: `poll()` drains non-blockingly, indexing files as they arrive. New chunks are searchable immediately after INSERT — no reload delay.
+- **CLI default**: searches immediately against the cached index, then `drain_all()` indexes remaining files in the background for next time. Embedder and Index stay on the main thread.
+- **CLI `--full-index`**: `drain_all()` blocks until all files are indexed (with threshold prompt), then searches. Same single-threaded ownership.
+- **TUI/serve**: Use `EmbedWorker` — a background thread that owns the `Embedder`, `Index`, and `StreamingIndexer`. The UI thread communicates via channels, never blocking on embed calls. This ensures Esc always works in the TUI and the HTTP server stays responsive, even when Ollama is loading a model (which can block for 30+ seconds).
+
+**EmbedWorker architecture** (TUI/serve only):
+```
+walker (thread) → file channel → EmbedWorker (thread, owns Embedder + Index + StreamingIndexer)
+                                   ↑ search requests       ↓ search results
+                                   ↑ (mpsc channel)        ↓ (mpsc channel)
+                                 UI thread (TUI event loop / HTTP server)
+                                   ↓ index progress
+                                   ↓ (mpsc channel)
+```
+The worker prioritizes search requests over indexing: it checks for pending searches between every small batch (`WORKER_BATCH_SIZE` files). Search results are returned as `SearchOutcome` — either `Results(Vec<SearchResult>)` or `EmbedError(String)` — so the UI can distinguish "no matches" from "embedder failed." Index progress is sent on a separate channel. The worker shuts down cleanly via `Drop`.
 
 **Key design decisions:**
 
@@ -81,7 +92,7 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 | `config.rs` | Load `~/.config/vecgrep/config.toml`, all fields `Option<T>`, merged with CLI args in `main.rs` |
 | `embedder.rs` | `Embedder` enum: `Local` (ONNX + tokenizer) or `Remote` (OpenAI-compatible HTTP API). Single queries use CPU, batches use the configured backend |
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries. Uses tokenizer when available, char-based heuristic otherwise |
-| `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `process_batch()` for chunk → embed → upsert |
+| `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `EmbedWorker` (background thread for non-blocking TUI/serve), `process_batch()` for chunk → embed → upsert |
 | `paths.rs` | Path conversions: `to_project_relative()`, `to_cwd_relative()` |
 | `index.rs` | SQLite schema (`meta`/`files`/`chunks`/`vec_chunks`), upsert, stale removal, vector search via sqlite-vec |
 | `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_with()` helper, `walk_paths_streaming()` for channel-based walking |

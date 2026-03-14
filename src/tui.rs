@@ -3,7 +3,7 @@ pub mod interactive {
     use crate::index::Index;
     use crate::output::{SCORE_HIGH_THRESHOLD, SCORE_MEDIUM_THRESHOLD};
     use crate::paths;
-    use crate::pipeline::StreamingIndexer;
+    use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
     use crate::types::SearchResult;
     use anyhow::Result;
     use crossterm::{
@@ -24,8 +24,8 @@ pub mod interactive {
     use std::time::{Duration, Instant};
 
     pub fn run_streaming(
-        embedder: &mut Embedder,
-        idx: &Index,
+        embedder: Embedder,
+        idx: Index,
         indexer: StreamingIndexer,
         initial_query: &str,
         top_k: usize,
@@ -38,15 +38,15 @@ pub mod interactive {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
+        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+
         let result = event_loop(
             &mut terminal,
-            embedder,
-            idx,
+            &worker,
             initial_query,
             top_k,
             threshold,
             cwd_suffix,
-            Some(indexer),
         );
 
         disable_raw_mode()?;
@@ -56,16 +56,13 @@ pub mod interactive {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn event_loop(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        embedder: &mut Embedder,
-        idx: &Index,
+        worker: &EmbedWorker,
         initial_query: &str,
         top_k: usize,
         threshold: f32,
         cwd_suffix: &Path,
-        mut indexer: Option<StreamingIndexer>,
     ) -> Result<()> {
         let mut query = initial_query.to_string();
         let mut results: Vec<SearchResult> = Vec::new();
@@ -73,7 +70,14 @@ pub mod interactive {
         let mut show_preview = true;
         let mut last_search = Instant::now() - Duration::from_secs(1);
         let mut needs_search = true;
+        let mut searching = false;
+        let mut search_error: Option<String> = None;
         let debounce = Duration::from_millis(300);
+
+        // Index progress state
+        let mut indexed_count: usize = 0;
+        let mut chunk_count: usize = 0;
+        let mut indexing_done = false;
 
         // Preview state
         let mut preview_file_cache: Option<(String, String)> = None;
@@ -82,37 +86,64 @@ pub mod interactive {
 
         // Initial search
         if !query.is_empty() {
-            if let Ok(emb) = embedder.embed(&query) {
-                results = idx.search(&emb, top_k, threshold).unwrap_or_default();
-                if !results.is_empty() {
-                    list_state.select(Some(0));
-                }
-            }
+            worker.search(&query, top_k, threshold);
+            searching = true;
             needs_search = false;
         }
 
         loop {
-            // 1. Process streaming indexing (if active)
-            if let Some(ref mut si) = indexer {
-                if si.poll(embedder, idx)? {
+            // 1. Check for search results (non-blocking)
+            if let Some(outcome) = worker.try_recv_results() {
+                searching = false;
+                match outcome {
+                    SearchOutcome::Results(new_results) => {
+                        search_error = None;
+                        results = new_results;
+                        if !results.is_empty() {
+                            list_state.select(Some(0));
+                        } else {
+                            list_state.select(None);
+                        }
+                        if !cwd_suffix.as_os_str().is_empty() {
+                            for r in &mut results {
+                                r.chunk.file_path =
+                                    paths::to_cwd_relative(&r.chunk.file_path, cwd_suffix);
+                            }
+                        }
+                    }
+                    SearchOutcome::EmbedError(msg) => {
+                        search_error = Some(msg);
+                        results.clear();
+                        list_state.select(None);
+                    }
+                }
+                last_selected = None;
+            }
+
+            // 2. Check for index progress (non-blocking)
+            if let Some(progress) = worker.drain_progress() {
+                indexed_count = progress.indexed_count;
+                chunk_count = progress.chunk_count;
+                indexing_done = progress.indexing_done;
+                // Re-search when new data is indexed
+                if !query.is_empty() && !searching {
                     needs_search = true;
                 }
             }
 
-            // 2. Detect selection change and update preview cache/scroll
+            // 3. Detect selection change and update preview cache/scroll
             let current_selected = list_state.selected();
             if current_selected != last_selected {
                 last_selected = current_selected;
                 if let Some(sel) = current_selected {
                     if let Some(result) = results.get(sel) {
                         let path = &result.chunk.file_path;
-                        let fs_path = paths::to_cwd_relative(path, cwd_suffix);
                         let needs_load = match &preview_file_cache {
                             Some((cached_path, _)) => cached_path != path,
                             None => true,
                         };
                         if needs_load {
-                            if let Ok(content) = std::fs::read_to_string(&fs_path) {
+                            if let Ok(content) = std::fs::read_to_string(path) {
                                 preview_file_cache = Some((path.clone(), content));
                             } else {
                                 preview_file_cache = None;
@@ -123,22 +154,21 @@ pub mod interactive {
                 }
             }
 
-            // 3. Render
+            // 4. Render
             let preview_scroll_val = preview_scroll;
             let preview_cache_ref = &preview_file_cache;
-            let chunk_count = idx.chunk_count().unwrap_or(0);
-            let status_text = match &indexer {
-                Some(si) if !si.indexing_done => {
-                    format!(
-                        "{} results | Indexing: {} files...",
-                        results.len(),
-                        si.indexed_count
-                    )
-                }
-                Some(_) => {
-                    format!("{} results | {} chunks indexed", results.len(), chunk_count)
-                }
-                None => format!("{} results", results.len()),
+            let status_text = if let Some(ref err) = search_error {
+                format!("Embed error: {err}")
+            } else if searching {
+                format!("Searching... | {} chunks indexed", chunk_count)
+            } else if !indexing_done {
+                format!(
+                    "{} results | Indexing: {} files...",
+                    results.len(),
+                    indexed_count
+                )
+            } else {
+                format!("{} results | {} chunks indexed", results.len(), chunk_count)
             };
 
             terminal.draw(|f| {
@@ -214,7 +244,7 @@ pub mod interactive {
                 f.render_widget(status_bar, main_chunks[2]);
             })?;
 
-            // 4. Handle input
+            // 5. Handle input
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
@@ -223,8 +253,7 @@ pub mod interactive {
                             if let Some(sel) = list_state.selected() {
                                 if let Some(result) = results.get(sel) {
                                     let line = result.chunk.start_line;
-                                    let file =
-                                        paths::to_cwd_relative(&result.chunk.file_path, cwd_suffix);
+                                    let file = result.chunk.file_path.clone();
 
                                     disable_raw_mode()?;
                                     execute!(io::stdout(), LeaveAlternateScreen)?;
@@ -278,16 +307,11 @@ pub mod interactive {
                 }
             }
 
-            // 5. Debounced search
-            if needs_search && last_search.elapsed() >= debounce && !query.is_empty() {
-                if let Ok(emb) = embedder.embed(&query) {
-                    results = idx.search(&emb, top_k, threshold).unwrap_or_default();
-                    if !results.is_empty() {
-                        list_state.select(Some(0));
-                    } else {
-                        list_state.select(None);
-                    }
-                }
+            // 6. Debounced search
+            if needs_search && !searching && last_search.elapsed() >= debounce && !query.is_empty()
+            {
+                worker.search(&query, top_k, threshold);
+                searching = true;
                 needs_search = false;
                 last_selected = None;
             }

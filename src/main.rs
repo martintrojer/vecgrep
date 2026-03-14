@@ -366,8 +366,8 @@ fn run() -> Result<bool> {
     // If --full-index was used, the indexer is already drained.
     if args.serve {
         serve::run_streaming(
-            &mut embedder,
-            &idx,
+            embedder,
+            idx,
             indexer,
             args.port,
             args.top_k,
@@ -383,8 +383,8 @@ fn run() -> Result<bool> {
 
     if args.interactive {
         tui::interactive::run_streaming(
-            &mut embedder,
-            &idx,
+            embedder,
+            idx,
             indexer,
             &query,
             args.top_k,

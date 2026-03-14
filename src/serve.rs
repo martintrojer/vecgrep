@@ -7,7 +7,7 @@ use url::Url;
 use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::output::format_json_result;
-use crate::pipeline::StreamingIndexer;
+use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
 
 fn json_content_header() -> Header {
     "Content-Type: application/x-ndjson"
@@ -24,8 +24,7 @@ fn json_error_header() -> Header {
 /// Handle a single HTTP search request. Returns Ok(()) after responding.
 fn handle_request(
     request: Request,
-    embedder: &mut Embedder,
-    idx: &Index,
+    worker: &EmbedWorker,
     default_top_k: usize,
     default_threshold: f32,
     root: &str,
@@ -95,37 +94,41 @@ fn handle_request(
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(default_threshold);
 
-    let query_embedding = match embedder.embed(&q) {
-        Ok(e) => e,
-        Err(e) => {
-            let body = serde_json::json!({"error": format!("{e:#}")}).to_string();
+    worker.search(&q, top_k, threshold);
+    match worker.recv_results() {
+        Some(SearchOutcome::Results(results)) => {
+            let mut body = String::new();
+            for result in &results {
+                let json = format_json_result(result, root);
+                body.push_str(&json.to_string());
+                body.push('\n');
+            }
+            let resp = Response::from_string(body).with_header(json_content_type);
+            let _ = request.respond(resp);
+        }
+        Some(SearchOutcome::EmbedError(msg)) => {
+            let body = serde_json::json!({"error": msg}).to_string();
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(500))
                 .with_header(json_error_type);
             let _ = request.respond(resp);
-            return Ok(());
         }
-    };
-
-    let results = idx.search(&query_embedding, top_k, threshold)?;
-
-    let mut body = String::new();
-    for result in &results {
-        let json = format_json_result(result, root);
-        body.push_str(&json.to_string());
-        body.push('\n');
+        None => {
+            let body = r#"{"error":"worker unavailable"}"#;
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(500))
+                .with_header(json_error_type);
+            let _ = request.respond(resp);
+        }
     }
-
-    let resp = Response::from_string(body).with_header(json_content_type);
-    let _ = request.respond(resp);
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_streaming(
-    embedder: &mut Embedder,
-    idx: &Index,
-    mut indexer: StreamingIndexer,
+    embedder: Embedder,
+    idx: Index,
+    indexer: StreamingIndexer,
     port: Option<u16>,
     default_top_k: usize,
     default_threshold: f32,
@@ -144,18 +147,18 @@ pub fn run_streaming(
         eprintln!("Listening on http://127.0.0.1:{actual_port}");
     }
 
+    let worker = EmbedWorker::spawn(embedder, idx, indexer);
     let mut indexing_announced = false;
 
     loop {
-        if !indexer.indexing_done {
-            indexer.poll(embedder, idx)?;
-            if indexer.indexing_done && !indexing_announced {
+        // Check index progress (non-blocking)
+        if let Some(progress) = worker.drain_progress() {
+            if progress.indexing_done && !indexing_announced {
                 indexing_announced = true;
                 if !quiet {
-                    let chunk_count = idx.chunk_count().unwrap_or(0);
                     eprintln!(
                         "Indexing complete. {} files indexed, {} chunks ready.",
-                        indexer.indexed_count, chunk_count
+                        progress.indexed_count, progress.chunk_count
                     );
                 }
             }
@@ -166,50 +169,8 @@ pub fn run_streaming(
             Ok(None) | Err(_) => continue,
         };
 
-        handle_request(
-            request,
-            embedder,
-            idx,
-            default_top_k,
-            default_threshold,
-            root,
-        )?;
+        handle_request(request, &worker, default_top_k, default_threshold, root)?;
     }
-}
-
-pub fn run(
-    embedder: &mut Embedder,
-    idx: &Index,
-    port: Option<u16>,
-    default_top_k: usize,
-    default_threshold: f32,
-    quiet: bool,
-    root: &str,
-) -> Result<()> {
-    let port = port.unwrap_or(0);
-    let listener =
-        TcpListener::bind(("127.0.0.1", port)).context("Failed to bind HTTP listener")?;
-    let actual_port = listener.local_addr()?.port();
-
-    let server = Server::from_listener(listener, None)
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
-
-    if !quiet {
-        eprintln!("Listening on http://127.0.0.1:{actual_port}");
-    }
-
-    for request in server.incoming_requests() {
-        handle_request(
-            request,
-            embedder,
-            idx,
-            default_top_k,
-            default_threshold,
-            root,
-        )?;
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -262,7 +223,22 @@ mod tests {
                     .unwrap();
                 }
 
-                run(&mut embedder, &idx, Some(port), 10, 0.3, true, "/test/root").unwrap();
+                // Create a dummy indexer (no files to index) for run_streaming
+                let (dummy_tx, dummy_rx) = std::sync::mpsc::sync_channel(0);
+                drop(dummy_tx);
+                let indexer =
+                    StreamingIndexer::new(dummy_rx, 500, 100, 1, std::path::Path::new(""));
+                run_streaming(
+                    embedder,
+                    idx,
+                    indexer,
+                    Some(port),
+                    10,
+                    0.3,
+                    true,
+                    "/test/root",
+                )
+                .unwrap();
             });
 
             for _ in 0..50 {
