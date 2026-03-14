@@ -114,6 +114,16 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
     apply_bool!(no_ignore);
     apply_bool!(quiet);
 
+    // Ignore files: merge config into CLI (additive)
+    if let Some(ref config_files) = config.ignore_files {
+        let cli_files = args.ignore_file.get_or_insert_with(Vec::new);
+        for f in config_files {
+            if !cli_files.contains(f) {
+                cli_files.push(f.clone());
+            }
+        }
+    }
+
     // Color: apply if CLI is Auto (default)
     if matches!(args.color, vecgrep::cli::ColorChoice::Auto) {
         if let Some(ref c) = config.color {
@@ -268,6 +278,7 @@ fn run() -> Result<bool> {
         file_types: args.file_type.clone(),
         file_types_not: args.file_type_not.clone(),
         globs: args.glob.clone(),
+        ignore_files: args.ignore_file.clone(),
         hidden: args.hidden,
         follow: args.follow,
         no_ignore: args.no_ignore,

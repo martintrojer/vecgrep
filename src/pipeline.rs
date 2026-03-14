@@ -463,6 +463,7 @@ mod tests {
             file_types: None,
             file_types_not: None,
             globs: None,
+            ignore_files: None,
             hidden: false,
             follow: false,
             no_ignore: false,

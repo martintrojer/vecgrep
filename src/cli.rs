@@ -105,6 +105,10 @@ pub struct Args {
     #[arg(short = 'c', long)]
     pub count: bool,
 
+    /// Additional ignore file (gitignore syntax). Can be specified multiple times.
+    #[arg(long)]
+    pub ignore_file: Option<Vec<String>>,
+
     /// Don't respect ignore files (.gitignore, .ignore, etc.).
     #[arg(long)]
     pub no_ignore: bool,

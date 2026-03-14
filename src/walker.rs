@@ -15,6 +15,7 @@ pub struct WalkOptions {
     pub file_types: Option<Vec<String>>,
     pub file_types_not: Option<Vec<String>>,
     pub globs: Option<Vec<String>>,
+    pub ignore_files: Option<Vec<String>>,
     pub hidden: bool,
     pub follow: bool,
     pub no_ignore: bool,
@@ -50,6 +51,12 @@ where
 
         if let Some(depth) = opts.max_depth {
             builder.max_depth(Some(depth));
+        }
+
+        if let Some(ref ignore_files) = opts.ignore_files {
+            for path in ignore_files {
+                builder.add_ignore(path);
+            }
         }
 
         if opts.file_types.is_some() || opts.file_types_not.is_some() {
@@ -179,6 +186,7 @@ mod tests {
             file_types: None,
             file_types_not: None,
             globs: None,
+            ignore_files: None,
             hidden: false,
             follow: false,
             no_ignore: false,
@@ -320,12 +328,7 @@ mod tests {
         let paths = vec![dir.path().to_string_lossy().to_string()];
         let opts = WalkOptions {
             file_types: Some(vec!["rust".to_string()]),
-            file_types_not: None,
-            globs: None,
-            hidden: false,
-            follow: false,
-            no_ignore: false,
-            max_depth: None,
+            ..default_opts()
         };
         let files = walk_paths(&paths, &opts).unwrap();
         assert_eq!(files.len(), 1);
@@ -418,6 +421,78 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
         assert!(names.iter().any(|n| n.contains("one.txt")));
         assert!(names.iter().any(|n| n.contains("two.txt")));
+    }
+
+    #[test]
+    fn test_walk_ignore_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("keep.rs"), "fn keep() {}").unwrap();
+        std::fs::write(dir.path().join("skip.log"), "log data").unwrap();
+        std::fs::write(dir.path().join("skip.tmp"), "temp data").unwrap();
+        std::fs::create_dir(dir.path().join("build")).unwrap();
+        std::fs::write(dir.path().join("build/output.rs"), "fn build() {}").unwrap();
+
+        // Create an ignore file with glob patterns
+        let ignore_path = dir.path().join(".vecgrepignore");
+        std::fs::write(&ignore_path, "*.log\n*.tmp\nbuild/\n").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = WalkOptions {
+            ignore_files: Some(vec![ignore_path.to_string_lossy().to_string()]),
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("keep.rs")),
+            "keep.rs should not be ignored, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("skip.log")),
+            "*.log should be ignored, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("skip.tmp")),
+            "*.tmp should be ignored, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("output.rs")),
+            "build/ should be ignored, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_walk_ignore_file_negation() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "keep").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "ignore").unwrap();
+        std::fs::write(dir.path().join("c.rs"), "keep").unwrap();
+
+        // Ignore all .txt except a.txt
+        let ignore_path = dir.path().join(".myignore");
+        std::fs::write(&ignore_path, "*.txt\n!a.txt\n").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = WalkOptions {
+            ignore_files: Some(vec![ignore_path.to_string_lossy().to_string()]),
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("a.txt")),
+            "a.txt should be kept via negation, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("b.txt")),
+            "b.txt should be ignored, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("c.rs")),
+            "c.rs should not be affected, got: {names:?}"
+        );
     }
 
     #[test]

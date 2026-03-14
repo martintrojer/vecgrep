@@ -154,6 +154,7 @@ context = 5
 
 # File discovery
 hidden = true
+ignore_files = [".vecgrepignore"]
 ```
 
 Project-level config is useful for per-repo settings (e.g., a different model or chunk size). Global config sets your personal defaults.
@@ -184,6 +185,7 @@ Options:
   -., --hidden                  Search hidden files and directories
   -L, --follow                  Follow symbolic links
   -d, --max-depth <N>           Limit directory traversal depth
+      --ignore-file <PATH>      Additional ignore file (gitignore syntax, repeatable)
       --no-ignore               Don't respect .gitignore
       --type-list               Show all supported file types
       --color <WHEN>            When to use color (auto, always, never)
