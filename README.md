@@ -85,6 +85,30 @@ vecgrep --json "TODO" ./src | jq -r '"- [ ] \(.file):\(.start_line) — \(.text 
 vecgrep -l "error handling" ./src | entr -r cargo test
 ```
 
+## Ignoring files
+
+vecgrep respects `.gitignore` by default. For additional project-specific ignore patterns, use `--ignore-file` with a file containing [gitignore syntax](https://git-scm.com/docs/gitignore):
+
+```bash
+# Create an ignore file in the .vecgrep/ directory (already gitignored)
+cat > .vecgrep/ignore <<'EOF'
+*.org
+*.org_archive
+*.min.js
+vendor/
+EOF
+
+# Use it from the CLI
+vecgrep --ignore-file .vecgrep/ignore "query"
+
+# Or set it once in .vecgrep/config.toml
+cat >> .vecgrep/config.toml <<'EOF'
+ignore_files = [".vecgrep/ignore"]
+EOF
+```
+
+The flag can be specified multiple times and supports the full gitignore pattern language — globs, directory patterns, and negation (`!keep-this.log`).
+
 ## How it works
 
 1. **Walk** — discovers files using the same engine as ripgrep (`.gitignore`-aware, binary detection)
