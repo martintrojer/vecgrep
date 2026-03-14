@@ -9,6 +9,14 @@ use crate::types::{Chunk, IndexConfig, SearchResult};
 
 static SQLITE_VEC_INIT: Once = Once::new();
 
+fn vec_table_ddl(dim: usize) -> String {
+    format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(\
+         chunk_id integer primary key, \
+         embedding float[{dim}] distance_metric=cosine)"
+    )
+}
+
 fn init_sqlite_vec() {
     SQLITE_VEC_INIT.call_once(|| unsafe {
         #[allow(clippy::missing_transmute_annotations)]
@@ -87,14 +95,7 @@ impl Index {
         )?;
 
         // Create vec_chunks with default dimension (set_config will recreate if needed)
-        self.conn.execute(
-            &format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(\
-                 chunk_id integer primary key, \
-                 embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
-            ),
-            [],
-        )?;
+        self.conn.execute(&vec_table_ddl(EMBEDDING_DIM), [])?;
 
         Ok(())
     }
@@ -116,15 +117,8 @@ impl Index {
         self.set_meta("config", &config_json)?;
 
         // Ensure vec_chunks exists with the correct embedding dimension
-        self.conn.execute(
-            &format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(\
-                 chunk_id integer primary key, \
-                 embedding float[{}] distance_metric=cosine)",
-                config.embedding_dim
-            ),
-            [],
-        )?;
+        self.conn
+            .execute(&vec_table_ddl(config.embedding_dim), [])?;
 
         Ok(())
     }
@@ -202,13 +196,6 @@ impl Index {
         threshold: f32,
     ) -> Result<Vec<SearchResult>> {
         if top_k == 0 {
-            return Ok(vec![]);
-        }
-
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))?;
-        if count == 0 {
             return Ok(vec![]);
         }
 
@@ -702,6 +689,9 @@ mod tests {
             .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2])
             .unwrap();
 
+        // Both chunks should exist
+        assert_eq!(index.chunk_count().unwrap(), 2);
+
         // High threshold — only the near-exact match should pass
         let results = index.search(&emb1, 10, 0.99).unwrap();
         assert_eq!(results.len(), 1);
@@ -779,5 +769,201 @@ mod tests {
         assert_eq!(stats.file_count, 1);
         assert_eq!(stats.chunk_count, 2);
         assert!(stats.db_size_bytes > 0);
+    }
+
+    #[test]
+    fn test_search_descending_order() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let query = make_test_embedding(dim, 1.0);
+
+        // Insert the query itself as "exact" — guaranteed top match
+        let chunks_exact = vec![Chunk {
+            file_path: "exact.rs".to_string(),
+            text: "exact".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        index
+            .upsert_file("exact.rs", "h0", &chunks_exact, &[query.clone()])
+            .unwrap();
+
+        // Insert several other embeddings
+        for i in 1..4 {
+            let emb = make_test_embedding(dim, (i * 10) as f32);
+            let chunks = vec![Chunk {
+                file_path: format!("other{i}.rs"),
+                text: format!("other{i}"),
+                start_line: 1,
+                end_line: 1,
+            }];
+            index
+                .upsert_file(&format!("other{i}.rs"), &format!("h{i}"), &chunks, &[emb])
+                .unwrap();
+        }
+
+        let results = index.search(&query, 10, -1.0).unwrap();
+        assert!(results.len() >= 2);
+        // The exact match must be first
+        assert_eq!(results[0].chunk.text, "exact");
+        assert!(results[0].score > 0.99);
+        // All results must be in descending score order
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].score >= results[i].score,
+                "Results not in descending order at position {}: {} < {}",
+                i,
+                results[i - 1].score,
+                results[i].score
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_top_k_larger_than_results() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        for i in 0..3 {
+            let chunks = vec![Chunk {
+                file_path: format!("f{i}.rs"),
+                text: format!("chunk {i}"),
+                start_line: 1,
+                end_line: 1,
+            }];
+            let emb = vec![make_test_embedding(dim, (i + 1) as f32)];
+            index
+                .upsert_file(&format!("f{i}.rs"), &format!("h{i}"), &chunks, &emb)
+                .unwrap();
+        }
+
+        // top_k=100 but only 3 chunks — should return all 3
+        let query = make_test_embedding(dim, 1.0);
+        let results = index.search(&query, 100, -1.0).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_search_all_below_threshold() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let chunks = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "content".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb = vec![make_test_embedding(dim, 1.0)];
+        index.upsert_file("a.rs", "h", &chunks, &emb).unwrap();
+
+        // Use a very different query and high threshold
+        let query = make_test_embedding(dim, 100.0);
+        let results = index.search(&query, 10, 0.99).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_clear_then_reindex() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let config = IndexConfig {
+            model_name: "m".to_string(),
+            embedding_dim: dim,
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+
+        // Initial index
+        index.set_config(&config).unwrap();
+        let chunks = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "original".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb = vec![make_test_embedding(dim, 1.0)];
+        index.upsert_file("a.rs", "h1", &chunks, &emb).unwrap();
+        assert_eq!(index.chunk_count().unwrap(), 1);
+
+        // Clear drops vec_chunks, set_config recreates it
+        index.clear().unwrap();
+        index.set_config(&config).unwrap();
+
+        assert_eq!(index.chunk_count().unwrap(), 0);
+        let results = index.search(&emb[0], 10, -1.0).unwrap();
+        assert!(results.is_empty());
+
+        // Re-index and search again
+        let chunks2 = vec![Chunk {
+            file_path: "b.rs".to_string(),
+            text: "rebuilt".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb2 = vec![make_test_embedding(dim, 2.0)];
+        index.upsert_file("b.rs", "h2", &chunks2, &emb2).unwrap();
+
+        let results = index.search(&emb2[0], 1, -1.0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.text, "rebuilt");
+    }
+
+    #[test]
+    fn test_vec_chunks_consistency() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let vec_count = |idx: &Index| -> i64 {
+            idx.conn
+                .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+                .unwrap()
+        };
+
+        // Insert 2 files with 1 chunk each
+        for (name, seed) in &[("a.rs", 1.0f32), ("b.rs", 2.0)] {
+            let chunks = vec![Chunk {
+                file_path: name.to_string(),
+                text: format!("content of {name}"),
+                start_line: 1,
+                end_line: 1,
+            }];
+            let emb = vec![make_test_embedding(dim, *seed)];
+            index.upsert_file(name, "hash", &chunks, &emb).unwrap();
+        }
+        assert_eq!(index.chunk_count().unwrap(), 2);
+        assert_eq!(vec_count(&index), 2);
+
+        // Upsert a.rs (replace) — should stay at 2
+        let chunks = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "updated".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb = vec![make_test_embedding(dim, 3.0)];
+        index.upsert_file("a.rs", "hash2", &chunks, &emb).unwrap();
+        assert_eq!(index.chunk_count().unwrap(), 2);
+        assert_eq!(vec_count(&index), 2);
+
+        // Remove stale b.rs — should drop to 1
+        let current = vec!["a.rs".to_string()];
+        index.remove_stale_files(&current).unwrap();
+        assert_eq!(index.chunk_count().unwrap(), 1);
+        assert_eq!(vec_count(&index), 1);
+
+        // Clear should zero out both tables
+        index.clear().unwrap();
+        assert_eq!(index.chunk_count().unwrap(), 0);
+        // vec_chunks is dropped by clear(), recreate it via set_config
+        let config = IndexConfig {
+            model_name: "m".to_string(),
+            embedding_dim: dim,
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+        index.set_config(&config).unwrap();
+        assert_eq!(vec_count(&index), 0);
     }
 }

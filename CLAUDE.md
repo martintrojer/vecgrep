@@ -58,7 +58,7 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 
 - **CLI default**: searches immediately against the cached index, then `drain_all()` indexes remaining files in the background for next time.
 - **CLI `--full-index`**: `drain_all()` blocks until all files are indexed (with threshold prompt), then searches.
-- **TUI/serve**: `poll()` drains non-blockingly (up to `STREAMING_BATCH_SIZE` per iteration), reloading the index every 2 seconds so results appear progressively.
+- **TUI/serve**: `poll()` drains non-blockingly, indexing files as they arrive. New chunks are searchable immediately after INSERT — no reload delay.
 
 **Key design decisions:**
 
@@ -67,11 +67,11 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
   - **Local** (`Embedder::Local`): `build.rs` downloads model + tokenizer at build time, compiled into the binary via `include_bytes!`. The chunker uses the real tokenizer for exact token counts. The ONNX model silently truncates at `MAX_SEQ_LEN` (256 tokens). No errors possible — every chunk gets an embedding.
   - **Remote** (`Embedder::Remote`): Uses `--embedder-url` with any OpenAI-compatible API (Ollama, LM Studio, etc.). No tokenizer available, so the chunker uses a character heuristic (~2.5 chars/token — URLs, markdown, and code tokenize densely). At startup, probes Ollama's `/api/show` for the model's context length to set accurate truncation limits. Falls back to 1200-char default for non-Ollama servers. Unlike the local model, Ollama **rejects** (HTTP 400) texts exceeding context length instead of truncating. The `chunk_size` is automatically capped to the model's context in `main.rs`. If a chunk still fails, the batch is retried one-at-a-time, and any remaining failures get a zero-vector embedding with a warning logged (including the filename via `pipeline.rs`). Zero vectors are index holes — they exist but never match queries. The goal is zero holes: correct chunking avoids them, the fallback chain catches edge cases.
 - **ort API quirks**: `ort` v2.0.0-rc.12 errors are not `Send+Sync`, so `?` with `anyhow` doesn't work — all ort calls must use `.map_err(|e| anyhow::anyhow!("{}", e))`. `Session::run` requires `&mut self`.
-- **Embeddings are L2-normalized**, so cosine similarity = dot product. The search module (`search.rs`) exploits this by doing a simple `embedding_matrix.dot(&query)`.
+- **Embeddings are L2-normalized**, so cosine similarity = dot product. Vector search uses `sqlite-vec`'s `vec0` virtual table with `distance_metric=cosine` — a single SQL query replaces the old ndarray matrix multiply.
 - **Cache invalidation**: BLAKE3 content hash per file. If model name or chunk params change (stored in `meta` table as JSON), the entire index is rebuilt.
 - **Index location**: `.vecgrep/index.db` in the project root directory. Automatically added to `.gitignore`. The project root is discovered by walking up from the search path looking for `.git/`, `.hg/`, `.jj/`, or `.vecgrep/`. Use `--show-root` to print it.
 - **JSON output includes `root`**: All JSONL output (`--json` and `--serve`) includes a `"root"` field with the canonical project root path, so clients can resolve the project-root-relative `"file"` paths.
-- **Embeddings stored as BLOB**: `Vec<f32>` → little-endian bytes in SQLite, reconstituted into `ndarray::Array2<f32>` for search.
+- **Embeddings stored in vec0 virtual table**: `sqlite-vec` handles vector storage and KNN search via the `vec_chunks` virtual table. Embeddings are passed as little-endian `f32` bytes using `zerocopy::IntoBytes` for zero-copy conversion. The `chunks` table stores text/metadata, `vec_chunks` stores vectors, joined by `chunk_id`.
 - **CLI flags follow ripgrep conventions**: `-t` for type, `-g` for glob, `-C` for context, `-l` for files-with-matches, `-c` for count, `-.` for hidden, `-L` for follow, etc. Any new CLI flag must be checked against `rg --help` for compatibility — do not reuse a short flag that means something different in rg.
 
 **Module responsibilities:**
@@ -83,8 +83,7 @@ The walker runs on a background thread feeding files through a bounded `sync_cha
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries. Uses tokenizer when available, char-based heuristic otherwise |
 | `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `process_batch()` for chunk → embed → upsert |
 | `paths.rs` | Path conversions: `to_project_relative()`, `to_cwd_relative()` |
-| `index.rs` | SQLite schema (`meta`/`files`/`chunks`), upsert, stale removal, bulk load into ndarray |
-| `search.rs` | Matrix dot-product scoring, top-k partial sort, threshold filter |
+| `index.rs` | SQLite schema (`meta`/`files`/`chunks`/`vec_chunks`), upsert, stale removal, vector search via sqlite-vec |
 | `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_with()` helper, `walk_paths_streaming()` for channel-based walking |
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
 | `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` interleaves indexing with request handling |

@@ -124,6 +124,14 @@ fn test_incremental_indexing() {
     // Verify: still 2 chunks total
     assert_eq!(index.chunk_count().unwrap(), 2);
 
+    // Verify a.rs has the updated content
+    let results = index.search(&emb_a_v2[0], 1, -1.0).unwrap();
+    assert_eq!(results[0].chunk.text, "fn a_modified() {}");
+
+    // Verify b.rs is still intact
+    let results = index.search(&emb_b[0], 1, -1.0).unwrap();
+    assert_eq!(results[0].chunk.text, "fn b() {}");
+
     // Verify updated hash
     let new_hash = index.get_file_hash("a.rs").unwrap();
     assert_eq!(new_hash, Some("hash_a_v2".to_string()));

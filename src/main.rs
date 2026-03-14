@@ -399,7 +399,7 @@ fn run() -> Result<bool> {
 
     // CLI: search with current index (immediate results from cached data)
     let chunk_count = idx.chunk_count()?;
-    status!(quiet, "Loaded {} chunks for search.", chunk_count);
+    status!(quiet, "Index has {} chunks.", chunk_count);
 
     let query_embedding = embedder.embed(&query)?;
 

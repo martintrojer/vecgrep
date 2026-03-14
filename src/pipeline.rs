@@ -8,9 +8,6 @@ use crate::index::Index;
 use crate::paths;
 use crate::walker::WalkedFile;
 
-/// Max files to drain from the channel per iteration in streaming modes.
-pub const STREAMING_BATCH_SIZE: usize = 4;
-
 /// Manages incremental indexing from a streaming channel.
 pub struct StreamingIndexer {
     rx: Receiver<WalkedFile>,
@@ -265,10 +262,18 @@ mod tests {
 
         assert_eq!(idx.chunk_count().unwrap(), chunk_count);
 
-        // Verify files are searchable
+        // Verify both files are searchable
         let query_emb = embedder.embed("fn main").unwrap();
         let results = idx.search(&query_emb, 10, 0.0).unwrap();
-        assert!(!results.is_empty());
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert!(
+            paths.contains(&"a.rs"),
+            "expected a.rs in results, got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"b.rs"),
+            "expected b.rs in results, got: {paths:?}"
+        );
     }
 
     #[test]
@@ -355,6 +360,16 @@ mod tests {
         )];
         process_batch(&mut embedder, &idx, &batch3, 500, 100).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 2);
+
+        // Verify a.rs has the updated content
+        let query_emb = embedder.embed("alpha_v2 updated").unwrap();
+        let results = idx.search(&query_emb, 1, 0.0).unwrap();
+        assert_eq!(results[0].chunk.file_path, "a.rs");
+        assert!(
+            results[0].chunk.text.contains("alpha_v2"),
+            "expected updated content, got: {}",
+            results[0].chunk.text
+        );
     }
 
     #[test]

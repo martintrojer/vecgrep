@@ -140,8 +140,9 @@ pub fn run_streaming(
     let server = Server::from_listener(listener, None)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
 
-    let _ = quiet;
-    eprintln!("Listening on http://127.0.0.1:{actual_port}");
+    if !quiet {
+        eprintln!("Listening on http://127.0.0.1:{actual_port}");
+    }
 
     let mut indexing_announced = false;
 
@@ -150,11 +151,13 @@ pub fn run_streaming(
             indexer.poll(embedder, idx)?;
             if indexer.indexing_done && !indexing_announced {
                 indexing_announced = true;
-                let chunk_count = idx.chunk_count().unwrap_or(0);
-                eprintln!(
-                    "Indexing complete. {} files indexed, {} chunks ready.",
-                    indexer.indexed_count, chunk_count
-                );
+                if !quiet {
+                    let chunk_count = idx.chunk_count().unwrap_or(0);
+                    eprintln!(
+                        "Indexing complete. {} files indexed, {} chunks ready.",
+                        indexer.indexed_count, chunk_count
+                    );
+                }
             }
         }
 
@@ -191,8 +194,9 @@ pub fn run(
     let server = Server::from_listener(listener, None)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
 
-    let _ = quiet;
-    eprintln!("Listening on http://127.0.0.1:{actual_port}");
+    if !quiet {
+        eprintln!("Listening on http://127.0.0.1:{actual_port}");
+    }
 
     for request in server.incoming_requests() {
         handle_request(

@@ -93,7 +93,7 @@ vecgrep -l "error handling" ./src | entr -r cargo test
 4. **Index** — caches embeddings in a local SQLite database (`.vecgrep/index.db`), keyed by BLAKE3 content hash so only changed files are re-embedded
 5. **Search** — cosine similarity between query and all cached embeddings, returned as top-k results
 
-Search is a single matrix dot product against embeddings loaded in memory — no database in the hot path. This makes interactive mode and the HTTP server responsive enough for on-every-keystroke use.
+Search is a vector KNN query via [sqlite-vec](https://github.com/asg017/sqlite-vec) — fast enough for on-every-keystroke use in interactive mode and the HTTP server.
 
 ## Embedding models
 
