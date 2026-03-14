@@ -24,9 +24,13 @@ pub struct Config {
     pub index_warn_threshold: Option<usize>,
 }
 
-/// Return the global config path (`~/.config/vecgrep/config.toml`).
+/// Return the global config path (`$XDG_CONFIG_HOME/vecgrep/config.toml`,
+/// defaulting to `~/.config/vecgrep/config.toml`).
 pub fn global_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("vecgrep").join("config.toml"))
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .map(|d| d.join("vecgrep").join("config.toml"))
 }
 
 /// Return the project config path (`<project_root>/.vecgrep/config.toml`).
