@@ -267,6 +267,74 @@ fn test_default_mode_without_index_builds_index_before_search() {
     );
 }
 
+#[test]
+fn test_quiet_hides_indexing_status_output() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("quiet.rs"), "fn quiet_mode() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "quiet mode"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("quiet.rs"),
+        "expected quiet.rs in results, got: {stdout}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.trim().is_empty(),
+        "expected no stderr output with --quiet, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn test_first_run_status_output_is_compact() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("compact.rs"), "fn compact_output() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--threshold", "0.0", "compact output"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Loading model... done."),
+        "expected compact model loading line, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Indexing complete. 1 files, 1 chunks, 1 walked."),
+        "expected compact indexing summary, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Model loaded."),
+        "unexpected separate model-loaded line: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Scanning files..."),
+        "unexpected separate scanning line: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Found 1 files."),
+        "unexpected duplicate found-files line: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\n\n"),
+        "unexpected blank line in status output: {stderr:?}"
+    );
+}
+
 // --- Embedding dimension tests ---
 
 #[test]

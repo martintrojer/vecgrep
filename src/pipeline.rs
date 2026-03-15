@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::chunker;
@@ -8,19 +9,28 @@ use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::paths;
 use crate::types::SearchResult;
-use crate::walker::WalkedFile;
+use crate::walker::{StreamProgress, StreamProgressSnapshot, WalkedFile};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CliIndexingProgress {
+    pub indexed_count: usize,
+    pub indexed_chunks: usize,
+    pub walked_count: usize,
+}
 
 /// Manages incremental indexing from a streaming channel.
 pub struct StreamingIndexer {
     rx: Receiver<WalkedFile>,
     pub indexing_done: bool,
     pub indexed_count: usize,
+    pub indexed_chunks: usize,
     /// All file paths seen (for stale removal).
     pub all_paths: Vec<String>,
     chunk_size: usize,
     chunk_overlap: usize,
     pub(crate) batch_size: usize,
     cwd_suffix: Box<Path>,
+    stream_progress: Option<Arc<StreamProgress>>,
 }
 
 impl StreamingIndexer {
@@ -30,16 +40,33 @@ impl StreamingIndexer {
         chunk_overlap: usize,
         batch_size: usize,
         cwd_suffix: &Path,
+        stream_progress: Option<Arc<StreamProgress>>,
     ) -> Self {
         Self {
             rx,
             indexing_done: false,
             indexed_count: 0,
+            indexed_chunks: 0,
             all_paths: Vec::new(),
             chunk_size,
             chunk_overlap,
             batch_size,
             cwd_suffix: cwd_suffix.into(),
+            stream_progress,
+        }
+    }
+
+    pub fn cli_progress(&self) -> CliIndexingProgress {
+        let StreamProgressSnapshot { walked_files, .. } = self
+            .stream_progress
+            .as_ref()
+            .map(|progress| progress.snapshot())
+            .unwrap_or_default();
+
+        CliIndexingProgress {
+            indexed_count: self.indexed_count,
+            indexed_chunks: self.indexed_chunks,
+            walked_count: walked_files.max(self.all_paths.len()),
         }
     }
 
@@ -98,7 +125,15 @@ impl StreamingIndexer {
 
         if !batch.is_empty() {
             self.indexed_count += batch.len();
-            process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
+            let chunk_count = process_batch(
+                embedder,
+                idx,
+                &batch,
+                self.chunk_size,
+                self.chunk_overlap,
+                self.stream_progress.as_ref(),
+            )?;
+            self.indexed_chunks += chunk_count;
             return Ok(true);
         }
 
@@ -115,7 +150,7 @@ impl StreamingIndexer {
         mut on_batch: F,
     ) -> Result<usize>
     where
-        F: FnMut(usize) -> Result<bool>, // (indexed_so_far) -> continue?
+        F: FnMut(CliIndexingProgress) -> Result<bool>,
     {
         while !self.indexing_done {
             let mut batch: Vec<(WalkedFile, String)> = Vec::new();
@@ -138,9 +173,17 @@ impl StreamingIndexer {
 
             if !batch.is_empty() {
                 self.indexed_count += batch.len();
-                process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
+                let chunk_count = process_batch(
+                    embedder,
+                    idx,
+                    &batch,
+                    self.chunk_size,
+                    self.chunk_overlap,
+                    self.stream_progress.as_ref(),
+                )?;
+                self.indexed_chunks += chunk_count;
 
-                if !on_batch(self.indexed_count)? {
+                if !on_batch(self.cli_progress())? {
                     return Ok(self.indexed_count);
                 }
             }
@@ -322,6 +365,7 @@ pub fn process_batch(
     files_with_hashes: &[(WalkedFile, String)],
     chunk_size: usize,
     chunk_overlap: usize,
+    _stream_progress: Option<&Arc<StreamProgress>>,
 ) -> Result<usize> {
     let mut all_chunks = Vec::new();
     let mut chunk_file_info: Vec<(String, String)> = Vec::new();
@@ -423,7 +467,7 @@ mod tests {
             ),
         ];
 
-        let chunk_count = process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &files, 500, 100, None).unwrap();
         assert_eq!(chunk_count, 2);
 
         assert_eq!(idx.chunk_count().unwrap(), chunk_count);
@@ -447,7 +491,7 @@ mod tests {
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
-        let chunk_count = process_batch(&mut embedder, &idx, &[], 500, 100).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &[], 500, 100, None).unwrap();
         assert_eq!(chunk_count, 0);
         assert_eq!(idx.chunk_count().unwrap(), 0);
     }
@@ -485,7 +529,7 @@ mod tests {
 
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
-        let chunk_count = process_batch(&mut embedder, &idx, &batch, 500, 100).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &batch, 500, 100, None).unwrap();
         assert_eq!(chunk_count, 2);
         assert_eq!(idx.chunk_count().unwrap(), 2);
     }
@@ -503,7 +547,7 @@ mod tests {
             },
             "hash_a1".to_string(),
         )];
-        process_batch(&mut embedder, &idx, &batch1, 500, 100).unwrap();
+        process_batch(&mut embedder, &idx, &batch1, 500, 100, None).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 1);
 
         // Batch 2
@@ -514,7 +558,7 @@ mod tests {
             },
             "hash_b1".to_string(),
         )];
-        process_batch(&mut embedder, &idx, &batch2, 500, 100).unwrap();
+        process_batch(&mut embedder, &idx, &batch2, 500, 100, None).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 2);
 
         // Batch 3: re-index a.rs with new content
@@ -525,7 +569,7 @@ mod tests {
             },
             "hash_a2".to_string(),
         )];
-        process_batch(&mut embedder, &idx, &batch3, 500, 100).unwrap();
+        process_batch(&mut embedder, &idx, &batch3, 500, 100, None).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 2);
 
         // Verify a.rs has the updated content
@@ -556,7 +600,7 @@ mod tests {
             "hash_big".to_string(),
         )];
 
-        let chunk_count = process_batch(&mut embedder, &idx, &files, 10, 2).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &files, 10, 2, None).unwrap();
         assert!(
             chunk_count > 1,
             "expected multiple chunks, got {chunk_count}"
@@ -578,7 +622,7 @@ mod tests {
             },
             hash.clone(),
         )];
-        process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
+        process_batch(&mut embedder, &idx, &files, 500, 100, None).unwrap();
 
         let (tx, rx) = mpsc::sync_channel(32);
         tx.send(WalkedFile {
@@ -632,7 +676,7 @@ mod tests {
 
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx); // no files to index
-        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""));
+        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
         EmbedWorker::spawn(embedder, idx, indexer)
     }
 
@@ -678,7 +722,7 @@ mod tests {
         }
         // Don't drop tx yet — worker thinks indexing is still in progress
 
-        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""));
+        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
         let worker = EmbedWorker::spawn(embedder, idx, indexer);
 
         // Search should work even while indexing is happening
@@ -711,7 +755,7 @@ mod tests {
         }
         drop(tx);
 
-        let indexer = StreamingIndexer::new(rx, 500, 100, 2, std::path::Path::new(""));
+        let indexer = StreamingIndexer::new(rx, 500, 100, 2, std::path::Path::new(""), None);
         let worker = EmbedWorker::spawn(embedder, idx, indexer);
 
         // Wait for indexing to complete (50 × 50ms = 2.5s max)
