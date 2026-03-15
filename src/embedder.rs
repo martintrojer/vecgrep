@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ndarray::{Array1, ArrayView2, Axis};
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
@@ -63,6 +63,7 @@ impl Embedder {
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
                 .timeout_global(Some(std::time::Duration::from_secs(120)))
+                .http_status_as_error(false)
                 .build(),
         );
 
@@ -274,6 +275,27 @@ fn query_context_length(agent: &ureq::Agent, embedder_url: &str, model: &str) ->
     Some(max_chars)
 }
 
+/// Extract a human-readable error message from an API error response body.
+/// Tries to parse as JSON and pull out common error fields; falls back to the raw text.
+fn extract_error_message(body: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        // OpenAI-style: {"error": {"message": "..."}}
+        if let Some(msg) = json["error"]["message"].as_str() {
+            return msg.to_string();
+        }
+        // Simple: {"error": "..."}
+        if let Some(msg) = json["error"].as_str() {
+            return msg.to_string();
+        }
+        // Ollama: {"message": "..."}
+        if let Some(msg) = json["message"].as_str() {
+            return msg.to_string();
+        }
+    }
+    // Fall back to raw body, truncated
+    body.chars().take(200).collect()
+}
+
 impl RemoteEmbedder {
     fn send_request(&self, texts: &[&str]) -> Result<serde_json::Value> {
         let truncated: Vec<&str> = texts
@@ -298,10 +320,25 @@ impl RemoteEmbedder {
             .send(body_str.as_bytes());
         match resp {
             Ok(resp) => {
+                let status = resp.status().as_u16();
                 let response_text = resp
                     .into_body()
                     .read_to_string()
                     .map_err(|e| anyhow::anyhow!("Failed to read response: {e}"))?;
+                if status >= 400 {
+                    let detail = extract_error_message(&response_text);
+                    tracing::debug!(
+                        "Remote embed failed (HTTP {}): {}, text lengths: {:?}",
+                        status,
+                        detail,
+                        truncated.iter().map(|t| t.len()).collect::<Vec<_>>(),
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Embeddings API returned HTTP {}: {}",
+                        status,
+                        detail
+                    ));
+                }
                 serde_json::from_str(&response_text)
                     .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))
             }
@@ -440,6 +477,12 @@ impl RemoteEmbedder {
                                 all_embeddings.extend(self.parse_embeddings(&response, 1)?);
                             }
                             Err(e) => {
+                                // If we haven't discovered the embedding dimension yet,
+                                // we can't create a valid zero vector — propagate the error
+                                // so the caller knows the embedder is unreachable.
+                                if self.embedding_dim.is_none() {
+                                    return Err(e);
+                                }
                                 let preview = &text[..text.len().min(80)];
                                 tracing::warn!(
                                     "Skipping chunk ({} chars, starts with {:?}): {}",
@@ -612,9 +655,10 @@ mod tests {
         });
 
         let err = remote.parse_embeddings(&response, 2).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("returned 1 embeddings for 2 inputs"));
+        assert!(
+            err.to_string()
+                .contains("returned 1 embeddings for 2 inputs")
+        );
     }
 
     #[test]

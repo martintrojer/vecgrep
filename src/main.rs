@@ -472,7 +472,16 @@ fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
         embedder
             .embed("probe")
             .context("Failed to connect to external embedder")?;
-        status!(quiet, "Embedding dimension: {}", embedder.embedding_dim());
+        let dim = embedder.embedding_dim();
+        if dim == 0 {
+            anyhow::bail!(
+                "Remote embedder returned an embedding with dimension 0. \
+                 Check that the model '{}' is available at '{}'.",
+                model,
+                url
+            );
+        }
+        status!(quiet, "Embedding dimension: {}", dim);
         embedder
     } else {
         if !quiet {
@@ -1342,9 +1351,10 @@ mod tests {
         let (args, _) = parse_args(&["vecgrep", "needle"]);
 
         let err = apply_path_plan(args, &plan).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("outside the selected project root"));
+        assert!(
+            err.to_string()
+                .contains("outside the selected project root")
+        );
     }
 
     #[test]
