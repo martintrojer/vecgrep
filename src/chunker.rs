@@ -124,15 +124,15 @@ mod tests {
 
     fn make_tokenizer() -> Tokenizer {
         let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/models/tokenizer.json"));
-        Tokenizer::from_bytes(bytes).unwrap()
+        let mut tok = Tokenizer::from_bytes(bytes).unwrap();
+        tok.with_padding(None);
+        tok
     }
 
     #[test]
     fn test_small_file_single_chunk() {
         let tokenizer = make_tokenizer();
         let content = "hello world\nthis is a test";
-        // Note: tokenizer pads each line to 128 tokens, so 2 lines = 256 padded tokens.
-        // Use chunk_size=500 (the production default) to ensure single-chunk output.
         let chunks = chunk_file("test.txt", content, 500, 50, Some(&tokenizer));
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1);
@@ -216,8 +216,7 @@ mod tests {
     #[test]
     fn test_chunks_overlap_and_cover_file() {
         let tokenizer = make_tokenizer();
-        // Tokenizer pads each line to 128 tokens, so use large chunk_size/overlap
-        // to fit multiple lines per chunk and ensure overlap manifests.
+        // Use enough lines and small enough chunk_size to ensure multiple chunks with overlap.
         let lines: Vec<String> = (0..200)
             .map(|i| format!("Line {} with some extra content to consume tokens", i))
             .collect();
