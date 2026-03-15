@@ -1,6 +1,8 @@
 use anyhow::Result;
 use ignore::WalkBuilder;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Discovered file with its content.
 pub struct WalkedFile {
@@ -8,6 +10,33 @@ pub struct WalkedFile {
     pub rel_path: String,
     /// File content (UTF-8).
     pub content: String,
+}
+
+pub struct StreamProgress {
+    walked_files: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamProgressSnapshot {
+    pub walked_files: usize,
+}
+
+impl StreamProgress {
+    pub fn new() -> Self {
+        Self {
+            walked_files: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn snapshot(&self) -> StreamProgressSnapshot {
+        StreamProgressSnapshot {
+            walked_files: self.walked_files.load(Ordering::Relaxed),
+        }
+    }
+
+    fn on_send(&self) {
+        self.walked_files.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Options for file walking, mapped from CLI flags.
@@ -124,11 +153,21 @@ pub fn walk_paths_streaming(
     opts: &WalkOptions,
     sender: std::sync::mpsc::SyncSender<WalkedFile>,
 ) -> Result<usize> {
+    walk_paths_streaming_with_progress(paths, opts, sender, Arc::new(StreamProgress::new()))
+}
+
+pub fn walk_paths_streaming_with_progress(
+    paths: &[String],
+    opts: &WalkOptions,
+    sender: std::sync::mpsc::SyncSender<WalkedFile>,
+    progress: Arc<StreamProgress>,
+) -> Result<usize> {
     let mut count = 0;
     walk_with(paths, opts, |f| {
         if sender.send(f).is_err() {
             return false;
         }
+        progress.on_send();
         count += 1;
         true
     })?;
@@ -551,5 +590,29 @@ mod tests {
         // Walker thread should exit gracefully (not panic) and report partial count
         let count = handle.join().unwrap().unwrap();
         assert!(count < 100, "expected early exit, got {count} files");
+    }
+
+    #[test]
+    fn test_walk_streaming_progress_tracks_walked_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = default_opts();
+        let progress = Arc::new(StreamProgress::new());
+        let progress_for_thread = Arc::clone(&progress);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let handle = std::thread::spawn(move || {
+            walk_paths_streaming_with_progress(&paths, &opts, tx, progress_for_thread).unwrap()
+        });
+
+        let count = handle.join().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            progress.snapshot(),
+            StreamProgressSnapshot { walked_files: 1 }
+        );
+        let _ = rx.recv().unwrap();
     }
 }
