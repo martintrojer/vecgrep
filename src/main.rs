@@ -385,9 +385,10 @@ fn run() -> Result<bool> {
         if !config_valid {
             status!(quiet, "Index configuration changed, rebuilding...");
         }
-        idx.clear()?;
+        idx.rebuild_for_config(&config)?;
+    } else {
+        idx.set_config(&config)?;
     }
-    idx.set_config(&config)?;
 
     // Stream files from walker thread through a channel
     let walk_opts = walker::WalkOptions {

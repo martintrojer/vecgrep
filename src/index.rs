@@ -8,6 +8,7 @@ use crate::embedder::EMBEDDING_DIM;
 use crate::types::{Chunk, IndexConfig, SearchResult};
 
 static SQLITE_VEC_INIT: Once = Once::new();
+const SCHEMA_VERSION: i64 = 1;
 
 fn vec_table_ddl(dim: usize) -> String {
     format!(
@@ -31,6 +32,20 @@ pub struct Index {
 }
 
 impl Index {
+    fn with_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        match f() {
+            Ok(value) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(err)
+            }
+        }
+    }
+
     /// Open or create the index database at `.vecgrep/index.db` under the given root.
     pub fn open(root: &Path) -> Result<Self> {
         init_sqlite_vec();
@@ -63,50 +78,46 @@ impl Index {
     }
 
     fn create_tables(&self) -> Result<()> {
-        // Migrate from old schema: if chunks table has an embedding column, drop data tables
-        let has_old_schema = self
+        let current_version: i64 = self
             .conn
-            .prepare("SELECT embedding FROM chunks LIMIT 0")
-            .is_ok();
-        if has_old_schema {
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+        self.with_transaction(|| {
+            if current_version != SCHEMA_VERSION {
+                self.conn.execute_batch(
+                    "DROP TABLE IF EXISTS vec_chunks;
+                     DROP TABLE IF EXISTS chunks;
+                     DROP TABLE IF EXISTS files;
+                     DROP TABLE IF EXISTS meta;",
+                )?;
+            }
+
             self.conn.execute_batch(
-                "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS files; DELETE FROM meta;",
+                "CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chunks (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER NOT NULL REFERENCES files(id),
+                    text TEXT NOT NULL,
+                    embedding_failed INTEGER NOT NULL DEFAULT 0,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);",
             )?;
-        }
+            self.conn.execute(&vec_table_ddl(EMBEDDING_DIM), [])?;
+            self.conn
+                .execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
 
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                content_hash TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY,
-                file_id INTEGER NOT NULL REFERENCES files(id),
-                text TEXT NOT NULL,
-                embedding_failed INTEGER NOT NULL DEFAULT 0,
-                start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);",
-        )?;
-
-        // Migrate older databases that predate failed-embedding accounting.
-        if !self.has_column("chunks", "embedding_failed")? {
-            self.conn.execute(
-                "ALTER TABLE chunks ADD COLUMN embedding_failed INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-
-        // Create vec_chunks with default dimension (set_config will recreate if needed)
-        self.conn.execute(&vec_table_ddl(EMBEDDING_DIM), [])?;
-
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Check if the index config matches. If not, return false.
@@ -122,25 +133,50 @@ impl Index {
 
     /// Store the current config and ensure vec_chunks table has correct dimension.
     pub fn set_config(&self, config: &IndexConfig) -> Result<()> {
-        let config_json = serde_json::to_string(config)?;
-        self.set_meta("config", &config_json)?;
+        self.with_transaction(|| {
+            let config_json = serde_json::to_string(config)?;
+            self.set_meta("config", &config_json)?;
 
-        // Create vec_chunks if it doesn't exist (new DB or after clear()).
-        // The dimension is correct because clear() drops vec_chunks when
-        // config changes, so this always creates with the right dimension.
-        self.conn
-            .execute(&vec_table_ddl(config.embedding_dim), [])?;
+            // Create vec_chunks if it doesn't exist (new DB or after clear()).
+            // The dimension is correct because clear() drops vec_chunks when
+            // config changes, so this always creates with the right dimension.
+            self.conn
+                .execute(&vec_table_ddl(config.embedding_dim), [])?;
 
-        Ok(())
+            Ok(())
+        })
+    }
+
+    /// Rebuild all index data for a new configuration atomically.
+    pub fn rebuild_for_config(&self, config: &IndexConfig) -> Result<()> {
+        self.with_transaction(|| {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS vec_chunks;
+                 DELETE FROM chunks;
+                 DELETE FROM files;
+                 DELETE FROM meta;",
+            )?;
+
+            let config_json = serde_json::to_string(config)?;
+            self.set_meta("config", &config_json)?;
+            self.conn
+                .execute(&vec_table_ddl(config.embedding_dim), [])?;
+
+            Ok(())
+        })
     }
 
     /// Clear all data (for reindex or config change).
     pub fn clear(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "DROP TABLE IF EXISTS vec_chunks; \
-             DELETE FROM chunks; DELETE FROM files; DELETE FROM meta;",
-        )?;
-        Ok(())
+        self.with_transaction(|| {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS vec_chunks;
+                 DELETE FROM chunks;
+                 DELETE FROM files;
+                 DELETE FROM meta;",
+            )?;
+            Ok(())
+        })
     }
 
     /// Get the stored content hash for a file path.
@@ -163,47 +199,46 @@ impl Index {
         embeddings: &[Vec<f32>],
         embedding_failed: &[bool],
     ) -> Result<()> {
-        self.conn.execute("BEGIN", [])?;
+        self.with_transaction(|| {
+            // Delete existing data for this file
+            if let Ok(file_id) = self.get_file_id(path) {
+                self.delete_file_by_id(file_id)?;
+            }
 
-        // Delete existing data for this file
-        if let Ok(file_id) = self.get_file_id(path) {
-            self.delete_file_by_id(file_id)?;
-        }
+            // Insert file record
+            self.conn.execute(
+                "INSERT INTO files (path, content_hash) VALUES (?1, ?2)",
+                params![path, content_hash],
+            )?;
+            let file_id = self.conn.last_insert_rowid();
 
-        // Insert file record
-        self.conn.execute(
-            "INSERT INTO files (path, content_hash) VALUES (?1, ?2)",
-            params![path, content_hash],
-        )?;
-        let file_id = self.conn.last_insert_rowid();
+            // Insert chunks and their vector embeddings
+            let mut chunk_stmt = self.conn.prepare(
+                "INSERT INTO chunks (file_id, text, embedding_failed, start_line, end_line)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            let mut vec_stmt = self
+                .conn
+                .prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
 
-        // Insert chunks and their vector embeddings
-        let mut chunk_stmt = self.conn.prepare(
-            "INSERT INTO chunks (file_id, text, embedding_failed, start_line, end_line)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
-        let mut vec_stmt = self
-            .conn
-            .prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
+            for ((chunk, embedding), failed) in chunks
+                .iter()
+                .zip(embeddings.iter())
+                .zip(embedding_failed.iter())
+            {
+                chunk_stmt.execute(params![
+                    file_id,
+                    chunk.text,
+                    *failed as i64,
+                    chunk.start_line as i64,
+                    chunk.end_line as i64,
+                ])?;
+                let chunk_id = self.conn.last_insert_rowid();
+                vec_stmt.execute(params![chunk_id, embedding.as_slice().as_bytes()])?;
+            }
 
-        for ((chunk, embedding), failed) in chunks
-            .iter()
-            .zip(embeddings.iter())
-            .zip(embedding_failed.iter())
-        {
-            chunk_stmt.execute(params![
-                file_id,
-                chunk.text,
-                *failed as i64,
-                chunk.start_line as i64,
-                chunk.end_line as i64,
-            ])?;
-            let chunk_id = self.conn.last_insert_rowid();
-            vec_stmt.execute(params![chunk_id, embedding.as_slice().as_bytes()])?;
-        }
-
-        self.conn.execute("COMMIT", [])?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Search for chunks most similar to the query embedding.
@@ -272,20 +307,22 @@ impl Index {
 
     /// Remove files that are no longer present on disk.
     pub fn remove_stale_files(&self, current_paths: &[String]) -> Result<usize> {
-        let stored_paths = self.all_file_paths()?;
-        let current_set: std::collections::HashSet<&str> =
-            current_paths.iter().map(|s| s.as_str()).collect();
+        self.with_transaction(|| {
+            let stored_paths = self.all_file_paths()?;
+            let current_set: std::collections::HashSet<&str> =
+                current_paths.iter().map(|s| s.as_str()).collect();
 
-        let mut removed = 0;
-        for path in &stored_paths {
-            if !current_set.contains(path.as_str()) {
-                if let Ok(file_id) = self.get_file_id(path) {
-                    self.delete_file_by_id(file_id)?;
-                    removed += 1;
+            let mut removed = 0;
+            for path in &stored_paths {
+                if !current_set.contains(path.as_str()) {
+                    if let Ok(file_id) = self.get_file_id(path) {
+                        self.delete_file_by_id(file_id)?;
+                        removed += 1;
+                    }
                 }
             }
-        }
-        Ok(removed)
+            Ok(removed)
+        })
     }
 
     /// Remove stale files, but only within the given path prefix.
@@ -295,20 +332,22 @@ impl Index {
         current_paths: &[String],
         prefix: &str,
     ) -> Result<usize> {
-        let stored_paths = self.all_file_paths()?;
-        let current_set: std::collections::HashSet<&str> =
-            current_paths.iter().map(|s| s.as_str()).collect();
+        self.with_transaction(|| {
+            let stored_paths = self.all_file_paths()?;
+            let current_set: std::collections::HashSet<&str> =
+                current_paths.iter().map(|s| s.as_str()).collect();
 
-        let mut removed = 0;
-        for path in &stored_paths {
-            if path.starts_with(prefix) && !current_set.contains(path.as_str()) {
-                if let Ok(file_id) = self.get_file_id(path) {
-                    self.delete_file_by_id(file_id)?;
-                    removed += 1;
+            let mut removed = 0;
+            for path in &stored_paths {
+                if path.starts_with(prefix) && !current_set.contains(path.as_str()) {
+                    if let Ok(file_id) = self.get_file_id(path) {
+                        self.delete_file_by_id(file_id)?;
+                        removed += 1;
+                    }
                 }
             }
-        }
-        Ok(removed)
+            Ok(removed)
+        })
     }
 
     /// Get index statistics.
@@ -369,18 +408,6 @@ impl Index {
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(paths)
-    }
-
-    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
-        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let name: String = row.get(1)?;
-            if name == column {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn get_meta(&self, key: &str) -> Result<Option<String>> {
