@@ -74,7 +74,7 @@ impl StreamingIndexer {
     /// Receive one file from the channel, hash-check it, and return it if it needs indexing.
     /// Returns `None` if the file is up-to-date or the channel is empty/closed.
     fn recv_one(&mut self, idx: &Index, blocking: bool) -> Option<(WalkedFile, String)> {
-        let file = if blocking {
+        let mut file = if blocking {
             match self.rx.recv() {
                 Ok(f) => f,
                 Err(_) => {
@@ -93,7 +93,6 @@ impl StreamingIndexer {
             }
         };
 
-        let mut file = file;
         file.rel_path = paths::to_project_relative(&file.rel_path, &self.cwd_suffix);
         self.all_paths.push(file.rel_path.clone());
 

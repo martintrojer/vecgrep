@@ -62,6 +62,10 @@ fn has_project_marker(path: &Path) -> bool {
         .any(|marker| path.join(marker).exists())
 }
 
+fn canonicalize_or_keep(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn resolve_input_path(cwd: &Path, input: &str) -> PathBuf {
     let path = Path::new(input);
     let absolute = if path.is_absolute() {
@@ -275,9 +279,7 @@ enum FlowControl {
 }
 
 fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec<ResolvedPath> {
-    let project_root_canon = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    let project_root_canon = canonicalize_or_keep(project_root);
 
     paths
         .iter()
@@ -313,10 +315,8 @@ fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
 }
 
 fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> PathPlan {
-    let project_root_canon = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let project_root_canon = canonicalize_or_keep(project_root);
+    let cwd_canon = canonicalize_or_keep(cwd);
     let inside_paths = paths
         .iter()
         .filter(|path| path.inside_root)
@@ -856,7 +856,7 @@ fn run_cli_search(
     Ok(found)
 }
 
-/// Apply config file values where CLI flags weren't explicitly provided.
+/// Check whether a CLI flag was explicitly provided on the command line.
 fn cli_provided(matches: &ArgMatches, id: &str) -> bool {
     matches.value_source(id) == Some(ValueSource::CommandLine)
 }
@@ -874,40 +874,54 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config, matches: &Arg
         args.max_depth = config.max_depth;
     }
 
-    // Fields with clap defaults: apply config unless the CLI explicitly set them.
-    macro_rules! apply_value {
-        ($field:ident, $id:literal) => {
-            if !cli_provided(matches, $id) {
-                if let Some(v) = config.$field {
-                    args.$field = v;
-                }
-            }
-        };
+    // Fields with clap defaults: apply config value unless the CLI explicitly set them.
+    if !cli_provided(matches, "top_k") {
+        if let Some(v) = config.top_k {
+            args.top_k = v;
+        }
     }
-
-    apply_value!(top_k, "top_k");
-    apply_value!(threshold, "threshold");
-    apply_value!(context, "context");
-    apply_value!(chunk_size, "chunk_size");
-    apply_value!(chunk_overlap, "chunk_overlap");
-    apply_value!(index_warn_threshold, "index_warn_threshold");
+    if !cli_provided(matches, "threshold") {
+        if let Some(v) = config.threshold {
+            args.threshold = v;
+        }
+    }
+    if !cli_provided(matches, "context") {
+        if let Some(v) = config.context {
+            args.context = v;
+        }
+    }
+    if !cli_provided(matches, "chunk_size") {
+        if let Some(v) = config.chunk_size {
+            args.chunk_size = v;
+        }
+    }
+    if !cli_provided(matches, "chunk_overlap") {
+        if let Some(v) = config.chunk_overlap {
+            args.chunk_overlap = v;
+        }
+    }
+    if !cli_provided(matches, "index_warn_threshold") {
+        if let Some(v) = config.index_warn_threshold {
+            args.index_warn_threshold = v;
+        }
+    }
 
     // Bool fields: apply config unless the CLI explicitly set them.
-    macro_rules! apply_bool {
-        ($field:ident, $id:literal) => {
-            if !cli_provided(matches, $id) {
-                if let Some(true) = config.$field {
-                    args.$field = true;
-                }
-            }
-        };
+    if !cli_provided(matches, "full_index") && config.full_index == Some(true) {
+        args.full_index = true;
     }
-
-    apply_bool!(full_index, "full_index");
-    apply_bool!(hidden, "hidden");
-    apply_bool!(follow, "follow");
-    apply_bool!(no_ignore, "no_ignore");
-    apply_bool!(quiet, "quiet");
+    if !cli_provided(matches, "hidden") && config.hidden == Some(true) {
+        args.hidden = true;
+    }
+    if !cli_provided(matches, "follow") && config.follow == Some(true) {
+        args.follow = true;
+    }
+    if !cli_provided(matches, "no_ignore") && config.no_ignore == Some(true) {
+        args.no_ignore = true;
+    }
+    if !cli_provided(matches, "quiet") && config.quiet == Some(true) {
+        args.quiet = true;
+    }
 
     // Ignore files: merge config into CLI (additive)
     if let Some(ref config_files) = config.ignore_files {
