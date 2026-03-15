@@ -518,6 +518,72 @@ fn prepare_execution(
     })
 }
 
+fn drain_initial_indexing(
+    indexer: &mut pipeline::StreamingIndexer,
+    embedder: &mut Embedder,
+    idx: &Index,
+    quiet: bool,
+    threshold: usize,
+    progress_reporter: &mut Option<CliProgressReporter>,
+) -> Result<()> {
+    let mut threshold_prompted = false;
+    indexer.drain_all(embedder, idx, |progress| {
+        if !quiet && !threshold_prompted && threshold > 0 && progress.indexed_count >= threshold {
+            threshold_prompted = true;
+            if let Some(reporter) = progress_reporter.as_ref() {
+                reporter.pause();
+            }
+            eprintln!(
+                "Warning: {} files need indexing so far (still scanning).",
+                progress.indexed_count
+            );
+            if std::io::stdin().is_terminal() {
+                eprint!("Continue? [y/N] ");
+                std::io::stderr().flush().ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Aborted.");
+                    return Ok(false);
+                }
+            }
+            if let Some(reporter) = progress_reporter.as_ref() {
+                reporter.resume();
+            }
+        }
+        if let Some(reporter) = progress_reporter.as_ref() {
+            reporter.update(progress);
+        }
+        Ok(true)
+    })?;
+
+    if let Some(reporter) = progress_reporter.take() {
+        reporter.finish();
+    }
+
+    Ok(())
+}
+
+fn drain_remaining_indexing(
+    indexer: &mut pipeline::StreamingIndexer,
+    embedder: &mut Embedder,
+    idx: &Index,
+    progress_reporter: &mut Option<CliProgressReporter>,
+) -> Result<()> {
+    indexer.drain_all(embedder, idx, |progress| {
+        if let Some(reporter) = progress_reporter.as_ref() {
+            reporter.update(progress);
+        }
+        Ok(true)
+    })?;
+
+    if let Some(reporter) = progress_reporter.take() {
+        reporter.finish();
+    }
+
+    Ok(())
+}
+
 fn print_index_stats(idx: &Index) -> Result<()> {
     let stats = idx.stats()?;
     output::print_stats(
@@ -750,41 +816,14 @@ fn run() -> Result<bool> {
     // --full-index was requested explicitly.
     let must_drain_before_search = matches!(run_mode, RunMode::IndexOnly | RunMode::Cli);
     if runtime.full_index || must_drain_before_search {
-        let mut threshold_prompted = false;
-        indexer.drain_all(&mut embedder, &idx, |progress| {
-            if !quiet && !threshold_prompted && threshold > 0 && progress.indexed_count >= threshold
-            {
-                threshold_prompted = true;
-                if let Some(reporter) = progress_reporter.as_ref() {
-                    reporter.pause();
-                }
-                eprintln!(
-                    "Warning: {} files need indexing so far (still scanning).",
-                    progress.indexed_count
-                );
-                if std::io::stdin().is_terminal() {
-                    eprint!("Continue? [y/N] ");
-                    std::io::stderr().flush().ok();
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    if !input.trim().eq_ignore_ascii_case("y") {
-                        eprintln!("Aborted.");
-                        return Ok(false);
-                    }
-                }
-                if let Some(reporter) = progress_reporter.as_ref() {
-                    reporter.resume();
-                }
-            }
-            if let Some(reporter) = progress_reporter.as_ref() {
-                reporter.update(progress);
-            }
-            Ok(true)
-        })?;
-        if let Some(reporter) = progress_reporter.take() {
-            reporter.finish();
-        }
-
+        drain_initial_indexing(
+            &mut indexer,
+            &mut embedder,
+            &idx,
+            quiet,
+            threshold,
+            &mut progress_reporter,
+        )?;
         finish_indexing(
             &mut indexer,
             &idx,
@@ -857,16 +896,7 @@ fn run() -> Result<bool> {
     // TUI/serve may return here with indexing still in progress, but CLI has
     // already drained above.
     if !indexer.indexing_done {
-        indexer.drain_all(&mut embedder, &idx, |progress| {
-            if let Some(reporter) = progress_reporter.as_ref() {
-                reporter.update(progress);
-            }
-            Ok(true)
-        })?;
-        if let Some(reporter) = progress_reporter.take() {
-            reporter.finish();
-        }
-
+        drain_remaining_indexing(&mut indexer, &mut embedder, &idx, &mut progress_reporter)?;
         finish_indexing(
             &mut indexer,
             &idx,
