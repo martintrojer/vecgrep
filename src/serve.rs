@@ -321,9 +321,10 @@ mod tests {
 
         assert_eq!(status, 200);
         let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
-        assert!(
-            lines.len() <= 1,
-            "expected at most 1 result with k=1, got {}",
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly 1 result with k=1, got {}",
             lines.len()
         );
     }
@@ -331,14 +332,27 @@ mod tests {
     #[test]
     fn test_search_threshold_override() {
         let port = test_port();
-        let (status, body, _) = http_request("GET", port, "/search?q=test&threshold=0.99");
 
+        // With a very high threshold, results should be filtered out
+        let (status, body, _) = http_request("GET", port, "/search?q=test&threshold=0.99");
         assert_eq!(status, 200);
-        for line in body.lines().filter(|l| !l.is_empty()) {
+        let high_lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        for line in &high_lines {
             let json: serde_json::Value = serde_json::from_str(line).unwrap();
             let score = json["score"].as_f64().unwrap();
             assert!(score >= 0.99, "score {score} should be >= 0.99");
         }
+
+        // With a low threshold, we should get more results than with a high one
+        let (status_low, body_low, _) = http_request("GET", port, "/search?q=test&threshold=0.0");
+        assert_eq!(status_low, 200);
+        let low_lines: Vec<&str> = body_low.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            low_lines.len() > high_lines.len(),
+            "threshold=0.0 should return more results ({}) than threshold=0.99 ({})",
+            low_lines.len(),
+            high_lines.len()
+        );
     }
 
     #[test]
