@@ -279,6 +279,11 @@ struct ExecutionContext {
     root: String,
 }
 
+enum FlowControl {
+    Continue,
+    Return(bool),
+}
+
 fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec<ResolvedPath> {
     let project_root_canon = project_root
         .canonicalize()
@@ -687,6 +692,53 @@ fn print_index_stats(idx: &Index) -> Result<()> {
     Ok(())
 }
 
+fn handle_pre_execution_actions(
+    args: &Args,
+    path_plan: &PathPlan,
+    quiet: bool,
+) -> Result<FlowControl> {
+    if args.clear_cache {
+        let cache_dir = path_plan.project_root.join(".vecgrep");
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir)?;
+            status!(quiet, "Cache cleared.");
+        } else {
+            status!(quiet, "No cache found.");
+        }
+        if args.query.is_none() {
+            return Ok(FlowControl::Return(true));
+        }
+    }
+
+    if args.stats && args.query.is_none() && !args.index_only {
+        let idx = Index::open(&path_plan.project_root)?;
+        print_index_stats(&idx)?;
+        return Ok(FlowControl::Return(true));
+    }
+
+    Ok(FlowControl::Continue)
+}
+
+fn handle_post_index_actions(args: &Args, idx: &Index) -> Result<FlowControl> {
+    if args.index_only {
+        print_index_stats(idx)?;
+        return Ok(FlowControl::Return(true));
+    }
+
+    if args.reindex && args.query.is_none() {
+        return Ok(FlowControl::Return(true));
+    }
+
+    if args.stats {
+        print_index_stats(idx)?;
+        if args.query.is_none() {
+            return Ok(FlowControl::Return(true));
+        }
+    }
+
+    Ok(FlowControl::Continue)
+}
+
 fn run_serve_mode(
     embedder: Embedder,
     idx: Index,
@@ -907,25 +959,8 @@ fn run() -> Result<bool> {
     } = resolve_invocation(args, &matches, &cwd, &project_root)?;
     let quiet = runtime.quiet;
 
-    // Handle --clear-cache
-    if args.clear_cache {
-        let cache_dir = path_plan.project_root.join(".vecgrep");
-        if cache_dir.exists() {
-            std::fs::remove_dir_all(&cache_dir)?;
-            status!(quiet, "Cache cleared.");
-        } else {
-            status!(quiet, "No cache found.");
-        }
-        if args.query.is_none() {
-            return Ok(true);
-        }
-    }
-
-    // Handle --stats (without loading model)
-    if args.stats && args.query.is_none() && !args.index_only {
-        let idx = Index::open(&path_plan.project_root)?;
-        print_index_stats(&idx)?;
-        return Ok(true);
+    if let FlowControl::Return(result) = handle_pre_execution_actions(&args, &path_plan, quiet)? {
+        return Ok(result);
     }
 
     let threshold = runtime.index_warn_threshold;
@@ -975,22 +1010,8 @@ fn run() -> Result<bool> {
         )?;
     }
 
-    // Handle --index-only
-    if args.index_only {
-        print_index_stats(&idx)?;
-        return Ok(true);
-    }
-
-    if args.reindex && args.query.is_none() {
-        return Ok(true);
-    }
-
-    // Handle --stats after indexing
-    if args.stats {
-        print_index_stats(&idx)?;
-        if args.query.is_none() {
-            return Ok(true);
-        }
+    if let FlowControl::Return(result) = handle_post_index_actions(&args, &idx)? {
+        return Ok(result);
     }
 
     // TUI and serve: pass the indexer for progressive indexing.
@@ -1402,6 +1423,35 @@ mod tests {
         apply_config(&mut args, &config, &matches);
 
         assert!(matches!(args.color, vecgrep::cli::ColorChoice::Never));
+    }
+
+    #[test]
+    fn test_handle_pre_execution_actions_returns_after_stats_without_query() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let path_plan = PathPlan {
+            project_root: dir.path().to_path_buf(),
+            project_root_canon: dir.path().canonicalize().unwrap(),
+            cwd_suffix: PathBuf::new(),
+            inside_paths: vec![".".to_string()],
+            outside_paths: Vec::new(),
+            stale_removal_scope: StaleRemovalScope::All,
+        };
+        let (args, _) = parse_args(&["vecgrep", "--stats"]);
+
+        let outcome = handle_pre_execution_actions(&args, &path_plan, true).unwrap();
+
+        assert!(matches!(outcome, FlowControl::Return(true)));
+    }
+
+    #[test]
+    fn test_handle_post_index_actions_returns_after_index_only() {
+        let index = Index::open_in_memory().unwrap();
+        let (args, _) = parse_args(&["vecgrep", "--index-only"]);
+
+        let outcome = handle_post_index_actions(&args, &index).unwrap();
+
+        assert!(matches!(outcome, FlowControl::Return(true)));
     }
 
     #[test]
