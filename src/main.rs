@@ -739,6 +739,18 @@ fn handle_post_index_actions(args: &Args, idx: &Index) -> Result<FlowControl> {
     Ok(FlowControl::Continue)
 }
 
+fn join_walker(walker_handle: &mut Option<WalkerHandle>) -> Result<()> {
+    if let Some(handle) = walker_handle.take() {
+        match handle.join() {
+            Ok(result) => {
+                let _ = result?;
+            }
+            Err(_) => anyhow::bail!("Walker thread panicked"),
+        }
+    }
+    Ok(())
+}
+
 fn run_serve_mode(
     embedder: Embedder,
     idx: Index,
@@ -758,9 +770,7 @@ fn run_serve_mode(
         output.quiet,
         output.root,
     )?;
-    if let Some(h) = walker_handle.take() {
-        let _ = h.join();
-    }
+    join_walker(walker_handle)?;
     Ok(true)
 }
 
@@ -782,9 +792,7 @@ fn run_interactive_mode(
         search.threshold,
         output.cwd_suffix,
     )?;
-    if let Some(h) = walker_handle.take() {
-        let _ = h.join();
-    }
+    join_walker(walker_handle)?;
     Ok(true)
 }
 
@@ -1065,14 +1073,7 @@ fn finish_indexing(
     quiet: bool,
     walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<()> {
-    if let Some(handle) = walker_handle.take() {
-        match handle.join() {
-            Ok(result) => {
-                result?;
-            }
-            Err(_) => anyhow::bail!("Walker thread panicked"),
-        }
-    }
+    join_walker(walker_handle)?;
 
     let removed = match stale_removal_scope {
         StaleRemovalScope::All => idx.remove_stale_files(&indexer.all_paths)?,
