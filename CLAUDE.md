@@ -80,9 +80,12 @@ The worker prioritizes search requests over indexing: it checks for pending sear
 - **ort API quirks**: `ort` v2.0.0-rc.12 errors are not `Send+Sync`, so `?` with `anyhow` doesn't work — all ort calls must use `.map_err(|e| anyhow::anyhow!("{}", e))`. `Session::run` requires `&mut self`.
 - **Embeddings are L2-normalized**, so cosine similarity = dot product. Vector search uses `sqlite-vec`'s `vec0` virtual table with `distance_metric=cosine` — a single SQL query replaces the old ndarray matrix multiply.
 - **Cache invalidation**: BLAKE3 content hash per file. If model name or chunk params change (stored in `meta` table as JSON), the entire index is rebuilt.
+- **Schema changes rebuild, not migrate**: `.vecgrep/index.db` is disposable cache state. `index.rs` tracks a `PRAGMA user_version` schema version; when it changes, vecgrep drops and recreates the cache instead of attempting in-place schema migrations.
 - **Index location**: `.vecgrep/index.db` in the project root directory. Automatically added to `.gitignore`. The project root is discovered by walking up from the search path looking for `.git/`, `.hg/`, `.jj/`, or `.vecgrep/`. Use `--show-root` to print it.
+- **`--stats` includes holes**: Stats now report failed chunks (`Holes`) in addition to files/chunks/DB size. Holes are chunks whose embedding failed and were stored as zero vectors, so they exist in the cache but never match a query.
 - **JSON output includes `root`**: All JSONL output (`--json` and `--serve`) includes a `"root"` field with the canonical project root path, so clients can resolve the project-root-relative `"file"` paths.
-- **Embeddings stored in vec0 virtual table**: `sqlite-vec` handles vector storage and KNN search via the `vec_chunks` virtual table. Embeddings are passed as little-endian `f32` bytes using `zerocopy::IntoBytes` for zero-copy conversion. The `chunks` table stores text/metadata, `vec_chunks` stores vectors, joined by `chunk_id`. The `vec_chunks` dimension is baked into the virtual table at creation time — `create_tables()` uses `EMBEDDING_DIM` (384) as default. When switching models (e.g. local→Ollama with 1024-dim), `check_config()` detects the `IndexConfig` change, `clear()` drops `vec_chunks`, and `set_config()` recreates it with the correct dimension.
+- **Embeddings stored in vec0 virtual table**: `sqlite-vec` handles vector storage and KNN search via the `vec_chunks` virtual table. Embeddings are passed as little-endian `f32` bytes using `zerocopy::IntoBytes` for zero-copy conversion. The `chunks` table stores text/metadata, `vec_chunks` stores vectors, joined by `chunk_id`. The `vec_chunks` dimension is baked into the virtual table at creation time — `create_tables()` uses `EMBEDDING_DIM` (384) as default. When switching models (e.g. local→Ollama with 1024-dim), `check_config()` detects the `IndexConfig` change and `rebuild_for_config()` atomically recreates the cache with the correct dimension.
+- **Write-path atomicity**: Index writes are intentionally wrapped in `BEGIN IMMEDIATE` transactions via a shared helper in `index.rs`. Keep multi-statement mutations atomic because the CLI can be interrupted at any time.
 - **CLI flags follow ripgrep conventions**: `-t` for type, `-g` for glob, `-C` for context, `-l` for files-with-matches, `-c` for count, `-.` for hidden, `-L` for follow, `--ignore-file` for additional ignore files, etc. Any new CLI flag must be checked against `rg --help` for compatibility — do not reuse a short flag that means something different in rg.
 
 **Module responsibilities:**
@@ -99,3 +102,13 @@ The worker prioritizes search requests over indexing: it checks for pending sear
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
 | `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` interleaves indexing with request handling |
 | `tui.rs` | `ratatui` interactive mode; `run_streaming()` interleaves indexing with the event loop |
+
+## Reviewed Decisions
+
+These came out of a design review and should be treated as intentional unless requirements change:
+
+- **CLI searches must not return unlabeled partial results**: Default CLI behavior waits for indexing to complete before searching. Progressive partial results are only for TUI and `--serve`, where that tradeoff is explicit.
+- **Prefix-scoped stale removal is intentional**: Searching `src/` should not force project-wide stale cleanup. The current behavior favors speed for narrow searches over eagerly cleaning unrelated directories.
+- **Index warn threshold prompts only once**: Re-prompting as discovery continues would make large-vault indexing noisy and frustrating. Users can already abort at any time.
+- **Config invalidation stays coarse-grained**: If `IndexConfig` changes, rebuild the cache. Do not add partial “embeddings are probably still valid” exceptions for chunking or overlap changes unless there is a very strong correctness story.
+- **Index holes are currently surfaced via `--stats`**: Failed remote embeddings become zero vectors and are counted as `Holes`. That is the current user-visible surfacing mechanism; search output itself does not yet annotate them.

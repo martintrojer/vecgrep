@@ -38,7 +38,7 @@ vecgrep "retry logic" --json | jq '.score'
 vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxbai-embed-large "query" ./src
 
 # Index management
-vecgrep --stats              # show index statistics
+vecgrep --stats              # show index statistics, including index holes
 vecgrep --reindex ./src      # force full re-index
 vecgrep --clear-cache        # delete cached index
 vecgrep --index-only ./src   # build index without searching
@@ -145,6 +145,12 @@ embedder_model = "mxbai-embed-large"
 ```
 
 The index automatically rebuilds when the model changes. See [BENCHMARK.md](BENCHMARK.md) for model comparisons.
+
+## Index behavior
+
+`vecgrep --stats` reports file count, chunk count, database size, and `Holes` — chunks whose embedding failed and were stored as zero vectors. Holes can never match a query and are mainly relevant when using remote embedders.
+
+The index database is a local cache. vecgrep automatically rebuilds it when the schema version changes, rather than trying to migrate older cache files in place.
 
 ## Install
 
