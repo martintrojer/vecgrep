@@ -46,8 +46,11 @@ impl Embedder {
             .commit_from_memory(MODEL_BYTES)
             .map_err(|e| anyhow::anyhow!("Failed to load ONNX model: {}", e))?;
 
-        let tokenizer = Tokenizer::from_bytes(TOKENIZER_BYTES)
+        let mut tokenizer = Tokenizer::from_bytes(TOKENIZER_BYTES)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+        // Disable padding so token counts reflect actual content length.
+        // The embedder handles its own padding when building input tensors.
+        tokenizer.with_padding(None);
 
         Ok(Embedder::Local(Box::new(LocalEmbedder {
             session,
