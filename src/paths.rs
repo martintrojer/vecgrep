@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::types::SearchResult;
+
 /// Convert a walker-relative path to a project-root-relative path.
 pub fn to_project_relative(walker_path: &str, cwd_suffix: &Path) -> String {
     let stripped = walker_path.strip_prefix("./").unwrap_or(walker_path);
@@ -20,6 +22,17 @@ pub fn to_cwd_relative(project_path: &str, cwd_suffix: &Path) -> String {
         rest.to_string()
     } else {
         make_relative(cwd_suffix, Path::new(project_path))
+    }
+}
+
+/// Rewrite search result paths from project-root-relative to cwd-relative.
+pub fn rewrite_results_to_cwd_relative(results: &mut [SearchResult], cwd_suffix: &Path) {
+    if cwd_suffix.as_os_str().is_empty() {
+        return;
+    }
+
+    for result in results {
+        result.chunk.file_path = to_cwd_relative(&result.chunk.file_path, cwd_suffix);
     }
 }
 
@@ -122,5 +135,22 @@ mod tests {
             to_cwd_relative("src/b/foo.rs", Path::new("src/a")),
             "../b/foo.rs"
         );
+    }
+
+    #[test]
+    fn test_rewrite_results_to_cwd_relative() {
+        let mut results = vec![SearchResult {
+            chunk: crate::types::Chunk {
+                file_path: "src/main.rs".to_string(),
+                text: "fn main() {}".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            score: 0.9,
+        }];
+
+        rewrite_results_to_cwd_relative(&mut results, Path::new("src"));
+
+        assert_eq!(results[0].chunk.file_path, "main.rs");
     }
 }

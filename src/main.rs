@@ -72,24 +72,6 @@ fn resolve_input_path(cwd: &Path, input: &str) -> PathBuf {
     absolute.canonicalize().unwrap_or(absolute)
 }
 
-fn split_paths_by_root(
-    paths: &[String],
-    cwd: &Path,
-    project_root: &Path,
-) -> (Vec<String>, Vec<String>) {
-    let mut inside = Vec::new();
-    let mut outside = Vec::new();
-    for input in paths {
-        let resolved = resolve_input_path(cwd, input);
-        if !resolved.starts_with(project_root) {
-            outside.push(input.clone());
-        } else {
-            inside.push(input.clone());
-        }
-    }
-    (inside, outside)
-}
-
 fn capped_chunk_size(chunk_size: usize, context_tokens: Option<usize>) -> usize {
     match context_tokens {
         Some(ctx) => chunk_size.min(ctx),
@@ -230,6 +212,13 @@ struct PathPlan {
     stale_removal_scope: StaleRemovalScope,
 }
 
+struct ResolvedPath {
+    input: String,
+    absolute: PathBuf,
+    inside_root: bool,
+    is_dir: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunMode {
     Cli,
@@ -290,45 +279,84 @@ struct ExecutionContext {
     root: String,
 }
 
+fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec<ResolvedPath> {
+    let project_root_canon = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+
+    paths
+        .iter()
+        .map(|input| {
+            let absolute = resolve_input_path(cwd, input);
+            let is_dir = absolute.is_dir();
+            let inside_root = absolute.starts_with(&project_root_canon);
+            ResolvedPath {
+                input: input.clone(),
+                absolute,
+                inside_root,
+                is_dir,
+            }
+        })
+        .collect()
+}
+
 fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
     let cwd_project_root = find_project_root(cwd);
 
     if has_project_marker(&cwd_project_root) {
         cwd_project_root
-    } else if paths.len() == 1 && Path::new(&paths[0]).is_dir() {
-        find_project_root(Path::new(&paths[0]))
+    } else if paths.len() == 1 {
+        let resolved = resolve_input_path(cwd, &paths[0]);
+        if resolved.is_dir() {
+            find_project_root(&resolved)
+        } else {
+            cwd.to_path_buf()
+        }
     } else {
         cwd.to_path_buf()
     }
 }
 
-fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[String]) -> PathPlan {
+fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> PathPlan {
     let project_root_canon = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let (inside_paths, outside_paths) = split_paths_by_root(paths, &cwd_canon, &project_root_canon);
+    let inside_paths = paths
+        .iter()
+        .filter(|path| path.inside_root)
+        .map(|path| path.input.clone())
+        .collect();
+    let outside_paths = paths
+        .iter()
+        .filter(|path| !path.inside_root)
+        .map(|path| path.input.clone())
+        .collect();
 
     let cwd_suffix = cwd_canon
         .strip_prefix(&project_root_canon)
         .unwrap_or(Path::new(""))
         .to_path_buf();
 
-    let stale_removal_scope = if inside_paths.len() == 1 && Path::new(&inside_paths[0]).is_dir() {
-        let walk_root_abs = Path::new(&inside_paths[0])
-            .canonicalize()
-            .unwrap_or_else(|_| cwd_canon.join(&inside_paths[0]));
-        let walk_prefix = walk_root_abs
-            .strip_prefix(&project_root_canon)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        if walk_prefix.as_os_str().is_empty() {
-            StaleRemovalScope::All
-        } else {
-            StaleRemovalScope::Prefix(walk_prefix)
+    let stale_removal_scope = match paths
+        .iter()
+        .filter(|path| path.inside_root)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [path] if path.is_dir => {
+            let walk_prefix = path
+                .absolute
+                .strip_prefix(&project_root_canon)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            if walk_prefix.as_os_str().is_empty() {
+                StaleRemovalScope::All
+            } else {
+                StaleRemovalScope::Prefix(walk_prefix)
+            }
         }
-    } else {
-        StaleRemovalScope::None
+        _ => StaleRemovalScope::None,
     };
 
     PathPlan {
@@ -341,7 +369,7 @@ fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[String]) -> PathPla
     }
 }
 
-fn apply_path_plan(args: &mut Args, plan: &PathPlan) -> Result<()> {
+fn apply_path_plan(args: Args, plan: &PathPlan) -> Result<Args> {
     if !plan.outside_paths.is_empty() && !args.skip_outside_root {
         anyhow::bail!(
             "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
@@ -362,17 +390,14 @@ fn apply_path_plan(args: &mut Args, plan: &PathPlan) -> Result<()> {
             plan.project_root_canon.display()
         );
     }
-    args.paths = plan.inside_paths.clone();
-    Ok(())
+    Ok(Args {
+        paths: plan.inside_paths.clone(),
+        ..args
+    })
 }
 
-fn resolve_query(args: &Args) -> Result<String> {
-    match &args.query {
-        Some(q) => Ok(q.clone()),
-        None if args.interactive => Ok(String::new()),
-        None if args.serve || args.index_only || args.stats || args.reindex => Ok(String::new()),
-        None => Ok(String::new()),
-    }
+fn resolve_query(args: &Args) -> String {
+    args.query.clone().unwrap_or_default()
 }
 
 fn determine_run_mode(args: &Args) -> RunMode {
@@ -409,20 +434,25 @@ fn search_config(runtime: &RuntimeConfig) -> SearchConfig {
     }
 }
 
+fn with_config(mut args: Args, config: &vecgrep::config::Config, matches: &ArgMatches) -> Args {
+    apply_config(&mut args, config, matches);
+    args
+}
+
 fn resolve_invocation(
-    mut args: Args,
+    args: Args,
     matches: &ArgMatches,
     cwd: &Path,
     project_root: &Path,
 ) -> Result<Invocation> {
     let config = vecgrep::config::load_config(project_root);
-    apply_config(&mut args, &config, matches);
-
-    let path_plan = build_path_plan(cwd, project_root, &args.paths);
-    apply_path_plan(&mut args, &path_plan)?;
+    let args = with_config(args, &config, matches);
+    let resolved_paths = resolve_input_paths(cwd, &args.paths, project_root);
+    let path_plan = build_path_plan(cwd, project_root, &resolved_paths);
+    let args = apply_path_plan(args, &path_plan)?;
 
     Ok(Invocation {
-        query: resolve_query(&args)?,
+        query: resolve_query(&args),
         run_mode: determine_run_mode(&args),
         color_choice: output::resolve_color_choice(&args.color),
         runtime: build_runtime_config(&args),
@@ -718,10 +748,8 @@ fn render_cli_results(
         return Ok(false);
     }
 
-    if !args.json && !cwd_suffix.as_os_str().is_empty() {
-        for r in &mut results {
-            r.chunk.file_path = paths::to_cwd_relative(&r.chunk.file_path, cwd_suffix);
-        }
+    if !args.json {
+        paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
     }
 
     if args.json {
@@ -1249,7 +1277,8 @@ mod tests {
         let cwd = dir.path().canonicalize().unwrap();
         let src = dir.path().join("src").display().to_string();
 
-        let plan = build_path_plan(&cwd, &cwd, std::slice::from_ref(&src));
+        let resolved = resolve_input_paths(&cwd, std::slice::from_ref(&src), &cwd);
+        let plan = build_path_plan(&cwd, &cwd, &resolved);
 
         assert_eq!(plan.inside_paths, vec![src]);
         assert!(plan.outside_paths.is_empty());
@@ -1266,7 +1295,8 @@ mod tests {
         std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
         let cwd = dir.path().canonicalize().unwrap();
 
-        let plan = build_path_plan(&cwd, &cwd, &["lib.rs".to_string()]);
+        let resolved = resolve_input_paths(&cwd, &["lib.rs".to_string()], &cwd);
+        let plan = build_path_plan(&cwd, &cwd, &resolved);
 
         assert!(matches!(plan.stale_removal_scope, StaleRemovalScope::None));
     }
@@ -1278,14 +1308,12 @@ mod tests {
         let cwd = dir.path().canonicalize().unwrap();
         let outside = TempDir::new().unwrap();
 
-        let plan = build_path_plan(
-            &cwd,
-            &cwd,
-            &[outside.path().join("elsewhere.rs").display().to_string()],
-        );
-        let (mut args, _) = parse_args(&["vecgrep", "needle"]);
+        let outside_path = outside.path().join("elsewhere.rs").display().to_string();
+        let resolved = resolve_input_paths(&cwd, std::slice::from_ref(&outside_path), &cwd);
+        let plan = build_path_plan(&cwd, &cwd, &resolved);
+        let (args, _) = parse_args(&["vecgrep", "needle"]);
 
-        let err = apply_path_plan(&mut args, &plan).unwrap_err();
+        let err = apply_path_plan(args, &plan).unwrap_err();
         assert!(err
             .to_string()
             .contains("outside the selected project root"));
@@ -1294,10 +1322,10 @@ mod tests {
     #[test]
     fn test_resolve_query_for_cli_and_serve_modes() {
         let (cli_args, _) = parse_args(&["vecgrep", "needle"]);
-        assert_eq!(resolve_query(&cli_args).unwrap(), "needle");
+        assert_eq!(resolve_query(&cli_args), "needle");
 
         let (serve_args, _) = parse_args(&["vecgrep", "--serve"]);
-        assert_eq!(resolve_query(&serve_args).unwrap(), "");
+        assert_eq!(resolve_query(&serve_args), "");
     }
 
     #[test]
