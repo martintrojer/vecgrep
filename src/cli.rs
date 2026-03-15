@@ -31,7 +31,7 @@ pub struct Args {
     pub threshold: f32,
 
     /// Interactive TUI mode.
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long, conflicts_with_all = ["serve", "index_only", "type_list", "show_root"])]
     pub interactive: bool,
 
     /// Filter by file type (e.g., rust, python, js). Can be specified multiple times.
@@ -60,7 +60,7 @@ pub struct Args {
     pub full_index: bool,
 
     /// Build index without searching.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["interactive", "serve", "type_list", "show_root"])]
     pub index_only: bool,
 
     /// Show index statistics.
@@ -117,7 +117,7 @@ pub struct Args {
     pub max_depth: Option<usize>,
 
     /// Show all supported file types.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["interactive", "serve", "index_only", "show_root"])]
     pub type_list: bool,
 
     /// When to use colored output.
@@ -130,7 +130,7 @@ pub struct Args {
     pub index_warn_threshold: usize,
 
     /// Print the resolved project root and exit.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["interactive", "serve", "index_only", "type_list"])]
     pub show_root: bool,
 
     /// URL of an OpenAI-compatible embeddings API
@@ -144,7 +144,7 @@ pub struct Args {
     pub embedder_model: Option<String>,
 
     /// Start HTTP server mode.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["interactive", "index_only", "type_list", "show_root"])]
     pub serve: bool,
 
     /// Port for HTTP server (default: auto-pick free port).
@@ -154,4 +154,22 @@ pub struct Args {
     /// Skip paths outside the selected project root instead of failing.
     #[arg(long)]
     pub skip_outside_root: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn rejects_interactive_and_serve_together() {
+        let err = Args::try_parse_from(["vecgrep", "--interactive", "--serve"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn rejects_index_only_and_show_root_together() {
+        let err = Args::try_parse_from(["vecgrep", "--index-only", "--show-root"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }
