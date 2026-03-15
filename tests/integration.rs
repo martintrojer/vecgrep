@@ -232,7 +232,7 @@ fn test_default_mode_uses_cached_index() {
         .unwrap();
     assert!(output.status.success());
 
-    // Second run: default mode should find cached results instantly
+    // Second run: default mode should find cached results
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .args(["cached function"])
         .current_dir(dir.path())
@@ -248,19 +248,23 @@ fn test_default_mode_uses_cached_index() {
 }
 
 #[test]
-fn test_default_mode_without_index_returns_no_results() {
+fn test_default_mode_without_index_builds_index_before_search() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::write(dir.path().join("new.rs"), "fn brand_new() {}").unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .args(["brand new function"])
+        .args(["--threshold", "0.0", "brand new function"])
         .current_dir(dir.path())
         .output()
         .unwrap();
 
-    // Exit code 1 = no matches found
-    assert_eq!(output.status.code(), Some(1));
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("new.rs"),
+        "expected new.rs in results on first run, got: {stdout}"
+    );
 }
 
 // --- Embedding dimension tests ---

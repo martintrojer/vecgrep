@@ -6,7 +6,7 @@ Search your codebase, notes, or Obsidian vault by meaning, not just text. Ask fo
 
 **Local-first.** An embedding model ships inside the binary — no external services, no API keys, no GPU required. Your code never leaves your machine.
 
-**Fast by default.** After the first index build, searches return instantly from the cached index. Changed files are indexed in the background. Interactive mode (`-i`) and the HTTP server (`--serve`) update results progressively as new files are indexed.
+**Fast by default.** CLI searches wait for indexing to finish, so first-run results include newly discovered files. Interactive mode (`-i`) and the HTTP server (`--serve`) update results progressively as new files are indexed.
 
 **Bring your own model.** Optionally connect to [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible embeddings API for access to larger models. See [BENCHMARK.md](BENCHMARK.md) for model comparisons.
 
@@ -228,7 +228,7 @@ Options:
       --embedder-url <URL>      OpenAI-compatible embeddings API URL
       --embedder-model <NAME>   Model name for --embedder-url
       --reindex                 Force full re-index
-      --full-index              Wait for indexing to complete before searching
+      --full-index              Wait for indexing to complete before starting interactive/server mode
       --index-only              Build index without searching
       --stats                   Show index statistics
       --clear-cache             Delete cached index

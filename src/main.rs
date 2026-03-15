@@ -315,9 +315,11 @@ fn run() -> Result<bool> {
     let mut indexer = indexer;
     let mut walker_handle = Some(walker_join_handle);
 
-    // --full-index / --index-only: drain all files before proceeding.
-    // Applies to all modes (CLI, TUI, serve).
-    if args.full_index || args.index_only {
+    // CLI and --index-only always drain before proceeding so first-run searches
+    // don't miss freshly discovered files. TUI/serve stay progressive unless
+    // --full-index was requested explicitly.
+    let must_drain_before_search = args.index_only || (!args.serve && !args.interactive);
+    if args.full_index || must_drain_before_search {
         let mut threshold_prompted = false;
         indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
             if !threshold_prompted && threshold > 0 && indexed_so_far >= threshold {
@@ -397,7 +399,7 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    // CLI: search with current index (immediate results from cached data)
+    // CLI: search after indexing has completed.
     let chunk_count = idx.chunk_count()?;
     status!(quiet, "Index has {} chunks.", chunk_count);
 
@@ -428,7 +430,8 @@ fn run() -> Result<bool> {
         status!(quiet, "No results found.");
     }
 
-    // If we haven't drained yet (default mode), index remaining files in the background
+    // TUI/serve may return here with indexing still in progress, but CLI has
+    // already drained above.
     if !indexer.indexing_done {
         indexer.drain_all(&mut embedder, &idx, |indexed_so_far| {
             if !quiet && std::io::stderr().is_terminal() {

@@ -54,9 +54,8 @@ pub struct Args {
     #[arg(long)]
     pub reindex: bool,
 
-    /// Wait for indexing to complete before searching.
-    /// By default, vecgrep searches immediately with the cached index
-    /// and indexes changed files in the background.
+    /// Wait for indexing to complete before starting interactive or server mode.
+    /// Normal CLI searches already wait for indexing to finish.
     #[arg(long)]
     pub full_index: bool,
 

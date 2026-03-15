@@ -56,7 +56,7 @@ walker (thread) →  channel(64)  →  StreamingIndexer  →  index (SQLite)  �
 
 The walker runs on a background thread feeding files through a bounded `sync_channel(batch_size * 2)`. The three modes consume the channel differently:
 
-- **CLI default**: searches immediately against the cached index, then `drain_all()` indexes remaining files in the background for next time. Embedder and Index stay on the main thread.
+- **CLI default**: `drain_all()` blocks until indexing is complete, then searches the up-to-date index. Embedder and Index stay on the main thread.
 - **CLI `--full-index`**: `drain_all()` blocks until all files are indexed (with threshold prompt), then searches. Same single-threaded ownership.
 - **TUI/serve**: Use `EmbedWorker` — a background thread that owns the `Embedder`, `Index`, and `StreamingIndexer`. The UI thread communicates via channels, never blocking on embed calls. This ensures Esc always works in the TUI and the HTTP server stays responsive, even when Ollama is loading a model (which can block for 30+ seconds).
 
