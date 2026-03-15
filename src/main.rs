@@ -334,6 +334,83 @@ fn determine_run_mode(args: &Args) -> RunMode {
     }
 }
 
+fn print_index_stats(idx: &Index) -> Result<()> {
+    let stats = idx.stats()?;
+    output::print_stats(
+        stats.file_count,
+        stats.chunk_count,
+        stats.failed_chunk_count,
+        stats.db_size_bytes,
+    );
+    Ok(())
+}
+
+fn run_serve_mode(
+    embedder: Embedder,
+    idx: Index,
+    indexer: pipeline::StreamingIndexer,
+    port: Option<u16>,
+    top_k: usize,
+    threshold: f32,
+    quiet: bool,
+    root: &str,
+    walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
+) -> Result<bool> {
+    serve::run_streaming(embedder, idx, indexer, port, top_k, threshold, quiet, root)?;
+    if let Some(h) = walker_handle.take() {
+        let _ = h.join();
+    }
+    Ok(true)
+}
+
+fn run_interactive_mode(
+    embedder: Embedder,
+    idx: Index,
+    indexer: pipeline::StreamingIndexer,
+    query: &str,
+    top_k: usize,
+    threshold: f32,
+    cwd_suffix: &Path,
+    walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
+) -> Result<bool> {
+    tui::interactive::run_streaming(embedder, idx, indexer, query, top_k, threshold, cwd_suffix)?;
+    if let Some(h) = walker_handle.take() {
+        let _ = h.join();
+    }
+    Ok(true)
+}
+
+fn render_cli_results(
+    mut results: Vec<vecgrep::types::SearchResult>,
+    args: &Args,
+    color_choice: termcolor::ColorChoice,
+    cwd_suffix: &Path,
+    root: &str,
+) -> Result<bool> {
+    let found = !results.is_empty();
+    if !found {
+        return Ok(false);
+    }
+
+    if !args.json && !cwd_suffix.as_os_str().is_empty() {
+        for r in &mut results {
+            r.chunk.file_path = paths::to_cwd_relative(&r.chunk.file_path, cwd_suffix);
+        }
+    }
+
+    if args.json {
+        output::print_json(&results, root)?;
+    } else if args.files_with_matches {
+        output::print_files_with_matches(&results, color_choice)?;
+    } else if args.count {
+        output::print_count(&results, color_choice)?;
+    } else {
+        output::print_results(&results, color_choice)?;
+    }
+
+    Ok(true)
+}
+
 /// Apply config file values where CLI flags weren't explicitly provided.
 fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
     // Option fields: apply if CLI is None
@@ -459,13 +536,7 @@ fn run() -> Result<bool> {
     // Handle --stats (without loading model)
     if args.stats && args.query.is_none() && !args.index_only {
         let idx = Index::open(&path_plan.project_root)?;
-        let stats = idx.stats()?;
-        output::print_stats(
-            stats.file_count,
-            stats.chunk_count,
-            stats.failed_chunk_count,
-            stats.db_size_bytes,
-        );
+        print_index_stats(&idx)?;
         return Ok(true);
     }
 
@@ -620,13 +691,7 @@ fn run() -> Result<bool> {
 
     // Handle --index-only
     if args.index_only {
-        let stats = idx.stats()?;
-        output::print_stats(
-            stats.file_count,
-            stats.chunk_count,
-            stats.failed_chunk_count,
-            stats.db_size_bytes,
-        );
+        print_index_stats(&idx)?;
         return Ok(true);
     }
 
@@ -636,13 +701,7 @@ fn run() -> Result<bool> {
 
     // Handle --stats after indexing
     if args.stats {
-        let stats = idx.stats()?;
-        output::print_stats(
-            stats.file_count,
-            stats.chunk_count,
-            stats.failed_chunk_count,
-            stats.db_size_bytes,
-        );
+        print_index_stats(&idx)?;
         if args.query.is_none() {
             return Ok(true);
         }
@@ -651,7 +710,7 @@ fn run() -> Result<bool> {
     // TUI and serve: pass the indexer for progressive indexing.
     // If --full-index was used, the indexer is already drained.
     if matches!(run_mode, RunMode::Serve) {
-        serve::run_streaming(
+        return run_serve_mode(
             embedder,
             idx,
             indexer,
@@ -660,15 +719,12 @@ fn run() -> Result<bool> {
             args.threshold,
             quiet,
             &root_str,
-        )?;
-        if let Some(h) = walker_handle.take() {
-            let _ = h.join();
-        }
-        return Ok(true);
+            &mut walker_handle,
+        );
     }
 
     if matches!(run_mode, RunMode::Interactive) {
-        tui::interactive::run_streaming(
+        return run_interactive_mode(
             embedder,
             idx,
             indexer,
@@ -676,11 +732,8 @@ fn run() -> Result<bool> {
             args.top_k,
             args.threshold,
             &path_plan.cwd_suffix,
-        )?;
-        if let Some(h) = walker_handle.take() {
-            let _ = h.join();
-        }
-        return Ok(true);
+            &mut walker_handle,
+        );
     }
 
     // CLI: search after indexing has completed.
@@ -691,27 +744,8 @@ fn run() -> Result<bool> {
 
     let results = idx.search(&query_embedding, args.top_k, args.threshold)?;
 
-    // Print results
-    let found = !results.is_empty();
-    if found {
-        let mut results = results;
-        if !args.json && !path_plan.cwd_suffix.as_os_str().is_empty() {
-            for r in &mut results {
-                r.chunk.file_path =
-                    paths::to_cwd_relative(&r.chunk.file_path, &path_plan.cwd_suffix);
-            }
-        }
-
-        if args.json {
-            output::print_json(&results, &root_str)?;
-        } else if args.files_with_matches {
-            output::print_files_with_matches(&results, color_choice)?;
-        } else if args.count {
-            output::print_count(&results, color_choice)?;
-        } else {
-            output::print_results(&results, color_choice)?;
-        }
-    } else {
+    let found = render_cli_results(results, &args, color_choice, &path_plan.cwd_suffix, &root_str)?;
+    if !found {
         status!(quiet, "No results found.");
     }
 
