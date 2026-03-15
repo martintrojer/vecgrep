@@ -423,10 +423,7 @@ pub fn process_batch(
 
         if current_file.as_ref() != Some(path) {
             if let Some(ref prev_path) = current_file {
-                let file_failed: Vec<bool> = embedding_failed[i - file_chunks.len()..i]
-                    .iter()
-                    .copied()
-                    .collect();
+                let file_failed = embedding_failed[i - file_chunks.len()..i].to_vec();
                 idx.upsert_file(
                     prev_path,
                     &file_hash,
@@ -447,7 +444,7 @@ pub fn process_batch(
 
     if let Some(ref prev_path) = current_file {
         let start = all_chunks.len() - file_chunks.len();
-        let file_failed: Vec<bool> = embedding_failed[start..].iter().copied().collect();
+        let file_failed = embedding_failed[start..].to_vec();
         idx.upsert_file(
             prev_path,
             &file_hash,
