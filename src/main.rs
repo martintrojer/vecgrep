@@ -173,6 +173,12 @@ impl Drop for CliProgressReporter {
     }
 }
 
+enum StaleRemovalScope {
+    All,
+    Prefix(PathBuf),
+    None,
+}
+
 /// Apply config file values where CLI flags weren't explicitly provided.
 fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
     // Option fields: apply if CLI is None
@@ -292,18 +298,21 @@ fn run() -> Result<bool> {
         .strip_prefix(&project_root_canon)
         .unwrap_or(Path::new(""))
         .to_path_buf();
-    let walk_prefix = {
-        let walk_root_abs = if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
-            Path::new(&args.paths[0])
-                .canonicalize()
-                .unwrap_or_else(|_| cwd_canon.join(&args.paths[0]))
-        } else {
-            cwd_canon.clone()
-        };
-        walk_root_abs
+    let stale_removal_scope = if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
+        let walk_root_abs = Path::new(&args.paths[0])
+            .canonicalize()
+            .unwrap_or_else(|_| cwd_canon.join(&args.paths[0]));
+        let walk_prefix = walk_root_abs
             .strip_prefix(&project_root_canon)
             .map(|p| p.to_path_buf())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if walk_prefix.as_os_str().is_empty() {
+            StaleRemovalScope::All
+        } else {
+            StaleRemovalScope::Prefix(walk_prefix)
+        }
+    } else {
+        StaleRemovalScope::None
     };
 
     let quiet = args.quiet;
@@ -478,7 +487,13 @@ fn run() -> Result<bool> {
             reporter.finish();
         }
 
-        finish_indexing(&mut indexer, &idx, &walk_prefix, quiet, &mut walker_handle)?;
+        finish_indexing(
+            &mut indexer,
+            &idx,
+            &stale_removal_scope,
+            quiet,
+            &mut walker_handle,
+        )?;
     }
 
     // Handle --index-only
@@ -586,7 +601,13 @@ fn run() -> Result<bool> {
             reporter.finish();
         }
 
-        finish_indexing(&mut indexer, &idx, &walk_prefix, quiet, &mut walker_handle)?;
+        finish_indexing(
+            &mut indexer,
+            &idx,
+            &stale_removal_scope,
+            quiet,
+            &mut walker_handle,
+        )?;
     }
 
     Ok(found)
@@ -595,7 +616,7 @@ fn run() -> Result<bool> {
 fn finish_indexing(
     indexer: &mut pipeline::StreamingIndexer,
     idx: &Index,
-    walk_prefix: &Path,
+    stale_removal_scope: &StaleRemovalScope,
     quiet: bool,
     walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
 ) -> Result<()> {
@@ -608,11 +629,13 @@ fn finish_indexing(
         }
     }
 
-    let removed = if walk_prefix.as_os_str().is_empty() {
-        idx.remove_stale_files(&indexer.all_paths)?
-    } else {
-        let prefix = format!("{}/", walk_prefix.display());
-        idx.remove_stale_files_under(&indexer.all_paths, &prefix)?
+    let removed = match stale_removal_scope {
+        StaleRemovalScope::All => idx.remove_stale_files(&indexer.all_paths)?,
+        StaleRemovalScope::Prefix(walk_prefix) => {
+            let prefix = format!("{}/", walk_prefix.display());
+            idx.remove_stale_files_under(&indexer.all_paths, &prefix)?
+        }
+        StaleRemovalScope::None => 0,
     };
     if removed > 0 {
         status!(quiet, "Removed {} stale files from index.", removed);
