@@ -661,6 +661,32 @@ fn render_cli_results(
     Ok(true)
 }
 
+fn run_cli_search(
+    embedder: &mut Embedder,
+    idx: &Index,
+    args: &Args,
+    query: &str,
+    top_k: usize,
+    threshold: f32,
+    color_choice: termcolor::ColorChoice,
+    cwd_suffix: &Path,
+    quiet: bool,
+    root: &str,
+) -> Result<bool> {
+    let chunk_count = idx.chunk_count()?;
+    status!(quiet, "Index has {} chunks.", chunk_count);
+
+    let query_embedding = embedder.embed(query)?;
+    let results = idx.search(&query_embedding, top_k, threshold)?;
+
+    let found = render_cli_results(results, args, color_choice, cwd_suffix, root)?;
+    if !found {
+        status!(quiet, "No results found.");
+    }
+
+    Ok(found)
+}
+
 /// Apply config file values where CLI flags weren't explicitly provided.
 fn cli_provided(matches: &ArgMatches, id: &str) -> bool {
     matches.value_source(id) == Some(ValueSource::CommandLine)
@@ -880,18 +906,18 @@ fn run() -> Result<bool> {
         );
     }
 
-    // CLI: search after indexing has completed.
-    let chunk_count = idx.chunk_count()?;
-    status!(quiet, "Index has {} chunks.", chunk_count);
-
-    let query_embedding = embedder.embed(&query)?;
-
-    let results = idx.search(&query_embedding, runtime.top_k, runtime.threshold)?;
-
-    let found = render_cli_results(results, &args, color_choice, &path_plan.cwd_suffix, &root)?;
-    if !found {
-        status!(quiet, "No results found.");
-    }
+    let found = run_cli_search(
+        &mut embedder,
+        &idx,
+        &args,
+        &query,
+        runtime.top_k,
+        runtime.threshold,
+        color_choice,
+        &path_plan.cwd_suffix,
+        quiet,
+        &root,
+    )?;
 
     // TUI/serve may return here with indexing still in progress, but CLI has
     // already drained above.
