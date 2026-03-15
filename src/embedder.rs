@@ -320,17 +320,40 @@ impl RemoteEmbedder {
         }
     }
 
-    fn parse_embeddings(&mut self, response: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
+    fn parse_embeddings(
+        &mut self,
+        response: &serde_json::Value,
+        expected_len: usize,
+    ) -> Result<Vec<Vec<f32>>> {
         let data = response["data"]
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Response missing 'data' array"))?;
 
-        let mut embeddings: Vec<(usize, Vec<f32>)> = Vec::new();
+        if data.len() != expected_len {
+            anyhow::bail!(
+                "Response returned {} embeddings for {} inputs",
+                data.len(),
+                expected_len
+            );
+        }
+
+        let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; expected_len];
         for item in data {
             let index = item["index"]
                 .as_u64()
                 .ok_or_else(|| anyhow::anyhow!("Missing 'index' in response"))?
                 as usize;
+            if index >= expected_len {
+                anyhow::bail!(
+                    "Response embedding index {} is out of range for {} inputs",
+                    index,
+                    expected_len
+                );
+            }
+            if embeddings[index].is_some() {
+                anyhow::bail!("Response contained duplicate embedding index {}", index);
+            }
+
             let embedding: Vec<f32> = item["embedding"]
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("Missing 'embedding' in response"))?
@@ -338,9 +361,19 @@ impl RemoteEmbedder {
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
 
+            if embedding.is_empty() {
+                anyhow::bail!("Response contained empty embedding at index {}", index);
+            }
+
             if self.embedding_dim.is_none() {
                 self.embedding_dim = Some(embedding.len());
                 tracing::info!("Remote embedder dimension discovered: {}", embedding.len());
+            } else if self.embedding_dim != Some(embedding.len()) {
+                anyhow::bail!(
+                    "Response embedding dimension {} does not match expected {}",
+                    embedding.len(),
+                    self.embedding_dim.unwrap_or_default()
+                );
             }
 
             // L2 normalize
@@ -351,11 +384,16 @@ impl RemoteEmbedder {
                 embedding
             };
 
-            embeddings.push((index, normalized));
+            embeddings[index] = Some(normalized);
         }
 
-        embeddings.sort_by_key(|(idx, _)| *idx);
-        Ok(embeddings.into_iter().map(|(_, emb)| emb).collect())
+        embeddings
+            .into_iter()
+            .enumerate()
+            .map(|(index, emb)| {
+                emb.ok_or_else(|| anyhow::anyhow!("Response missing embedding at index {}", index))
+            })
+            .collect()
     }
 
     /// Split texts into batches based on total payload size.
@@ -387,7 +425,7 @@ impl RemoteEmbedder {
         for batch in self.make_batches(texts) {
             match self.send_request(&batch) {
                 Ok(response) => {
-                    all_embeddings.extend(self.parse_embeddings(&response)?);
+                    all_embeddings.extend(self.parse_embeddings(&response, batch.len())?);
                 }
                 Err(batch_err) => {
                     tracing::debug!(
@@ -399,7 +437,7 @@ impl RemoteEmbedder {
                     for text in &batch {
                         match self.send_request(&[*text]) {
                             Ok(response) => {
-                                all_embeddings.extend(self.parse_embeddings(&response)?);
+                                all_embeddings.extend(self.parse_embeddings(&response, 1)?);
                             }
                             Err(e) => {
                                 let preview = &text[..text.len().min(80)];
@@ -562,6 +600,49 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 2);
         assert_eq!(batches[1].len(), 1);
+    }
+
+    #[test]
+    fn test_parse_embeddings_rejects_missing_entries() {
+        let mut remote = make_test_remote(100);
+        let response = serde_json::json!({
+            "data": [
+                {"index": 1, "embedding": [1.0, 0.0]}
+            ]
+        });
+
+        let err = remote.parse_embeddings(&response, 2).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("returned 1 embeddings for 2 inputs"));
+    }
+
+    #[test]
+    fn test_parse_embeddings_rejects_duplicate_indices() {
+        let mut remote = make_test_remote(100);
+        let response = serde_json::json!({
+            "data": [
+                {"index": 0, "embedding": [1.0, 0.0]},
+                {"index": 0, "embedding": [0.0, 1.0]}
+            ]
+        });
+
+        let err = remote.parse_embeddings(&response, 2).unwrap_err();
+        assert!(err.to_string().contains("duplicate embedding index 0"));
+    }
+
+    #[test]
+    fn test_parse_embeddings_rejects_out_of_range_index() {
+        let mut remote = make_test_remote(100);
+        let response = serde_json::json!({
+            "data": [
+                {"index": 2, "embedding": [1.0, 0.0]},
+                {"index": 1, "embedding": [0.0, 1.0]}
+            ]
+        });
+
+        let err = remote.parse_embeddings(&response, 2).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 
     #[test]

@@ -267,6 +267,12 @@ struct CliOutputContext<'a> {
     root: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexDrainOutcome {
+    Completed,
+    Aborted,
+}
+
 struct Invocation {
     args: Args,
     path_plan: PathPlan,
@@ -546,8 +552,44 @@ fn drain_initial_indexing(
     quiet: bool,
     threshold: usize,
     progress_reporter: &mut Option<CliProgressReporter>,
-) -> Result<()> {
+) -> Result<IndexDrainOutcome> {
+    drain_initial_indexing_with_prompt(
+        indexer,
+        embedder,
+        idx,
+        quiet,
+        threshold,
+        progress_reporter,
+        prompt_to_continue,
+    )
+}
+
+fn prompt_to_continue() -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(true);
+    }
+
+    eprint!("Continue? [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
+fn drain_initial_indexing_with_prompt<F>(
+    indexer: &mut pipeline::StreamingIndexer,
+    embedder: &mut Embedder,
+    idx: &Index,
+    quiet: bool,
+    threshold: usize,
+    progress_reporter: &mut Option<CliProgressReporter>,
+    mut confirm_continue: F,
+) -> Result<IndexDrainOutcome>
+where
+    F: FnMut() -> Result<bool>,
+{
     let mut threshold_prompted = false;
+    let mut aborted = false;
     indexer.drain_all(embedder, idx, |progress| {
         if !quiet && !threshold_prompted && threshold > 0 && progress.indexed_count >= threshold {
             threshold_prompted = true;
@@ -558,15 +600,10 @@ fn drain_initial_indexing(
                 "Warning: {} files need indexing so far (still scanning).",
                 progress.indexed_count
             );
-            if std::io::stdin().is_terminal() {
-                eprint!("Continue? [y/N] ");
-                std::io::stderr().flush().ok();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                if !input.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("Aborted.");
-                    return Ok(false);
-                }
+            if !confirm_continue()? {
+                eprintln!("Aborted.");
+                aborted = true;
+                return Ok(false);
             }
             if let Some(reporter) = progress_reporter.as_ref() {
                 reporter.resume();
@@ -582,7 +619,11 @@ fn drain_initial_indexing(
         reporter.finish();
     }
 
-    Ok(())
+    if aborted {
+        Ok(IndexDrainOutcome::Aborted)
+    } else {
+        Ok(IndexDrainOutcome::Completed)
+    }
 }
 
 fn drain_remaining_indexing(
@@ -886,7 +927,7 @@ fn run() -> Result<bool> {
     // --full-index was requested explicitly.
     let must_drain_before_search = matches!(run_mode, RunMode::IndexOnly | RunMode::Cli);
     if runtime.full_index || must_drain_before_search {
-        drain_initial_indexing(
+        let drain_outcome = drain_initial_indexing(
             &mut indexer,
             &mut embedder,
             &idx,
@@ -894,6 +935,9 @@ fn run() -> Result<bool> {
             threshold,
             &mut progress_reporter,
         )?;
+        if matches!(drain_outcome, IndexDrainOutcome::Aborted) {
+            return Ok(false);
+        }
         finish_indexing(
             &mut indexer,
             &idx,
@@ -1135,6 +1179,36 @@ mod tests {
     }
 
     #[test]
+    fn test_drain_initial_indexing_aborts_cleanly() {
+        let mut embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(walker::WalkedFile {
+            rel_path: "main.rs".to_string(),
+            content: "fn search_target() {}\n".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut indexer = pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), None);
+        let mut progress_reporter = None;
+
+        let outcome = drain_initial_indexing_with_prompt(
+            &mut indexer,
+            &mut embedder,
+            &idx,
+            false,
+            1,
+            &mut progress_reporter,
+            || Ok(false),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, IndexDrainOutcome::Aborted);
+        assert_eq!(idx.chunk_count().unwrap(), 1);
+    }
+
+    #[test]
     fn test_find_root_vecgrep_at_lower_level_wins() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
@@ -1339,9 +1413,19 @@ mod tests {
         indexer.indexed_count = 1;
         indexer.indexed_chunks = 1;
 
-        finish_indexing(&mut indexer, &index, &StaleRemovalScope::All, true, &mut None).unwrap();
+        finish_indexing(
+            &mut indexer,
+            &index,
+            &StaleRemovalScope::All,
+            true,
+            &mut None,
+        )
+        .unwrap();
 
-        assert_eq!(index.get_file_hash("live.rs").unwrap(), Some("hash-live".to_string()));
+        assert_eq!(
+            index.get_file_hash("live.rs").unwrap(),
+            Some("hash-live".to_string())
+        );
         assert_eq!(index.get_file_hash("stale.rs").unwrap(), None);
     }
 
@@ -1441,14 +1525,8 @@ mod tests {
         .unwrap();
 
         let cwd = dir.path().canonicalize().unwrap();
-        let (args, matches) = parse_args(&[
-            "vecgrep",
-            "--top-k",
-            "7",
-            "--threshold",
-            "0.6",
-            "needle",
-        ]);
+        let (args, matches) =
+            parse_args(&["vecgrep", "--top-k", "7", "--threshold", "0.6", "needle"]);
         let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
 
         assert_eq!(invocation.runtime.top_k, 7);

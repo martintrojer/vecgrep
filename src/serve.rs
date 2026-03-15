@@ -106,6 +106,13 @@ fn handle_request(
             let resp = Response::from_string(body).with_header(json_content_type);
             let _ = request.respond(resp);
         }
+        Some(SearchOutcome::SearchError { message, .. }) => {
+            let body = serde_json::json!({"error": message}).to_string();
+            let resp = Response::from_string(body)
+                .with_status_code(StatusCode(500))
+                .with_header(json_error_type);
+            let _ = request.respond(resp);
+        }
         Some(SearchOutcome::EmbedError { message, .. }) => {
             let body = serde_json::json!({"error": message}).to_string();
             let resp = Response::from_string(body)

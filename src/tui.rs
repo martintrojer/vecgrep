@@ -118,8 +118,13 @@ pub mod interactive {
                             }
                         }
                     }
+                    SearchOutcome::SearchError { message, .. } => {
+                        search_error = Some(format!("Search error: {message}"));
+                        results.clear();
+                        list_state.select(None);
+                    }
                     SearchOutcome::EmbedError { message, .. } => {
-                        search_error = Some(message);
+                        search_error = Some(format!("Embed error: {message}"));
                         results.clear();
                         list_state.select(None);
                     }
@@ -165,7 +170,7 @@ pub mod interactive {
             let preview_scroll_val = preview_scroll;
             let preview_cache_ref = &preview_file_cache;
             let status_text = if let Some(ref err) = search_error {
-                format!("Embed error: {err}")
+                err.clone()
             } else if searching {
                 format!("Searching... | {} chunks indexed", chunk_count)
             } else if !indexing_done {

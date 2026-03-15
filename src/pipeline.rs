@@ -215,6 +215,10 @@ pub enum SearchOutcome {
         request_id: u64,
         results: Vec<SearchResult>,
     },
+    SearchError {
+        request_id: u64,
+        message: String,
+    },
     EmbedError {
         request_id: u64,
         message: String,
@@ -225,6 +229,7 @@ impl SearchOutcome {
     pub fn request_id(&self) -> u64 {
         match self {
             SearchOutcome::Results { request_id, .. } => *request_id,
+            SearchOutcome::SearchError { request_id, .. } => *request_id,
             SearchOutcome::EmbedError { request_id, .. } => *request_id,
         }
     }
@@ -330,9 +335,15 @@ fn handle_search(
     result_tx: &mpsc::Sender<SearchOutcome>,
 ) {
     let outcome = match embedder.embed(query) {
-        Ok(emb) => SearchOutcome::Results {
-            request_id,
-            results: idx.search(&emb, top_k, threshold).unwrap_or_default(),
+        Ok(emb) => match idx.search(&emb, top_k, threshold) {
+            Ok(results) => SearchOutcome::Results {
+                request_id,
+                results,
+            },
+            Err(e) => SearchOutcome::SearchError {
+                request_id,
+                message: format!("{e:#}"),
+            },
         },
         Err(e) => SearchOutcome::EmbedError {
             request_id,
@@ -770,6 +781,9 @@ mod tests {
             SearchOutcome::EmbedError { message, .. } => {
                 panic!("unexpected embed error: {message}")
             }
+            SearchOutcome::SearchError { message, .. } => {
+                panic!("unexpected search error: {message}")
+            }
         }
     }
 
@@ -813,6 +827,9 @@ mod tests {
             }
             SearchOutcome::EmbedError { message, .. } => {
                 panic!("unexpected embed error: {message}")
+            }
+            SearchOutcome::SearchError { message, .. } => {
+                panic!("unexpected search error: {message}")
             }
         }
 
@@ -869,5 +886,35 @@ mod tests {
 
         // Drop should shut down cleanly without hanging
         drop(worker);
+    }
+
+    #[test]
+    fn test_worker_reports_search_errors() {
+        let embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+        idx.clear().unwrap();
+        idx.set_config(&crate::types::IndexConfig {
+            model_name: "remote-like".to_string(),
+            embedding_dim: 1024,
+            chunk_size: 500,
+            chunk_overlap: 100,
+        })
+        .unwrap();
+
+        let (tx, rx) = mpsc::sync_channel(0);
+        drop(tx);
+        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+
+        let request_id = worker.search("dimension mismatch", 5, 0.0);
+        match worker.recv_result_for(request_id) {
+            Some(SearchOutcome::SearchError { message, .. }) => {
+                assert!(
+                    !message.is_empty(),
+                    "expected a non-empty search error message"
+                );
+            }
+            other => panic!("expected SearchError, got: {other:?}"),
+        }
     }
 }
