@@ -88,11 +88,20 @@ impl Index {
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id),
                 text TEXT NOT NULL,
+                embedding_failed INTEGER NOT NULL DEFAULT 0,
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);",
         )?;
+
+        // Migrate older databases that predate failed-embedding accounting.
+        if !self.has_column("chunks", "embedding_failed")? {
+            self.conn.execute(
+                "ALTER TABLE chunks ADD COLUMN embedding_failed INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         // Create vec_chunks with default dimension (set_config will recreate if needed)
         self.conn.execute(&vec_table_ddl(EMBEDDING_DIM), [])?;
@@ -152,6 +161,7 @@ impl Index {
         content_hash: &str,
         chunks: &[Chunk],
         embeddings: &[Vec<f32>],
+        embedding_failed: &[bool],
     ) -> Result<()> {
         self.conn.execute("BEGIN", [])?;
 
@@ -169,16 +179,22 @@ impl Index {
 
         // Insert chunks and their vector embeddings
         let mut chunk_stmt = self.conn.prepare(
-            "INSERT INTO chunks (file_id, text, start_line, end_line) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO chunks (file_id, text, embedding_failed, start_line, end_line)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         let mut vec_stmt = self
             .conn
             .prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
 
-        for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
+        for ((chunk, embedding), failed) in chunks
+            .iter()
+            .zip(embeddings.iter())
+            .zip(embedding_failed.iter())
+        {
             chunk_stmt.execute(params![
                 file_id,
                 chunk.text,
+                *failed as i64,
                 chunk.start_line as i64,
                 chunk.end_line as i64,
             ])?;
@@ -303,6 +319,11 @@ impl Index {
         let chunk_count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        let failed_chunk_count: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(embedding_failed), 0) FROM chunks",
+            [],
+            |r| r.get(0),
+        )?;
 
         let db_path = self.db_path()?;
         let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
@@ -310,6 +331,7 @@ impl Index {
         Ok(IndexStats {
             file_count: file_count as usize,
             chunk_count: chunk_count as usize,
+            failed_chunk_count: failed_chunk_count as usize,
             db_size_bytes: db_size,
         })
     }
@@ -349,6 +371,18 @@ impl Index {
         Ok(paths)
     }
 
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn get_meta(&self, key: &str) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
         let val = stmt
@@ -369,6 +403,7 @@ impl Index {
 pub struct IndexStats {
     pub file_count: usize,
     pub chunk_count: usize,
+    pub failed_chunk_count: usize,
     pub db_size_bytes: u64,
 }
 
@@ -509,7 +544,7 @@ mod tests {
         let embeddings = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
 
         index
-            .upsert_file("test.rs", "abc123", &chunks, &embeddings)
+            .upsert_file("test.rs", "abc123", &chunks, &embeddings, &[false, false])
             .unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 2);
@@ -538,7 +573,7 @@ mod tests {
         }];
         let emb_v1 = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1)
+            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1, &[false])
             .unwrap();
 
         let chunks_v2 = vec![Chunk {
@@ -549,7 +584,7 @@ mod tests {
         }];
         let emb_v2 = vec![make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2)
+            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2, &[false])
             .unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 1);
@@ -571,7 +606,7 @@ mod tests {
         }];
         let embeddings = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("test.rs", "myhash", &chunks, &embeddings)
+            .upsert_file("test.rs", "myhash", &chunks, &embeddings, &[false])
             .unwrap();
 
         assert_eq!(
@@ -594,7 +629,9 @@ mod tests {
                 end_line: 1,
             }];
             let emb = vec![make_test_embedding(dim, 1.0)];
-            index.upsert_file(name, "hash", &chunks, &emb).unwrap();
+            index
+                .upsert_file(name, "hash", &chunks, &emb, &[false])
+                .unwrap();
         }
 
         let current = vec!["a.rs".to_string(), "c.rs".to_string()];
@@ -616,7 +653,9 @@ mod tests {
                 end_line: 1,
             }];
             let emb = vec![make_test_embedding(dim, 1.0)];
-            index.upsert_file(name, "hash", &chunks, &emb).unwrap();
+            index
+                .upsert_file(name, "hash", &chunks, &emb, &[false])
+                .unwrap();
         }
 
         let current = vec!["src/a.rs".to_string()];
@@ -637,7 +676,7 @@ mod tests {
         }];
         let embeddings = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("test.rs", "hash", &chunks, &embeddings)
+            .upsert_file("test.rs", "hash", &chunks, &embeddings, &[false])
             .unwrap();
         index
             .set_config(&IndexConfig {
@@ -685,10 +724,10 @@ mod tests {
             },
         ];
         index
-            .upsert_file("a.rs", "h1", &chunks[0..1], &[emb1.clone()])
+            .upsert_file("a.rs", "h1", &chunks[0..1], &[emb1.clone()], &[false])
             .unwrap();
         index
-            .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2])
+            .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2], &[false])
             .unwrap();
 
         // Both chunks should exist
@@ -731,7 +770,9 @@ mod tests {
             },
         ];
         let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
-        index.upsert_file("a.rs", "hash", &chunks, &emb).unwrap();
+        index
+            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, false])
+            .unwrap();
 
         let file_count: i64 = index
             .conn
@@ -741,8 +782,17 @@ mod tests {
             .conn
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
             .unwrap();
+        let failed_chunk_count: i64 = index
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(embedding_failed), 0) FROM chunks",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(file_count, 1);
         assert_eq!(chunk_count, 2);
+        assert_eq!(failed_chunk_count, 0);
     }
 
     #[test]
@@ -765,12 +815,64 @@ mod tests {
             },
         ];
         let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
-        index.upsert_file("a.rs", "hash", &chunks, &emb).unwrap();
+        index
+            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, true])
+            .unwrap();
 
         let stats = index.stats().unwrap();
         assert_eq!(stats.file_count, 1);
         assert_eq!(stats.chunk_count, 2);
+        assert_eq!(stats.failed_chunk_count, 1);
         assert!(stats.db_size_bytes > 0);
+    }
+
+    #[test]
+    fn test_stats_reindex_replaces_failed_chunk_count() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let chunks = vec![
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "one".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            Chunk {
+                file_path: "a.rs".to_string(),
+                text: "two".to_string(),
+                start_line: 2,
+                end_line: 2,
+            },
+        ];
+
+        let emb = vec![make_test_embedding(dim, 1.0), vec![0.0; dim]];
+        index
+            .upsert_file("a.rs", "hash1", &chunks, &emb, &[false, true])
+            .unwrap();
+        assert_eq!(index.stats().unwrap().failed_chunk_count, 1);
+
+        let replacement_chunks = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "replacement".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let replacement_emb = vec![make_test_embedding(dim, 2.0)];
+        index
+            .upsert_file(
+                "a.rs",
+                "hash2",
+                &replacement_chunks,
+                &replacement_emb,
+                &[false],
+            )
+            .unwrap();
+
+        let stats = index.stats().unwrap();
+        assert_eq!(stats.file_count, 1);
+        assert_eq!(stats.chunk_count, 1);
+        assert_eq!(stats.failed_chunk_count, 0);
     }
 
     #[test]
@@ -788,7 +890,7 @@ mod tests {
             end_line: 1,
         }];
         index
-            .upsert_file("exact.rs", "h0", &chunks_exact, &[query.clone()])
+            .upsert_file("exact.rs", "h0", &chunks_exact, &[query.clone()], &[false])
             .unwrap();
 
         // Insert several other embeddings
@@ -801,7 +903,13 @@ mod tests {
                 end_line: 1,
             }];
             index
-                .upsert_file(&format!("other{i}.rs"), &format!("h{i}"), &chunks, &[emb])
+                .upsert_file(
+                    &format!("other{i}.rs"),
+                    &format!("h{i}"),
+                    &chunks,
+                    &[emb],
+                    &[false],
+                )
                 .unwrap();
         }
 
@@ -836,7 +944,13 @@ mod tests {
             }];
             let emb = vec![make_test_embedding(dim, (i + 1) as f32)];
             index
-                .upsert_file(&format!("f{i}.rs"), &format!("h{i}"), &chunks, &emb)
+                .upsert_file(
+                    &format!("f{i}.rs"),
+                    &format!("h{i}"),
+                    &chunks,
+                    &emb,
+                    &[false],
+                )
                 .unwrap();
         }
 
@@ -858,7 +972,9 @@ mod tests {
             end_line: 1,
         }];
         let emb = vec![make_test_embedding(dim, 1.0)];
-        index.upsert_file("a.rs", "h", &chunks, &emb).unwrap();
+        index
+            .upsert_file("a.rs", "h", &chunks, &emb, &[false])
+            .unwrap();
 
         // Use a very different query and high threshold
         let query = make_test_embedding(dim, 100.0);
@@ -886,7 +1002,9 @@ mod tests {
             end_line: 1,
         }];
         let emb = vec![make_test_embedding(dim, 1.0)];
-        index.upsert_file("a.rs", "h1", &chunks, &emb).unwrap();
+        index
+            .upsert_file("a.rs", "h1", &chunks, &emb, &[false])
+            .unwrap();
         assert_eq!(index.chunk_count().unwrap(), 1);
 
         // Clear drops vec_chunks, set_config recreates it
@@ -905,7 +1023,9 @@ mod tests {
             end_line: 1,
         }];
         let emb2 = vec![make_test_embedding(dim, 2.0)];
-        index.upsert_file("b.rs", "h2", &chunks2, &emb2).unwrap();
+        index
+            .upsert_file("b.rs", "h2", &chunks2, &emb2, &[false])
+            .unwrap();
 
         let results = index.search(&emb2[0], 1, -1.0).unwrap();
         assert_eq!(results.len(), 1);
@@ -932,7 +1052,9 @@ mod tests {
                 end_line: 1,
             }];
             let emb = vec![make_test_embedding(dim, *seed)];
-            index.upsert_file(name, "hash", &chunks, &emb).unwrap();
+            index
+                .upsert_file(name, "hash", &chunks, &emb, &[false])
+                .unwrap();
         }
         assert_eq!(index.chunk_count().unwrap(), 2);
         assert_eq!(vec_count(&index), 2);
@@ -945,7 +1067,9 @@ mod tests {
             end_line: 1,
         }];
         let emb = vec![make_test_embedding(dim, 3.0)];
-        index.upsert_file("a.rs", "hash2", &chunks, &emb).unwrap();
+        index
+            .upsert_file("a.rs", "hash2", &chunks, &emb, &[false])
+            .unwrap();
         assert_eq!(index.chunk_count().unwrap(), 2);
         assert_eq!(vec_count(&index), 2);
 

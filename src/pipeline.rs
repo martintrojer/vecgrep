@@ -393,13 +393,16 @@ pub fn process_batch(
     let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
     let embed_batch_size = 64;
     let mut all_embeddings = Vec::new();
+    let mut embedding_failed = Vec::new();
     for (batch_idx, text_batch) in texts.chunks(embed_batch_size).enumerate() {
         let embeddings = embedder.embed_batch(text_batch)?;
 
         // Log zero vectors (failed embeddings from remote fallback)
         for (i, emb) in embeddings.iter().enumerate() {
             let global_idx = batch_idx * embed_batch_size + i;
-            if emb.iter().all(|&v| v == 0.0) {
+            let failed = emb.iter().all(|&v| v == 0.0);
+            embedding_failed.push(failed);
+            if failed {
                 if let Some((ref path, _)) = chunk_file_info.get(global_idx) {
                     tracing::warn!("Zero embedding for chunk in file: {}", path);
                 }
@@ -420,7 +423,17 @@ pub fn process_batch(
 
         if current_file.as_ref() != Some(path) {
             if let Some(ref prev_path) = current_file {
-                idx.upsert_file(prev_path, &file_hash, &file_chunks, &file_embeddings)?;
+                let file_failed: Vec<bool> = embedding_failed[i - file_chunks.len()..i]
+                    .iter()
+                    .copied()
+                    .collect();
+                idx.upsert_file(
+                    prev_path,
+                    &file_hash,
+                    &file_chunks,
+                    &file_embeddings,
+                    &file_failed,
+                )?;
             }
             current_file = Some(path.clone());
             file_hash = hash.clone();
@@ -433,7 +446,15 @@ pub fn process_batch(
     }
 
     if let Some(ref prev_path) = current_file {
-        idx.upsert_file(prev_path, &file_hash, &file_chunks, &file_embeddings)?;
+        let start = all_chunks.len() - file_chunks.len();
+        let file_failed: Vec<bool> = embedding_failed[start..].iter().copied().collect();
+        idx.upsert_file(
+            prev_path,
+            &file_hash,
+            &file_chunks,
+            &file_embeddings,
+            &file_failed,
+        )?;
     }
 
     Ok(all_chunks.len())
@@ -670,6 +691,7 @@ mod tests {
                 &format!("hash{i}"),
                 &[chunk],
                 &[emb],
+                &[false],
             )
             .unwrap();
         }
@@ -708,7 +730,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
         };
-        idx.upsert_file("existing.rs", "hash0", &[chunk], &[emb])
+        idx.upsert_file("existing.rs", "hash0", &[chunk], &[emb], &[false])
             .unwrap();
 
         // Create a channel with files to index (keeps worker busy)

@@ -326,7 +326,12 @@ fn run() -> Result<bool> {
     if args.stats && args.query.is_none() && !args.index_only {
         let idx = Index::open(&project_root)?;
         let stats = idx.stats()?;
-        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
+        output::print_stats(
+            stats.file_count,
+            stats.chunk_count,
+            stats.failed_chunk_count,
+            stats.db_size_bytes,
+        );
         return Ok(true);
     }
 
@@ -478,14 +483,24 @@ fn run() -> Result<bool> {
     // Handle --index-only
     if args.index_only {
         let stats = idx.stats()?;
-        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
+        output::print_stats(
+            stats.file_count,
+            stats.chunk_count,
+            stats.failed_chunk_count,
+            stats.db_size_bytes,
+        );
         return Ok(true);
     }
 
     // Handle --stats after indexing
     if args.stats {
         let stats = idx.stats()?;
-        output::print_stats(stats.file_count, stats.chunk_count, stats.db_size_bytes);
+        output::print_stats(
+            stats.file_count,
+            stats.chunk_count,
+            stats.failed_chunk_count,
+            stats.db_size_bytes,
+        );
         if args.query.is_none() {
             return Ok(true);
         }
