@@ -253,6 +253,15 @@ struct RuntimeConfig {
     port: Option<u16>,
 }
 
+struct Invocation {
+    args: Args,
+    path_plan: PathPlan,
+    runtime: RuntimeConfig,
+    query: String,
+    run_mode: RunMode,
+    color_choice: termcolor::ColorChoice,
+}
+
 struct ExecutionContext {
     embedder: Embedder,
     idx: Index,
@@ -371,6 +380,28 @@ fn build_runtime_config(args: &Args) -> RuntimeConfig {
         embedder_model: args.embedder_model.clone(),
         port: args.port,
     }
+}
+
+fn resolve_invocation(
+    mut args: Args,
+    matches: &ArgMatches,
+    cwd: &Path,
+    project_root: &Path,
+) -> Result<Invocation> {
+    let config = vecgrep::config::load_config(project_root);
+    apply_config(&mut args, &config, matches);
+
+    let path_plan = build_path_plan(cwd, project_root, &args.paths);
+    apply_path_plan(&mut args, &path_plan)?;
+
+    Ok(Invocation {
+        query: resolve_query(&args)?,
+        run_mode: determine_run_mode(&args),
+        color_choice: output::resolve_color_choice(&args.color),
+        runtime: build_runtime_config(&args),
+        args,
+        path_plan,
+    })
 }
 
 fn initialize_embedder(runtime: &mut RuntimeConfig) -> Result<Embedder> {
@@ -648,7 +679,7 @@ fn run() -> Result<bool> {
         .init();
 
     let matches = Args::command().get_matches();
-    let mut args = Args::from_arg_matches(&matches).expect("clap validated matches");
+    let args = Args::from_arg_matches(&matches).expect("clap validated matches");
 
     // Handle --type-list (no model or index needed)
     if args.type_list {
@@ -656,14 +687,8 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    let color_choice = output::resolve_color_choice(&args.color);
-
     let cwd = std::env::current_dir()?;
     let project_root = resolve_project_root(&cwd, &args.paths);
-
-    // Apply config: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml) > defaults
-    let config = vecgrep::config::load_config(&project_root);
-    apply_config(&mut args, &config, &matches);
 
     // Handle --show-root (no model or index needed)
     if args.show_root {
@@ -673,10 +698,15 @@ fn run() -> Result<bool> {
         println!("{}", canon.display());
         return Ok(true);
     }
-    let path_plan = build_path_plan(&cwd, &project_root, &args.paths);
-    apply_path_plan(&mut args, &path_plan)?;
 
-    let mut runtime = build_runtime_config(&args);
+    let Invocation {
+        args,
+        path_plan,
+        mut runtime,
+        query,
+        run_mode,
+        color_choice,
+    } = resolve_invocation(args, &matches, &cwd, &project_root)?;
     let quiet = runtime.quiet;
 
     // Handle --clear-cache
@@ -708,9 +738,6 @@ fn run() -> Result<bool> {
         mut walker_handle,
         root,
     } = prepare_execution(&args, &mut runtime, &path_plan)?;
-
-    let query = resolve_query(&args)?;
-    let run_mode = determine_run_mode(&args);
     if query.is_empty() && matches!(run_mode, RunMode::Cli) && !args.stats && !args.reindex {
         return Ok(true);
     }
