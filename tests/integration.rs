@@ -577,6 +577,40 @@ fn test_subdirectory_index_does_not_remove_other_dirs() {
 }
 
 #[test]
+fn test_explicit_file_paths_do_not_prune_other_indexed_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn alpha_bug() {}").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn beta_bug() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--index-only", "a.rs"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--stats")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Files:  2"),
+        "explicit file indexing should not prune other cached files: {stderr}"
+    );
+}
+
+#[test]
 fn test_stale_file_removed_within_walked_dir() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
