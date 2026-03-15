@@ -111,12 +111,7 @@ pub mod interactive {
                         } else {
                             list_state.select(None);
                         }
-                        if !cwd_suffix.as_os_str().is_empty() {
-                            for r in &mut results {
-                                r.chunk.file_path =
-                                    paths::to_cwd_relative(&r.chunk.file_path, cwd_suffix);
-                            }
-                        }
+                        paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
                     }
                     SearchOutcome::SearchError { message, .. } => {
                         search_error = Some(format!("Search error: {message}"));
