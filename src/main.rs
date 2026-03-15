@@ -229,7 +229,12 @@ enum RunMode {
 
 type WalkerHandle = std::thread::JoinHandle<anyhow::Result<usize>>;
 
-struct RuntimeConfig {
+struct Invocation {
+    args: Args,
+    path_plan: PathPlan,
+    query: String,
+    run_mode: RunMode,
+    color_choice: termcolor::ColorChoice,
     top_k: usize,
     threshold: f32,
     chunk_size: usize,
@@ -240,12 +245,6 @@ struct RuntimeConfig {
     embedder_url: Option<String>,
     embedder_model: Option<String>,
     port: Option<u16>,
-}
-
-#[derive(Clone, Copy)]
-struct SearchConfig {
-    top_k: usize,
-    threshold: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -260,15 +259,6 @@ struct CliOutputContext<'a> {
 enum IndexDrainOutcome {
     Completed,
     Aborted,
-}
-
-struct Invocation {
-    args: Args,
-    path_plan: PathPlan,
-    runtime: RuntimeConfig,
-    query: String,
-    run_mode: RunMode,
-    color_choice: termcolor::ColorChoice,
 }
 
 struct ExecutionContext {
@@ -417,8 +407,14 @@ fn determine_run_mode(args: &Args) -> RunMode {
     }
 }
 
-fn build_runtime_config(args: &Args) -> RuntimeConfig {
-    RuntimeConfig {
+fn build_invocation(
+    args: Args,
+    path_plan: PathPlan,
+    query: String,
+    run_mode: RunMode,
+    color_choice: termcolor::ColorChoice,
+) -> Invocation {
+    Invocation {
         top_k: args.top_k,
         threshold: args.threshold,
         chunk_size: args.chunk_size,
@@ -429,13 +425,11 @@ fn build_runtime_config(args: &Args) -> RuntimeConfig {
         embedder_url: args.embedder_url.clone(),
         embedder_model: args.embedder_model.clone(),
         port: args.port,
-    }
-}
-
-fn search_config(runtime: &RuntimeConfig) -> SearchConfig {
-    SearchConfig {
-        top_k: runtime.top_k,
-        threshold: runtime.threshold,
+        args,
+        path_plan,
+        query,
+        run_mode,
+        color_choice,
     }
 }
 
@@ -455,21 +449,23 @@ fn resolve_invocation(
     let resolved_paths = resolve_input_paths(cwd, &args.paths, project_root);
     let path_plan = build_path_plan(cwd, project_root, &resolved_paths);
     let args = apply_path_plan(args, &path_plan)?;
+    let query = resolve_query(&args);
+    let run_mode = determine_run_mode(&args);
+    let color_choice = output::resolve_color_choice(&args.color);
 
-    Ok(Invocation {
-        query: resolve_query(&args),
-        run_mode: determine_run_mode(&args),
-        color_choice: output::resolve_color_choice(&args.color),
-        runtime: build_runtime_config(&args),
+    Ok(build_invocation(
         args,
         path_plan,
-    })
+        query,
+        run_mode,
+        color_choice,
+    ))
 }
 
-fn initialize_embedder(runtime: &mut RuntimeConfig) -> Result<Embedder> {
-    let quiet = runtime.quiet;
+fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
+    let quiet = invocation.quiet;
     let embedder = if let (Some(ref url), Some(ref model)) =
-        (&runtime.embedder_url, &runtime.embedder_model)
+        (&invocation.embedder_url, &invocation.embedder_model)
     {
         status!(quiet, "Using external embedder: {} ({})", url, model);
         let mut embedder = Embedder::new_remote(url, model);
@@ -490,14 +486,14 @@ fn initialize_embedder(runtime: &mut RuntimeConfig) -> Result<Embedder> {
         embedder
     };
 
-    let original_chunk_size = runtime.chunk_size;
-    runtime.chunk_size = capped_chunk_size(runtime.chunk_size, embedder.context_tokens());
-    if runtime.chunk_size < original_chunk_size {
+    let original_chunk_size = invocation.chunk_size;
+    invocation.chunk_size = capped_chunk_size(invocation.chunk_size, embedder.context_tokens());
+    if invocation.chunk_size < original_chunk_size {
         status!(
             quiet,
             "Reducing chunk_size from {} to {} (model context limit)",
             original_chunk_size,
-            runtime.chunk_size
+            invocation.chunk_size
         );
     }
 
@@ -507,21 +503,24 @@ fn initialize_embedder(runtime: &mut RuntimeConfig) -> Result<Embedder> {
 fn prepare_index(
     project_root: &Path,
     embedder: &Embedder,
-    runtime: &RuntimeConfig,
+    invocation: &Invocation,
     reindex: bool,
 ) -> Result<Index> {
     let idx = Index::open(project_root)?;
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
-        chunk_size: runtime.chunk_size,
-        chunk_overlap: runtime.chunk_overlap,
+        chunk_size: invocation.chunk_size,
+        chunk_overlap: invocation.chunk_overlap,
     };
 
     let config_valid = idx.check_config(&config)?;
     if !config_valid || reindex {
         if !config_valid {
-            status!(runtime.quiet, "Index configuration changed, rebuilding...");
+            status!(
+                invocation.quiet,
+                "Index configuration changed, rebuilding..."
+            );
         }
         idx.rebuild_for_config(&config)?;
     } else {
@@ -544,18 +543,19 @@ fn build_walk_options(args: &Args) -> walker::WalkOptions {
     }
 }
 
-fn prepare_execution(
-    args: &Args,
-    runtime: &mut RuntimeConfig,
-    path_plan: &PathPlan,
-) -> Result<ExecutionContext> {
-    let embedder = initialize_embedder(runtime)?;
-    let idx = prepare_index(&path_plan.project_root, &embedder, runtime, args.reindex)?;
+fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
+    let embedder = initialize_embedder(invocation)?;
+    let idx = prepare_index(
+        &invocation.path_plan.project_root,
+        &embedder,
+        invocation,
+        invocation.args.reindex,
+    )?;
 
     let batch_size = 32;
-    let walk_opts = build_walk_options(args);
+    let walk_opts = build_walk_options(&invocation.args);
     let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(batch_size * 2);
-    let walk_paths = args.paths.clone();
+    let walk_paths = invocation.args.paths.clone();
     let stream_progress = Arc::new(walker::StreamProgress::new());
     let walker_progress = Arc::clone(&stream_progress);
     let walker_handle = std::thread::spawn(move || {
@@ -564,10 +564,10 @@ fn prepare_execution(
 
     let indexer = pipeline::StreamingIndexer::new(
         rx,
-        runtime.chunk_size,
-        runtime.chunk_overlap,
+        invocation.chunk_size,
+        invocation.chunk_overlap,
         batch_size,
-        &path_plan.cwd_suffix,
+        &invocation.path_plan.cwd_suffix,
         Some(stream_progress),
     );
 
@@ -576,7 +576,11 @@ fn prepare_execution(
         idx,
         indexer,
         walker_handle: Some(walker_handle),
-        root: path_plan.project_root_canon.to_string_lossy().to_string(),
+        root: invocation
+            .path_plan
+            .project_root_canon
+            .to_string_lossy()
+            .to_string(),
     })
 }
 
@@ -755,8 +759,7 @@ fn run_serve_mode(
     embedder: Embedder,
     idx: Index,
     indexer: pipeline::StreamingIndexer,
-    port: Option<u16>,
-    search: SearchConfig,
+    invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<bool> {
@@ -764,9 +767,9 @@ fn run_serve_mode(
         embedder,
         idx,
         indexer,
-        port,
-        search.top_k,
-        search.threshold,
+        invocation.port,
+        invocation.top_k,
+        invocation.threshold,
         output.quiet,
         output.root,
     )?;
@@ -778,8 +781,7 @@ fn run_interactive_mode(
     embedder: Embedder,
     idx: Index,
     indexer: pipeline::StreamingIndexer,
-    query: &str,
-    search: SearchConfig,
+    invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<bool> {
@@ -787,9 +789,9 @@ fn run_interactive_mode(
         embedder,
         idx,
         indexer,
-        query,
-        search.top_k,
-        search.threshold,
+        &invocation.query,
+        invocation.top_k,
+        invocation.threshold,
         output.cwd_suffix,
     )?;
     join_walker(walker_handle)?;
@@ -830,14 +832,15 @@ fn run_cli_search(
     idx: &Index,
     args: &Args,
     query: &str,
-    search: SearchConfig,
+    top_k: usize,
+    threshold: f32,
     output: CliOutputContext<'_>,
 ) -> Result<bool> {
     let chunk_count = idx.chunk_count()?;
     status!(output.quiet, "Index has {} chunks.", chunk_count);
 
     let query_embedding = embedder.embed(query)?;
-    let results = idx.search(&query_embedding, search.top_k, search.threshold)?;
+    let results = idx.search(&query_embedding, top_k, threshold)?;
 
     let found = render_cli_results(
         results,
@@ -957,36 +960,33 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    let Invocation {
-        args,
-        path_plan,
-        mut runtime,
-        query,
-        run_mode,
-        color_choice,
-    } = resolve_invocation(args, &matches, &cwd, &project_root)?;
-    let quiet = runtime.quiet;
+    let mut invocation = resolve_invocation(args, &matches, &cwd, &project_root)?;
+    let quiet = invocation.quiet;
 
-    if let FlowControl::Return(result) = handle_pre_execution_actions(&args, &path_plan, quiet)? {
+    if let FlowControl::Return(result) =
+        handle_pre_execution_actions(&invocation.args, &invocation.path_plan, quiet)?
+    {
         return Ok(result);
     }
 
-    let threshold = runtime.index_warn_threshold;
     let ExecutionContext {
         mut embedder,
         idx,
         mut indexer,
         mut walker_handle,
         root,
-    } = prepare_execution(&args, &mut runtime, &path_plan)?;
-    let search = search_config(&runtime);
+    } = prepare_execution(&mut invocation)?;
     let output = CliOutputContext {
-        color_choice,
-        cwd_suffix: &path_plan.cwd_suffix,
+        color_choice: invocation.color_choice,
+        cwd_suffix: &invocation.path_plan.cwd_suffix,
         quiet,
         root: &root,
     };
-    if query.is_empty() && matches!(run_mode, RunMode::Cli) && !args.stats && !args.reindex {
+    if invocation.query.is_empty()
+        && matches!(invocation.run_mode, RunMode::Cli)
+        && !invocation.args.stats
+        && !invocation.args.reindex
+    {
         return Ok(true);
     }
 
@@ -996,14 +996,14 @@ fn run() -> Result<bool> {
     // CLI and --index-only always drain before proceeding so first-run searches
     // don't miss freshly discovered files. TUI/serve stay progressive unless
     // --full-index was requested explicitly.
-    let must_drain_before_search = matches!(run_mode, RunMode::IndexOnly | RunMode::Cli);
-    if runtime.full_index || must_drain_before_search {
+    let must_drain_before_search = matches!(invocation.run_mode, RunMode::IndexOnly | RunMode::Cli);
+    if invocation.full_index || must_drain_before_search {
         let drain_outcome = drain_initial_indexing(
             &mut indexer,
             &mut embedder,
             &idx,
             quiet,
-            threshold,
+            invocation.index_warn_threshold,
             &mut progress_reporter,
         )?;
         if matches!(drain_outcome, IndexDrainOutcome::Aborted) {
@@ -1012,43 +1012,49 @@ fn run() -> Result<bool> {
         finish_indexing(
             &mut indexer,
             &idx,
-            &path_plan.stale_removal_scope,
+            &invocation.path_plan.stale_removal_scope,
             quiet,
             &mut walker_handle,
         )?;
     }
 
-    if let FlowControl::Return(result) = handle_post_index_actions(&args, &idx)? {
+    if let FlowControl::Return(result) = handle_post_index_actions(&invocation.args, &idx)? {
         return Ok(result);
     }
 
     // TUI and serve: pass the indexer for progressive indexing.
     // If --full-index was used, the indexer is already drained.
-    if matches!(run_mode, RunMode::Serve) {
+    if matches!(invocation.run_mode, RunMode::Serve) {
         return run_serve_mode(
             embedder,
             idx,
             indexer,
-            runtime.port,
-            search,
+            &invocation,
             output,
             &mut walker_handle,
         );
     }
 
-    if matches!(run_mode, RunMode::Interactive) {
+    if matches!(invocation.run_mode, RunMode::Interactive) {
         return run_interactive_mode(
             embedder,
             idx,
             indexer,
-            &query,
-            search,
+            &invocation,
             output,
             &mut walker_handle,
         );
     }
 
-    let found = run_cli_search(&mut embedder, &idx, &args, &query, search, output)?;
+    let found = run_cli_search(
+        &mut embedder,
+        &idx,
+        &invocation.args,
+        &invocation.query,
+        invocation.top_k,
+        invocation.threshold,
+        output,
+    )?;
 
     // TUI/serve may return here with indexing still in progress, but CLI has
     // already drained above.
@@ -1057,7 +1063,7 @@ fn run() -> Result<bool> {
         finish_indexing(
             &mut indexer,
             &idx,
-            &path_plan.stale_removal_scope,
+            &invocation.path_plan.stale_removal_scope,
             quiet,
             &mut walker_handle,
         )?;
@@ -1363,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_runtime_and_search_config() {
+    fn test_build_invocation_carries_runtime_fields() {
         let (args, _) = parse_args(&[
             "vecgrep",
             "--top-k",
@@ -1379,15 +1385,27 @@ mod tests {
             "needle",
         ]);
 
-        let runtime = build_runtime_config(&args);
-        let search = search_config(&runtime);
+        let invocation = build_invocation(
+            args,
+            PathPlan {
+                project_root: PathBuf::from("."),
+                project_root_canon: PathBuf::from("."),
+                cwd_suffix: PathBuf::new(),
+                inside_paths: vec![".".to_string()],
+                outside_paths: Vec::new(),
+                stale_removal_scope: StaleRemovalScope::None,
+            },
+            "needle".to_string(),
+            RunMode::Cli,
+            termcolor::ColorChoice::Never,
+        );
 
-        assert_eq!(runtime.chunk_size, 123);
-        assert_eq!(runtime.chunk_overlap, 17);
-        assert!(runtime.full_index);
-        assert!(runtime.quiet);
-        assert_eq!(search.top_k, 7);
-        assert_eq!(search.threshold, 0.45);
+        assert_eq!(invocation.chunk_size, 123);
+        assert_eq!(invocation.chunk_overlap, 17);
+        assert!(invocation.full_index);
+        assert!(invocation.quiet);
+        assert_eq!(invocation.top_k, 7);
+        assert_eq!(invocation.threshold, 0.45);
     }
 
     #[test]
@@ -1587,9 +1605,9 @@ mod tests {
         let (args, matches) = parse_args(&["vecgrep", "needle"]);
         let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
 
-        assert_eq!(invocation.runtime.top_k, 42);
-        assert_eq!(invocation.runtime.threshold, 0.15);
-        assert!(invocation.runtime.quiet);
+        assert_eq!(invocation.top_k, 42);
+        assert_eq!(invocation.threshold, 0.15);
+        assert!(invocation.quiet);
     }
 
     #[test]
@@ -1608,9 +1626,9 @@ mod tests {
             parse_args(&["vecgrep", "--top-k", "7", "--threshold", "0.6", "needle"]);
         let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
 
-        assert_eq!(invocation.runtime.top_k, 7);
-        assert_eq!(invocation.runtime.threshold, 0.6);
-        assert!(invocation.runtime.quiet);
+        assert_eq!(invocation.top_k, 7);
+        assert_eq!(invocation.threshold, 0.6);
+        assert!(invocation.quiet);
     }
 
     #[test]
