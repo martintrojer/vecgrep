@@ -203,6 +203,96 @@ fn test_show_root_no_marker_falls_back_to_cwd() {
 }
 
 #[test]
+fn test_rejects_file_outside_selected_root() {
+    let parent = tempfile::TempDir::new().unwrap();
+    let repo = parent.path().join("repo");
+    let other = parent.path().join("other");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&repo.join(".git")).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("outside.rs"), "fn outside_bug() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["bugs", "../other/outside.rs"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("outside the selected project root"),
+        "expected outside-root error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_rejects_directory_outside_selected_root() {
+    let parent = tempfile::TempDir::new().unwrap();
+    let repo = parent.path().join("repo");
+    let other = parent.path().join("other");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&repo.join(".git")).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("outside.rs"), "fn outside_bug() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["bugs", "../other"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("outside the selected project root"),
+        "expected outside-root error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_skip_outside_root_flag_skips_file_outside_selected_root() {
+    let parent = tempfile::TempDir::new().unwrap();
+    let repo = parent.path().join("repo");
+    let other = parent.path().join("other");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&repo.join(".git")).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(repo.join("inside.rs"), "fn inside_bug() {}").unwrap();
+    std::fs::write(other.join("outside.rs"), "fn outside_bug() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--skip-outside-root",
+            "--threshold",
+            "0.0",
+            "bug",
+            "inside.rs",
+            "../other/outside.rs",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("inside.rs"),
+        "expected inside file in results, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("../other/outside.rs"),
+        "outside-root file should have been skipped, got: {stdout}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Skipping 1 path(s) outside project root"),
+        "expected skip warning, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_full_index_indexes_before_search() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();

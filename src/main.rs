@@ -55,6 +55,40 @@ fn find_project_root(start: &Path) -> PathBuf {
     }
 }
 
+fn has_project_marker(path: &Path) -> bool {
+    [".git", ".hg", ".jj", ".vecgrep"]
+        .iter()
+        .any(|marker| path.join(marker).exists())
+}
+
+fn resolve_input_path(cwd: &Path, input: &str) -> PathBuf {
+    let path = Path::new(input);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn split_paths_by_root(
+    paths: &[String],
+    cwd: &Path,
+    project_root: &Path,
+) -> (Vec<String>, Vec<String>) {
+    let mut inside = Vec::new();
+    let mut outside = Vec::new();
+    for input in paths {
+        let resolved = resolve_input_path(cwd, input);
+        if !resolved.starts_with(project_root) {
+            outside.push(input.clone());
+        } else {
+            inside.push(input.clone());
+        }
+    }
+    (inside, outside)
+}
+
 fn main() {
     std::process::exit(match run() {
         Ok(matched) => {
@@ -267,16 +301,18 @@ fn run() -> Result<bool> {
 
     let color_choice = output::resolve_color_choice(&args.color);
 
-    // Determine the index root (first path, or cwd)
     let cwd = std::env::current_dir()?;
-    let index_root = if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
-        Path::new(&args.paths[0]).to_path_buf()
+    let cwd_project_root = find_project_root(&cwd);
+
+    // If cwd is already inside a project, that project owns the invocation.
+    // Otherwise, fall back to the single-directory path heuristic.
+    let project_root = if has_project_marker(&cwd_project_root) {
+        cwd_project_root
+    } else if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
+        find_project_root(Path::new(&args.paths[0]))
     } else {
         cwd.clone()
     };
-
-    // Find project root and compute path relationships
-    let project_root = find_project_root(&index_root);
 
     // Apply config: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml) > defaults
     let config = vecgrep::config::load_config(&project_root);
@@ -294,6 +330,30 @@ fn run() -> Result<bool> {
         .canonicalize()
         .unwrap_or_else(|_| project_root.clone());
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+    let (inside_paths, outside_paths) =
+        split_paths_by_root(&args.paths, &cwd_canon, &project_root_canon);
+    if !outside_paths.is_empty() && !args.skip_outside_root {
+        anyhow::bail!(
+            "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
+            outside_paths[0],
+            project_root_canon.display()
+        );
+    }
+    if !outside_paths.is_empty() && args.skip_outside_root && !args.quiet {
+        eprintln!(
+            "Skipping {} path(s) outside project root {}.",
+            outside_paths.len(),
+            project_root_canon.display()
+        );
+    }
+    if inside_paths.is_empty() {
+        anyhow::bail!(
+            "All provided paths are outside the selected project root '{}'.",
+            project_root_canon.display()
+        );
+    }
+    args.paths = inside_paths;
+
     let cwd_suffix = cwd_canon
         .strip_prefix(&project_root_canon)
         .unwrap_or(Path::new(""))

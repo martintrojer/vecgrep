@@ -119,6 +119,17 @@ The flag can be specified multiple times and supports the full gitignore pattern
 
 Search is a vector KNN query via [sqlite-vec](https://github.com/asg017/sqlite-vec) — fast enough for on-every-keystroke use in interactive mode and the HTTP server.
 
+## Path semantics
+
+`vecgrep` accepts files, directories, or a mix of both. The project root is discovered once and the cache lives at that root, so different path selections still share the same index.
+
+- One invocation uses one selected project root and one cache. Paths outside that root are rejected by default.
+- Single directory path: vecgrep walks that subtree recursively and performs stale cleanup for that subtree.
+- Multiple directory paths: vecgrep walks all of them and updates the shared cache, but skips stale cleanup because the input is not one contiguous subtree.
+- Explicit file paths: vecgrep indexes only those files and skips stale cleanup. This is the right mode for commands like `rg -l ... | xargs vecgrep ...`.
+- `--skip-outside-root`: ignore outside-root paths instead of failing. Skipped paths are not indexed and cannot appear in results.
+- No path given: equivalent to `.`.
+
 ## Embedding models
 
 ### Built-in: all-MiniLM-L6-v2
@@ -211,8 +222,11 @@ Arguments:
   [PATHS]...  Files or directories to search [default: .]
               Like ripgrep, you can pass multiple paths. Directories
               are walked recursively, respecting .gitignore. Files
-              are searched directly. The index is scoped to the
-              project root (discovered via .git/, .vecgrep/, etc.).
+              are searched directly. All paths share one cache at the
+              discovered project root (.git/, .vecgrep/, etc.). Stale
+              cleanup only runs for single-directory walks, not for
+              explicit file lists or multi-path mixes. Paths outside
+              the selected root fail by default.
 
 Options:
   -k, --top-k <N>              Number of results [default: 10]
@@ -239,6 +253,7 @@ Options:
       --stats                   Show index statistics
       --clear-cache             Delete cached index
       --show-root               Print resolved project root and exit
+      --skip-outside-root       Ignore paths outside the selected project root
       --json                    JSONL output (includes "root" field)
       --serve                   Start HTTP server mode
       --port <PORT>             Port for HTTP server [default: auto]

@@ -150,4 +150,8 @@ pub struct Args {
     /// Port for HTTP server (default: auto-pick free port).
     #[arg(long, requires = "serve")]
     pub port: Option<u16>,
+
+    /// Skip paths outside the selected project root instead of failing.
+    #[arg(long)]
+    pub skip_outside_root: bool,
 }
