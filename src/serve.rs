@@ -9,6 +9,12 @@ use crate::index::Index;
 use crate::output::format_json_result;
 use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
 
+fn respond(request: Request, response: Response<std::io::Cursor<Vec<u8>>>) {
+    if let Err(err) = request.respond(response) {
+        tracing::debug!("failed to send HTTP response: {err}");
+    }
+}
+
 fn json_content_header() -> Header {
     "Content-Type: application/x-ndjson"
         .parse()
@@ -37,7 +43,7 @@ fn handle_request(
         let resp = Response::from_string(body)
             .with_status_code(StatusCode(405))
             .with_header(json_error_type);
-        let _ = request.respond(resp);
+        respond(request, resp);
         return Ok(());
     }
 
@@ -50,7 +56,7 @@ fn handle_request(
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(400))
                 .with_header(json_error_type);
-            let _ = request.respond(resp);
+            respond(request, resp);
             return Ok(());
         }
     };
@@ -60,7 +66,7 @@ fn handle_request(
         let resp = Response::from_string(body)
             .with_status_code(StatusCode(404))
             .with_header(json_error_type);
-        let _ = request.respond(resp);
+        respond(request, resp);
         return Ok(());
     }
 
@@ -77,7 +83,7 @@ fn handle_request(
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(400))
                 .with_header(json_error_type);
-            let _ = request.respond(resp);
+            respond(request, resp);
             return Ok(());
         }
     };
@@ -104,28 +110,28 @@ fn handle_request(
                 body.push('\n');
             }
             let resp = Response::from_string(body).with_header(json_content_type);
-            let _ = request.respond(resp);
+            respond(request, resp);
         }
         Some(SearchOutcome::SearchError { message, .. }) => {
             let body = serde_json::json!({"error": message}).to_string();
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(500))
                 .with_header(json_error_type);
-            let _ = request.respond(resp);
+            respond(request, resp);
         }
         Some(SearchOutcome::EmbedError { message, .. }) => {
             let body = serde_json::json!({"error": message}).to_string();
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(500))
                 .with_header(json_error_type);
-            let _ = request.respond(resp);
+            respond(request, resp);
         }
         None => {
             let body = r#"{"error":"worker unavailable"}"#;
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(500))
                 .with_header(json_error_type);
-            let _ = request.respond(resp);
+            respond(request, resp);
         }
     }
     Ok(())
@@ -196,13 +202,17 @@ mod tests {
     /// Start a shared test server (once) and return its port.
     fn test_port() -> u16 {
         *SERVER_PORT.get_or_init(|| {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = listener.local_addr().unwrap().port();
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test server port");
+            let port = listener
+                .local_addr()
+                .expect("read bound test server address")
+                .port();
             drop(listener);
 
             thread::spawn(move || {
-                let mut embedder = Embedder::new_local().unwrap();
-                let idx = Index::open_in_memory().unwrap();
+                let mut embedder = Embedder::new_local().expect("initialize local test embedder");
+                let idx = Index::open_in_memory().expect("open in-memory test index");
 
                 let texts = ["error handling in rust", "memory management", "HTTP server"];
                 let chunks: Vec<Chunk> = texts
@@ -216,8 +226,10 @@ mod tests {
                     })
                     .collect();
 
-                let embeddings: Vec<Vec<f32>> =
-                    texts.iter().map(|t| embedder.embed(t).unwrap()).collect();
+                let embeddings: Vec<Vec<f32>> = texts
+                    .iter()
+                    .map(|t| embedder.embed(t).expect("embed test fixture text"))
+                    .collect();
 
                 // Insert each file into the index
                 for (i, (chunk, emb)) in chunks.iter().zip(embeddings.iter()).enumerate() {
@@ -228,7 +240,7 @@ mod tests {
                         &[emb.clone()],
                         &[false],
                     )
-                    .unwrap();
+                    .expect("insert fixture chunk into test index");
                 }
 
                 // Create a dummy indexer (no files to index) for run_streaming
@@ -246,7 +258,7 @@ mod tests {
                     true,
                     "/test/root",
                 )
-                .unwrap();
+                .expect("run shared test HTTP server");
             });
 
             for _ in 0..50 {
@@ -260,19 +272,22 @@ mod tests {
     }
 
     fn http_request(method: &str, port: u16, path: &str) -> (u16, String, String) {
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to test server");
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
+            .expect("set test server read timeout");
         write!(
             stream,
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
-        .unwrap();
-        stream.flush().unwrap();
+        .expect("write HTTP request to test server");
+        stream.flush().expect("flush HTTP request");
 
         let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        stream
+            .read_to_string(&mut response)
+            .expect("read HTTP response from test server");
 
         let status_line = response.lines().next().unwrap_or("");
         let status_code: u16 = status_line
@@ -305,12 +320,24 @@ mod tests {
         let lines: Vec<&str> = body.lines().collect();
         assert!(!lines.is_empty(), "expected at least one result");
 
-        let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("parse first JSONL response line");
         assert_eq!(json["root"], "/test/root");
-        assert!(json["file"].as_str().unwrap().ends_with(".rs"));
-        assert!(json["score"].as_f64().unwrap() > 0.0);
-        assert!(!json["text"].as_str().unwrap().is_empty());
-        assert!(json["start_line"].as_u64().unwrap() >= 1);
+        assert!(json["file"]
+            .as_str()
+            .expect("response includes file path")
+            .ends_with(".rs"));
+        assert!(json["score"].as_f64().expect("response includes score") > 0.0);
+        assert!(!json["text"]
+            .as_str()
+            .expect("response includes matched text")
+            .is_empty());
+        assert!(
+            json["start_line"]
+                .as_u64()
+                .expect("response includes start_line")
+                >= 1
+        );
         assert!(json.get("end_line").is_some());
     }
 
