@@ -498,7 +498,7 @@ fn run() -> Result<bool> {
     let query = match &args.query {
         Some(q) => q.clone(),
         None if args.interactive => String::new(),
-        None if args.serve || args.index_only || args.stats => String::new(),
+        None if args.serve || args.index_only || args.stats || args.reindex => String::new(),
         None => return Ok(true),
     };
 
@@ -565,6 +565,10 @@ fn run() -> Result<bool> {
             stats.failed_chunk_count,
             stats.db_size_bytes,
         );
+        return Ok(true);
+    }
+
+    if args.reindex && args.query.is_none() {
         return Ok(true);
     }
 

@@ -293,6 +293,87 @@ fn test_skip_outside_root_flag_skips_file_outside_selected_root() {
 }
 
 #[test]
+fn test_reindex_without_query_repopulates_index() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn search_target() {}\n").unwrap();
+
+    let initial = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["search target", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        initial.status.success(),
+        "initial index failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+
+    let reindex = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--reindex")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        reindex.status.success(),
+        "reindex failed: {}",
+        String::from_utf8_lossy(&reindex.stderr)
+    );
+
+    let stats = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--stats")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        stats.status.success(),
+        "stats failed: {}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
+
+    let stderr = String::from_utf8(stats.stderr).unwrap();
+    assert!(
+        stderr.contains("  Files:  1"),
+        "expected repopulated index, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_reindex_with_query_repopulates_index_and_searches() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn search_target() {}\n").unwrap();
+
+    let initial = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["search target", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        initial.status.success(),
+        "initial index failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+
+    let reindex = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--reindex", "search target"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        reindex.status.success(),
+        "reindex search failed: {}",
+        String::from_utf8_lossy(&reindex.stderr)
+    );
+
+    let stdout = String::from_utf8(reindex.stdout).unwrap();
+    assert!(
+        stdout.contains("main.rs"),
+        "expected search results after reindex, got: {stdout}"
+    );
+}
+
+#[test]
 fn test_full_index_indexes_before_search() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
