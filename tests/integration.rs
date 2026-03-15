@@ -780,3 +780,37 @@ fn test_search_from_subdirectory_shows_relative_paths() {
         "path should be relative to cwd (src/), not project root, got: {stdout}"
     );
 }
+
+#[test]
+fn test_reindex_actually_indexes_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("hello.rs"), "fn hello_world() {}").unwrap();
+    std::fs::write(dir.path().join("goodbye.rs"), "fn goodbye_world() {}").unwrap();
+
+    // First, build an initial index
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Files:  2"),
+        "initial index should have 2 files, got: {stderr}"
+    );
+
+    // Now reindex — should rebuild and still have 2 files
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--reindex"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Files:  2"),
+        "reindex should report 2 files in stats, got: {stderr}"
+    );
+}
