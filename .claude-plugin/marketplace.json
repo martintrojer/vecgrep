@@ -1,0 +1,16 @@
+{
+  "name": "vecgrep",
+  "owner": {
+    "name": "martintrojer"
+  },
+  "plugins": [
+    {
+      "name": "vecgrep",
+      "description": "Semantic search guidance for vecgrep: searching, indexing, filtering, root scoping, and troubleshooting",
+      "author": {
+        "name": "martintrojer"
+      },
+      "source": "./"
+    }
+  ]
+}

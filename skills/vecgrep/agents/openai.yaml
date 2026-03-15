@@ -1,0 +1,4 @@
+interface:
+  display_name: "vecgrep"
+  short_description: "Guidance for using vecgrep well"
+  default_prompt: "Use $vecgrep to explain how to search, index, and troubleshoot vecgrep."

@@ -1,0 +1,8 @@
+{
+  "name": "vecgrep",
+  "version": "1.0.0",
+  "description": "Semantic search guidance for vecgrep: searching, indexing, filtering, root scoping, and troubleshooting",
+  "author": {
+    "name": "martintrojer"
+  }
+}

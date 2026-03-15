@@ -187,6 +187,28 @@ cargo install --path .
 
 The first build downloads the ONNX model (~90 MB) from HuggingFace and caches it locally. Subsequent builds reuse the cached model.
 
+### Install the AI skill
+
+This repo ships vecgrep guidance in two formats:
+
+- [`skills/vecgrep`](skills/vecgrep) for agents that support the [`npx skills`](https://github.com/vercel-labs/skills) installer, including Codex
+- a Claude Code plugin/marketplace package via [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json)
+
+Install the generic skill with:
+
+```bash
+npx skills add martintrojer/vecgrep
+```
+
+Install in Claude Code with:
+
+```text
+/plugin marketplace add martintrojer/vecgrep
+/plugin install vecgrep@vecgrep
+```
+
+After installation, restart your agent session so it picks up the new skill.
+
 ## Configuration
 
 Default values for CLI flags can be set in TOML config files. Two locations are checked, with this precedence:
