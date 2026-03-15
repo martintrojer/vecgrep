@@ -71,6 +71,7 @@ pub mod interactive {
         let mut last_search = Instant::now() - Duration::from_secs(1);
         let mut needs_search = true;
         let mut searching = false;
+        let mut active_request_id: Option<u64> = None;
         let mut search_error: Option<String> = None;
         let debounce = Duration::from_millis(300);
 
@@ -86,7 +87,7 @@ pub mod interactive {
 
         // Initial search
         if !query.is_empty() {
-            worker.search(&query, top_k, threshold);
+            active_request_id = Some(worker.search(&query, top_k, threshold));
             searching = true;
             needs_search = false;
         }
@@ -94,9 +95,15 @@ pub mod interactive {
         loop {
             // 1. Check for search results (non-blocking)
             if let Some(outcome) = worker.try_recv_results() {
+                if active_request_id != Some(outcome.request_id()) {
+                    continue;
+                }
                 searching = false;
                 match outcome {
-                    SearchOutcome::Results(new_results) => {
+                    SearchOutcome::Results {
+                        results: new_results,
+                        ..
+                    } => {
                         search_error = None;
                         results = new_results;
                         if !results.is_empty() {
@@ -111,8 +118,8 @@ pub mod interactive {
                             }
                         }
                     }
-                    SearchOutcome::EmbedError(msg) => {
-                        search_error = Some(msg);
+                    SearchOutcome::EmbedError { message, .. } => {
+                        search_error = Some(message);
                         results.clear();
                         list_state.select(None);
                     }
@@ -310,7 +317,7 @@ pub mod interactive {
             // 6. Debounced search
             if needs_search && !searching && last_search.elapsed() >= debounce && !query.is_empty()
             {
-                worker.search(&query, top_k, threshold);
+                active_request_id = Some(worker.search(&query, top_k, threshold));
                 searching = true;
                 needs_search = false;
                 last_selected = None;

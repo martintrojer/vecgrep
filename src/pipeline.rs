@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
@@ -200,6 +201,7 @@ const WORKER_BATCH_SIZE: usize = 2;
 
 enum WorkerRequest {
     Search {
+        request_id: u64,
         query: String,
         top_k: usize,
         threshold: f32,
@@ -209,8 +211,23 @@ enum WorkerRequest {
 
 #[derive(Debug)]
 pub enum SearchOutcome {
-    Results(Vec<SearchResult>),
-    EmbedError(String),
+    Results {
+        request_id: u64,
+        results: Vec<SearchResult>,
+    },
+    EmbedError {
+        request_id: u64,
+        message: String,
+    },
+}
+
+impl SearchOutcome {
+    pub fn request_id(&self) -> u64 {
+        match self {
+            SearchOutcome::Results { request_id, .. } => *request_id,
+            SearchOutcome::EmbedError { request_id, .. } => *request_id,
+        }
+    }
 }
 
 pub struct IndexProgress {
@@ -224,6 +241,7 @@ pub struct EmbedWorker {
     req_tx: mpsc::Sender<WorkerRequest>,
     result_rx: mpsc::Receiver<SearchOutcome>,
     progress_rx: mpsc::Receiver<IndexProgress>,
+    next_request_id: AtomicU64,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -244,19 +262,23 @@ impl EmbedWorker {
             req_tx,
             result_rx,
             progress_rx,
+            next_request_id: AtomicU64::new(1),
             handle: Some(handle),
         }
     }
 
     /// Send a search request to the worker.
-    pub fn search(&self, query: &str, top_k: usize, threshold: f32) {
+    pub fn search(&self, query: &str, top_k: usize, threshold: f32) -> u64 {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         self.req_tx
             .send(WorkerRequest::Search {
+                request_id,
                 query: query.to_string(),
                 top_k,
                 threshold,
             })
             .ok();
+        request_id
     }
 
     /// Non-blocking check for search results.
@@ -267,6 +289,16 @@ impl EmbedWorker {
     /// Blocking wait for search results.
     pub fn recv_results(&self) -> Option<SearchOutcome> {
         self.result_rx.recv().ok()
+    }
+
+    /// Blocking wait for the result matching `request_id`, discarding older ones.
+    pub fn recv_result_for(&self, request_id: u64) -> Option<SearchOutcome> {
+        loop {
+            let outcome = self.result_rx.recv().ok()?;
+            if outcome.request_id() == request_id {
+                return Some(outcome);
+            }
+        }
     }
 
     /// Drain all pending progress messages, returning the latest.
@@ -291,14 +323,21 @@ impl Drop for EmbedWorker {
 fn handle_search(
     embedder: &mut Embedder,
     idx: &Index,
+    request_id: u64,
     query: &str,
     top_k: usize,
     threshold: f32,
     result_tx: &mpsc::Sender<SearchOutcome>,
 ) {
     let outcome = match embedder.embed(query) {
-        Ok(emb) => SearchOutcome::Results(idx.search(&emb, top_k, threshold).unwrap_or_default()),
-        Err(e) => SearchOutcome::EmbedError(format!("{e:#}")),
+        Ok(emb) => SearchOutcome::Results {
+            request_id,
+            results: idx.search(&emb, top_k, threshold).unwrap_or_default(),
+        },
+        Err(e) => SearchOutcome::EmbedError {
+            request_id,
+            message: format!("{e:#}"),
+        },
     };
     result_tx.send(outcome).ok();
 }
@@ -316,10 +355,19 @@ fn worker_loop(
         loop {
             match req_rx.try_recv() {
                 Ok(WorkerRequest::Search {
+                    request_id,
                     query,
                     top_k,
                     threshold,
-                }) => handle_search(&mut embedder, &idx, &query, top_k, threshold, &result_tx),
+                }) => handle_search(
+                    &mut embedder,
+                    &idx,
+                    request_id,
+                    &query,
+                    top_k,
+                    threshold,
+                    &result_tx,
+                ),
                 Ok(WorkerRequest::Shutdown) => return,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -346,10 +394,19 @@ fn worker_loop(
             // No more indexing, wait for requests
             match req_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(WorkerRequest::Search {
+                    request_id,
                     query,
                     top_k,
                     threshold,
-                }) => handle_search(&mut embedder, &idx, &query, top_k, threshold, &result_tx),
+                }) => handle_search(
+                    &mut embedder,
+                    &idx,
+                    request_id,
+                    &query,
+                    top_k,
+                    threshold,
+                    &result_tx,
+                ),
                 Ok(WorkerRequest::Shutdown) => return,
                 Err(_) => {}
             }
@@ -703,14 +760,16 @@ mod tests {
     fn test_worker_search_after_indexing_done() {
         let worker = worker_with_data(&["error handling in rust", "memory management"]);
 
-        worker.search("error handling", 5, 0.0);
-        let outcome = worker.recv_results().unwrap();
+        let request_id = worker.search("error handling", 5, 0.0);
+        let outcome = worker.recv_result_for(request_id).unwrap();
         match outcome {
-            SearchOutcome::Results(results) => {
+            SearchOutcome::Results { results, .. } => {
                 assert!(!results.is_empty(), "expected search results");
                 assert!(results[0].score > 0.0);
             }
-            SearchOutcome::EmbedError(e) => panic!("unexpected embed error: {e}"),
+            SearchOutcome::EmbedError { message, .. } => {
+                panic!("unexpected embed error: {message}")
+            }
         }
     }
 
@@ -745,14 +804,16 @@ mod tests {
         let worker = EmbedWorker::spawn(embedder, idx, indexer);
 
         // Search should work even while indexing is happening
-        worker.search("existing content", 5, 0.0);
-        let outcome = worker.recv_results().unwrap();
+        let request_id = worker.search("existing content", 5, 0.0);
+        let outcome = worker.recv_result_for(request_id).unwrap();
         match outcome {
-            SearchOutcome::Results(results) => {
+            SearchOutcome::Results { results, .. } => {
                 assert!(!results.is_empty(), "search should work during indexing");
                 assert_eq!(results[0].chunk.file_path, "existing.rs");
             }
-            SearchOutcome::EmbedError(e) => panic!("unexpected embed error: {e}"),
+            SearchOutcome::EmbedError { message, .. } => {
+                panic!("unexpected embed error: {message}")
+            }
         }
 
         drop(tx); // let indexing finish
@@ -800,9 +861,9 @@ mod tests {
         let worker = worker_with_data(&["test content"]);
 
         // Verify worker is alive by doing a search
-        worker.search("test", 1, 0.0);
-        match worker.recv_results() {
-            Some(SearchOutcome::Results(_)) => {}
+        let request_id = worker.search("test", 1, 0.0);
+        match worker.recv_result_for(request_id) {
+            Some(SearchOutcome::Results { .. }) => {}
             other => panic!("expected Results, got: {other:?}"),
         }
 

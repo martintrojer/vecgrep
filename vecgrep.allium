@@ -1,0 +1,552 @@
+-- allium: 2
+-- vecgrep.allium
+--
+-- Scope: User-visible behaviour of vecgrep.
+-- Includes:
+--   - one project root per invocation
+--   - path admission against that root
+--   - config resolution from CLI/project/global/defaults
+--   - index lifecycle for CLI, TUI, and server modes
+--   - search lifecycle and result/output behaviour
+-- Excludes:
+--   - embedding internals, storage details, threading, terminal layout
+--   - exact chunking/tokenization algorithms
+
+external entity Operator {
+    id: String
+}
+
+external entity Client {
+    id: String
+}
+
+enum RootMarker { git | hg | jj | vecgrep | none }
+enum Mode { cli | interactive | serve }
+enum OutputMode { pretty | json | files | count | stats | root_only }
+enum PathKind { file | directory }
+enum PathStatus { pending | admitted | skipped | rejected }
+enum EmbedderSource { local | remote }
+enum IndexStatus { empty | indexing | ready | aborted }
+enum SearchSource { cli | interactive | serve | http }
+enum SearchStatus { pending | completed | failed }
+enum HttpMethod { GET | other }
+enum HttpBodyKind { ndjson | json }
+enum StaleCleanupScope { all | walked_directory_prefix | none }
+
+value ConfigValues {
+    top_k: Integer?
+    threshold: Decimal?
+    chunk_size: Integer?
+    chunk_overlap: Integer?
+    full_index: Boolean?
+    quiet: Boolean?
+    index_warn_threshold: Integer?
+    embedder_source: EmbedderSource?
+    embedder_model: String?
+}
+
+value IndexStats {
+    files: Integer
+    chunks: Integer
+    holes: Integer
+    db_size_bytes: Integer
+}
+
+entity ProjectRoot {
+    path: Path
+    marker: RootMarker
+    index_status: IndexStatus
+    model_name: String?
+    chunk_size: Integer?
+    chunk_overlap: Integer?
+    file_count: Integer
+    chunk_count: Integer
+    hole_count: Integer
+}
+
+entity Invocation {
+    operator: Operator
+    cwd: Path
+    mode: Mode
+    output_mode: OutputMode
+    query: String?
+    index_only: Boolean
+    reindex_requested: Boolean
+    clear_cache_requested: Boolean
+    skip_outside_root: Boolean
+    cwd_root_candidate: ProjectRoot?
+    single_path_root_candidate: ProjectRoot?
+    selected_root: ProjectRoot?
+    cli_config: ConfigValues?
+    project_config: ConfigValues?
+    global_config: ConfigValues?
+    resolved_config: ResolvedConfig with invocation = this
+    paths: SearchPath with invocation = this
+    admitted_paths: SearchPath with invocation = this and status = admitted
+    searches: Search with invocation = this
+}
+
+entity ResolvedConfig {
+    invocation: Invocation
+    top_k: Integer
+    threshold: Decimal
+    chunk_size: Integer
+    chunk_overlap: Integer
+    full_index: Boolean
+    quiet: Boolean
+    index_warn_threshold: Integer
+    embedder_source: EmbedderSource
+    embedder_model: String
+    server_default_top_k: Integer
+    server_default_threshold: Decimal
+}
+
+entity SearchPath {
+    invocation: Invocation
+    path: Path
+    kind: PathKind
+    status: PathStatus
+}
+
+entity IndexRun {
+    invocation: Invocation
+    root: ProjectRoot
+    blocking: Boolean
+    stale_cleanup_scope: StaleCleanupScope
+    status: pending | warned | completed | aborted
+}
+
+entity Search {
+    invocation: Invocation?
+    request_id: String
+    root: ProjectRoot
+    source: SearchSource
+    query: String
+    top_k: Integer
+    threshold: Decimal
+    status: SearchStatus
+    results: SearchResult with search = this
+}
+
+entity SearchResult {
+    search: Search
+    file: Path
+    start_line: Integer
+    end_line: Integer
+    score: Decimal
+    text: String
+}
+
+entity HttpRequest {
+    request_id: String
+    client: Client
+    root: ProjectRoot
+    method: HttpMethod
+    path: String
+    url_valid: Boolean
+    query: String?
+    top_k: Integer?
+    threshold: Decimal?
+}
+
+entity HttpResponse {
+    request: HttpRequest
+    status: Integer
+    body: HttpBodyKind
+}
+
+rule PreferCurrentProjectRoot {
+    when: invocation: Invocation.created
+    requires: invocation.selected_root = null
+    requires: invocation.cwd_root_candidate != null
+    ensures: invocation.selected_root = invocation.cwd_root_candidate
+}
+
+rule OtherwiseUseSingleDirectoryCandidate {
+    when: invocation: Invocation.created
+    requires: invocation.selected_root = null
+    requires: invocation.cwd_root_candidate = null
+    requires: invocation.single_path_root_candidate != null
+    ensures: invocation.selected_root = invocation.single_path_root_candidate
+}
+
+rule OtherwiseUseCurrentDirectory {
+    when: invocation: Invocation.created
+    requires: invocation.selected_root = null
+    requires: invocation.cwd_root_candidate = null
+    requires: invocation.single_path_root_candidate = null
+    ensures: ProjectRoot.created(
+        path: invocation.cwd,
+        marker: none,
+        index_status: empty,
+        file_count: 0,
+        chunk_count: 0,
+        hole_count: 0
+    )
+    ensures: invocation.selected_root = ProjectRoot{path: invocation.cwd}
+}
+
+rule RejectOutsideRootPaths {
+    when: path: SearchPath.created
+    requires: path.invocation.selected_root != null
+    requires: PathOutsideRoot(path.path, path.invocation.selected_root.path)
+    requires: not path.invocation.skip_outside_root
+    ensures: path.status = rejected
+    ensures: InvocationFailed(invocation: path.invocation, reason: outside_selected_root)
+}
+
+rule SkipOutsideRootPaths {
+    when: path: SearchPath.created
+    requires: path.invocation.selected_root != null
+    requires: PathOutsideRoot(path.path, path.invocation.selected_root.path)
+    requires: path.invocation.skip_outside_root
+    ensures: path.status = skipped
+}
+
+rule AdmitInsideRootPaths {
+    when: path: SearchPath.created
+    requires: path.invocation.selected_root != null
+    requires: not PathOutsideRoot(path.path, path.invocation.selected_root.path)
+    ensures: path.status = admitted
+}
+
+rule FailIfNoPathsRemain {
+    when: invocation: Invocation.created
+    requires: invocation.paths.count > 0
+    requires: invocation.admitted_paths.count = 0
+    ensures: InvocationFailed(invocation: invocation, reason: all_paths_outside_selected_root)
+}
+
+rule ResolveConfig {
+    when: invocation: Invocation.selected_root becomes not null
+    ensures: ResolvedConfig.created(
+        invocation: invocation,
+        top_k: invocation.cli_config?.top_k ?? invocation.project_config?.top_k ?? invocation.global_config?.top_k ?? 10,
+        threshold: invocation.cli_config?.threshold ?? invocation.project_config?.threshold ?? invocation.global_config?.threshold ?? 0.3,
+        chunk_size: invocation.cli_config?.chunk_size ?? invocation.project_config?.chunk_size ?? invocation.global_config?.chunk_size ?? 500,
+        chunk_overlap: invocation.cli_config?.chunk_overlap ?? invocation.project_config?.chunk_overlap ?? invocation.global_config?.chunk_overlap ?? 100,
+        full_index: invocation.cli_config?.full_index ?? invocation.project_config?.full_index ?? invocation.global_config?.full_index ?? false,
+        quiet: invocation.cli_config?.quiet ?? invocation.project_config?.quiet ?? invocation.global_config?.quiet ?? false,
+        index_warn_threshold: invocation.cli_config?.index_warn_threshold ?? invocation.project_config?.index_warn_threshold ?? invocation.global_config?.index_warn_threshold ?? 1000,
+        embedder_source: invocation.cli_config?.embedder_source ?? invocation.project_config?.embedder_source ?? invocation.global_config?.embedder_source ?? local,
+        embedder_model: invocation.cli_config?.embedder_model ?? invocation.project_config?.embedder_model ?? invocation.global_config?.embedder_model ?? "all-MiniLM-L6-v2",
+        server_default_top_k: invocation.cli_config?.top_k ?? invocation.project_config?.top_k ?? invocation.global_config?.top_k ?? 10,
+        server_default_threshold: invocation.cli_config?.threshold ?? invocation.project_config?.threshold ?? invocation.global_config?.threshold ?? 0.3
+    )
+}
+
+rule ClearCacheResetsIndex {
+    when: invocation: Invocation.clear_cache_requested becomes true
+    requires: invocation.selected_root != null
+    ensures: invocation.selected_root.index_status = empty
+    ensures: invocation.selected_root.model_name = null
+    ensures: invocation.selected_root.chunk_size = null
+    ensures: invocation.selected_root.chunk_overlap = null
+    ensures: invocation.selected_root.file_count = 0
+    ensures: invocation.selected_root.chunk_count = 0
+    ensures: invocation.selected_root.hole_count = 0
+}
+
+rule ReindexOrConfigChangeRebuildsIndex {
+    when: invocation: Invocation.selected_root becomes not null
+    requires:
+        invocation.reindex_requested
+        or invocation.selected_root.model_name != null and (
+            invocation.selected_root.model_name != invocation.resolved_config.embedder_model
+            or invocation.selected_root.chunk_size != invocation.resolved_config.chunk_size
+            or invocation.selected_root.chunk_overlap != invocation.resolved_config.chunk_overlap
+        )
+    ensures: invocation.selected_root.index_status = indexing
+    ensures: invocation.selected_root.file_count = 0
+    ensures: invocation.selected_root.chunk_count = 0
+    ensures: invocation.selected_root.hole_count = 0
+}
+
+rule BlockingModesStartBlockingIndexRun {
+    when: invocation: Invocation.query becomes not null
+    requires:
+        invocation.mode = cli
+        or invocation.index_only
+        or invocation.resolved_config.full_index
+    ensures: IndexRun.created(
+        invocation: invocation,
+        root: invocation.selected_root,
+        blocking: true,
+        stale_cleanup_scope:
+            if invocation.admitted_paths.count = 1:
+                walked_directory_prefix
+            else:
+                none,
+        status: pending
+    )
+    ensures: invocation.selected_root.index_status = indexing
+}
+
+rule ProgressiveModesContinueWhileIndexing {
+    when: invocation: Invocation.query becomes not null
+    requires: invocation.mode in {interactive, serve}
+    requires: not invocation.resolved_config.full_index
+    ensures: invocation.selected_root.index_status = indexing
+}
+
+rule BlockingIndexMayWarnAndAbort {
+    when: run: IndexRun.created
+    requires: run.blocking
+    requires: run.invocation.resolved_config.index_warn_threshold > 0
+    ensures:
+        if UserDeclinesLargeIndex(run.invocation):
+            run.status = aborted
+            run.root.index_status = aborted
+            IndexingAborted(invocation: run.invocation)
+        else:
+            run.status = warned
+}
+
+rule BlockingIndexCompletesAfterWarning {
+    when: run: IndexRun.status becomes warned
+    ensures: run.status = completed
+    ensures: run.root.index_status = ready
+}
+
+rule BlockingIndexCompletesWithoutWarning {
+    when: run: IndexRun.created
+    requires: run.blocking
+    requires: run.invocation.resolved_config.index_warn_threshold = 0
+    ensures: run.status = completed
+    ensures: run.root.index_status = ready
+}
+
+rule SingleDirectoryWalkRemovesStaleEntries {
+    when: run: IndexRun.status becomes completed
+    requires: run.stale_cleanup_scope = walked_directory_prefix
+    ensures: StaleEntriesRemoved(run.root, scope: walked_directory_prefix)
+}
+
+rule MultiPathAndFileWalksPreserveOtherEntries {
+    when: run: IndexRun.status becomes completed
+    requires: run.stale_cleanup_scope = none
+    ensures: StaleEntriesOutsideWalkRemain(run.root)
+}
+
+rule IndexOnlyStopsAfterIndexing {
+    when: run: IndexRun.status becomes completed
+    requires: run.invocation.index_only
+    ensures: IndexBuilt(invocation: run.invocation)
+}
+
+rule CliSearchStartsAfterIndexing {
+    when: run: IndexRun.status becomes completed
+    requires: run.invocation.mode = cli
+    requires: run.invocation.query != null
+    requires: not run.invocation.index_only
+    ensures: Search.created(
+        invocation: run.invocation,
+        request_id: NewRequestId(run.invocation),
+        root: run.root,
+        source: cli,
+        query: run.invocation.query,
+        top_k: run.invocation.resolved_config.top_k,
+        threshold: run.invocation.resolved_config.threshold,
+        status: pending
+    )
+}
+
+rule InteractiveSearchStartsOnQuery {
+    when: invocation: Invocation.query becomes not null
+    requires: invocation.mode = interactive
+    requires: not invocation.resolved_config.full_index
+    ensures: Search.created(
+        invocation: invocation,
+        request_id: NewRequestId(invocation),
+        root: invocation.selected_root,
+        source: interactive,
+        query: invocation.query,
+        top_k: invocation.resolved_config.top_k,
+        threshold: invocation.resolved_config.threshold,
+        status: pending
+    )
+}
+
+rule ServerSearchStartsOnQuery {
+    when: invocation: Invocation.query becomes not null
+    requires: invocation.mode = serve
+    requires: not invocation.resolved_config.full_index
+    ensures: Search.created(
+        invocation: invocation,
+        request_id: NewRequestId(invocation),
+        root: invocation.selected_root,
+        source: serve,
+        query: invocation.query,
+        top_k: invocation.resolved_config.top_k,
+        threshold: invocation.resolved_config.threshold,
+        status: pending
+    )
+}
+
+rule SearchCompletesOrFails {
+    when: search: Search.created
+    ensures:
+        if EmbeddingFails(search):
+            search.status = failed
+        else:
+            search.status = completed
+            SearchResultsReady(search: search)
+}
+
+rule ShowStats {
+    when: invocation: Invocation.output_mode becomes stats
+    requires: invocation.selected_root != null
+    ensures: StatsRendered(
+        invocation: invocation,
+        stats: IndexStats(
+            files: invocation.selected_root.file_count,
+            chunks: invocation.selected_root.chunk_count,
+            holes: invocation.selected_root.hole_count,
+            db_size_bytes: CacheSizeBytes(invocation.selected_root)
+        )
+    )
+}
+
+rule ShowRoot {
+    when: invocation: Invocation.output_mode becomes root_only
+    requires: invocation.selected_root != null
+    ensures: RootPrinted(invocation: invocation, root: invocation.selected_root.path)
+}
+
+rule JsonOutputUsesRootRelativePaths {
+    when: search: Search.status becomes completed
+    requires: search.invocation != null
+    requires: search.invocation.output_mode = json
+    ensures: JsonLinesRendered(search: search)
+    ensures: JsonIncludesRootField(search: search)
+}
+
+rule TerminalOutputUsesCwdRelativePaths {
+    when: search: Search.status becomes completed
+    requires: search.invocation != null
+    requires: search.invocation.output_mode in {pretty, files, count}
+    ensures: TerminalResultsRendered(search: search)
+    ensures: TerminalPathsAreRelativeToCwdWhenNeeded(search: search)
+}
+
+rule HttpRejectsNonGetRequests {
+    when: request: HttpRequest.created
+    requires: request.method != GET
+    ensures: HttpResponse.created(request: request, status: 405, body: json)
+}
+
+rule HttpRejectsInvalidUrls {
+    when: request: HttpRequest.created
+    requires: request.method = GET
+    requires: not request.url_valid
+    ensures: HttpResponse.created(request: request, status: 400, body: json)
+}
+
+rule HttpRejectsUnknownPaths {
+    when: request: HttpRequest.created
+    requires: request.method = GET
+    requires: request.url_valid
+    requires: request.path != "/search"
+    ensures: HttpResponse.created(request: request, status: 404, body: json)
+}
+
+rule HttpRequiresQuery {
+    when: request: HttpRequest.created
+    requires: request.method = GET
+    requires: request.url_valid
+    requires: request.path = "/search"
+    requires: request.query = null or request.query = ""
+    ensures: HttpResponse.created(request: request, status: 400, body: json)
+}
+
+rule HttpSearchStarts {
+    when: request: HttpRequest.created
+    requires: request.method = GET
+    requires: request.url_valid
+    requires: request.path = "/search"
+    requires: request.query != null and request.query != ""
+    ensures: Search.created(
+        request_id: request.request_id,
+        root: request.root,
+        source: http,
+        query: request.query,
+        top_k: request.top_k ?? ServerDefaultTopK(request.root),
+        threshold: request.threshold ?? ServerDefaultThreshold(request.root),
+        status: pending
+    )
+}
+
+rule HttpSearchReturnsResults {
+    when: search: Search.status becomes completed
+    requires: search.source = http
+    requires: http: HttpRequest.request_id = search.request_id
+    ensures: HttpResponse.created(request: http, status: 200, body: ndjson)
+}
+
+rule HttpSearchReturnsFailure {
+    when: search: Search.status becomes failed
+    requires: search.source = http
+    requires: http: HttpRequest.request_id = search.request_id
+    ensures: HttpResponse.created(request: http, status: 500, body: json)
+}
+
+surface CommandLine {
+    facing operator: Operator
+
+    context invocation: Invocation where mode = cli
+
+    exposes:
+        invocation.selected_root.path
+        invocation.output_mode
+        invocation.resolved_config.top_k
+        invocation.resolved_config.threshold
+        invocation.selected_root.index_status
+        invocation.selected_root.chunk_count
+
+    provides:
+        RunSearch(operator, invocation)
+            when invocation.query != null and not invocation.index_only and invocation.output_mode != root_only
+        BuildIndex(operator, invocation)
+            when invocation.index_only
+        ShowStats(operator, invocation)
+            when invocation.output_mode = stats
+        ShowRoot(operator, invocation)
+            when invocation.output_mode = root_only
+        Reindex(operator, invocation)
+            when invocation.reindex_requested
+        ClearCache(operator, invocation)
+            when invocation.clear_cache_requested
+}
+
+surface InteractiveSearch {
+    facing operator: Operator
+
+    context invocation: Invocation where mode = interactive
+
+    exposes:
+        invocation.query
+        invocation.selected_root.path
+        invocation.selected_root.index_status
+        invocation.selected_root.chunk_count
+        invocation.searches
+
+    provides:
+        UpdateQuery(operator, invocation, query)
+        MoveSelection(operator, invocation)
+        TogglePreview(operator, invocation)
+        OpenSelectedResult(operator, invocation)
+}
+
+surface SearchServer {
+    facing client: Client
+
+    context root: ProjectRoot
+
+    exposes:
+        root.path
+        root.index_status
+        root.chunk_count
+
+    provides:
+        HttpSearch(client, root, request_id, query, top_k?, threshold?)
+}

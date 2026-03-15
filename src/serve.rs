@@ -94,9 +94,9 @@ fn handle_request(
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(default_threshold);
 
-    worker.search(&q, top_k, threshold);
-    match worker.recv_results() {
-        Some(SearchOutcome::Results(results)) => {
+    let request_id = worker.search(&q, top_k, threshold);
+    match worker.recv_result_for(request_id) {
+        Some(SearchOutcome::Results { results, .. }) => {
             let mut body = String::new();
             for result in &results {
                 let json = format_json_result(result, root);
@@ -106,8 +106,8 @@ fn handle_request(
             let resp = Response::from_string(body).with_header(json_content_type);
             let _ = request.respond(resp);
         }
-        Some(SearchOutcome::EmbedError(msg)) => {
-            let body = serde_json::json!({"error": msg}).to_string();
+        Some(SearchOutcome::EmbedError { message, .. }) => {
+            let body = serde_json::json!({"error": message}).to_string();
             let resp = Response::from_string(body)
                 .with_status_code(StatusCode(500))
                 .with_header(json_error_type);
