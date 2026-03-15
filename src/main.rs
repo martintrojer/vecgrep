@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -238,6 +238,8 @@ enum RunMode {
     IndexOnly,
 }
 
+type WalkerHandle = std::thread::JoinHandle<anyhow::Result<usize>>;
+
 struct RuntimeConfig {
     top_k: usize,
     threshold: f32,
@@ -249,6 +251,14 @@ struct RuntimeConfig {
     embedder_url: Option<String>,
     embedder_model: Option<String>,
     port: Option<u16>,
+}
+
+struct ExecutionContext {
+    embedder: Embedder,
+    idx: Index,
+    indexer: pipeline::StreamingIndexer,
+    walker_handle: Option<WalkerHandle>,
+    root: String,
 }
 
 fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
@@ -363,6 +373,120 @@ fn build_runtime_config(args: &Args) -> RuntimeConfig {
     }
 }
 
+fn initialize_embedder(runtime: &mut RuntimeConfig) -> Result<Embedder> {
+    let quiet = runtime.quiet;
+    let embedder = if let (Some(ref url), Some(ref model)) =
+        (&runtime.embedder_url, &runtime.embedder_model)
+    {
+        status!(quiet, "Using external embedder: {} ({})", url, model);
+        let mut embedder = Embedder::new_remote(url, model);
+        embedder
+            .embed("probe")
+            .context("Failed to connect to external embedder")?;
+        status!(quiet, "Embedding dimension: {}", embedder.embedding_dim());
+        embedder
+    } else {
+        if !quiet {
+            eprint!("Loading model...");
+            std::io::stderr().flush().ok();
+        }
+        let embedder = Embedder::new_local().context("Failed to initialize embedder")?;
+        if !quiet {
+            eprintln!(" done.");
+        }
+        embedder
+    };
+
+    let original_chunk_size = runtime.chunk_size;
+    runtime.chunk_size = capped_chunk_size(runtime.chunk_size, embedder.context_tokens());
+    if runtime.chunk_size < original_chunk_size {
+        status!(
+            quiet,
+            "Reducing chunk_size from {} to {} (model context limit)",
+            original_chunk_size,
+            runtime.chunk_size
+        );
+    }
+
+    Ok(embedder)
+}
+
+fn prepare_index(
+    project_root: &Path,
+    embedder: &Embedder,
+    runtime: &RuntimeConfig,
+    reindex: bool,
+) -> Result<Index> {
+    let idx = Index::open(project_root)?;
+    let config = IndexConfig {
+        model_name: embedder.model_name().to_string(),
+        embedding_dim: embedder.embedding_dim(),
+        chunk_size: runtime.chunk_size,
+        chunk_overlap: runtime.chunk_overlap,
+    };
+
+    let config_valid = idx.check_config(&config)?;
+    if !config_valid || reindex {
+        if !config_valid {
+            status!(runtime.quiet, "Index configuration changed, rebuilding...");
+        }
+        idx.rebuild_for_config(&config)?;
+    } else {
+        idx.set_config(&config)?;
+    }
+
+    Ok(idx)
+}
+
+fn build_walk_options(args: &Args) -> walker::WalkOptions {
+    walker::WalkOptions {
+        file_types: args.file_type.clone(),
+        file_types_not: args.file_type_not.clone(),
+        globs: args.glob.clone(),
+        ignore_files: args.ignore_file.clone(),
+        hidden: args.hidden,
+        follow: args.follow,
+        no_ignore: args.no_ignore,
+        max_depth: args.max_depth,
+    }
+}
+
+fn prepare_execution(
+    args: &Args,
+    runtime: &mut RuntimeConfig,
+    path_plan: &PathPlan,
+) -> Result<ExecutionContext> {
+    let embedder = initialize_embedder(runtime)?;
+    let idx = prepare_index(&path_plan.project_root, &embedder, runtime, args.reindex)?;
+
+    let batch_size = 32;
+    let walk_opts = build_walk_options(args);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(batch_size * 2);
+    let walk_paths = args.paths.clone();
+    let stream_progress = Arc::new(walker::StreamProgress::new());
+    let walker_progress = Arc::clone(&stream_progress);
+    let walker_handle = std::thread::spawn(move || {
+        walker::walk_paths_streaming_with_progress(&walk_paths, &walk_opts, tx, walker_progress)
+    });
+
+    let indexer = pipeline::StreamingIndexer::new(
+        rx,
+        runtime.chunk_size,
+        runtime.chunk_overlap,
+        batch_size,
+        &path_plan.cwd_suffix,
+        Some(stream_progress),
+    );
+
+    Ok(ExecutionContext {
+        embedder,
+        idx,
+        indexer,
+        walker_handle: Some(walker_handle),
+        root: path_plan.project_root_canon.to_string_lossy().to_string(),
+    })
+}
+
 fn print_index_stats(idx: &Index) -> Result<()> {
     let stats = idx.stats()?;
     output::print_stats(
@@ -383,7 +507,7 @@ fn run_serve_mode(
     threshold: f32,
     quiet: bool,
     root: &str,
-    walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
+    walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<bool> {
     serve::run_streaming(embedder, idx, indexer, port, top_k, threshold, quiet, root)?;
     if let Some(h) = walker_handle.take() {
@@ -400,7 +524,7 @@ fn run_interactive_mode(
     top_k: usize,
     threshold: f32,
     cwd_suffix: &Path,
-    walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
+    walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<bool> {
     tui::interactive::run_streaming(embedder, idx, indexer, query, top_k, threshold, cwd_suffix)?;
     if let Some(h) = walker_handle.take() {
@@ -576,94 +700,14 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    // Initialize embedder
-    let mut embedder =
-        if let (Some(ref url), Some(ref model)) = (&runtime.embedder_url, &runtime.embedder_model) {
-            status!(quiet, "Using external embedder: {} ({})", url, model);
-            let mut e = Embedder::new_remote(url, model);
-            // Probe to discover embedding dimension before building config
-            e.embed("probe")
-                .context("Failed to connect to external embedder")?;
-            status!(quiet, "Embedding dimension: {}", e.embedding_dim());
-            e
-        } else {
-            if !quiet {
-                eprint!("Loading model...");
-                std::io::stderr().flush().ok();
-            }
-            let e = Embedder::new_local().context("Failed to initialize embedder")?;
-            if !quiet {
-                eprintln!(" done.");
-            }
-            e
-        };
-
-    let original_chunk_size = runtime.chunk_size;
-    runtime.chunk_size = capped_chunk_size(runtime.chunk_size, embedder.context_tokens());
-    if runtime.chunk_size < original_chunk_size {
-        status!(
-            quiet,
-            "Reducing chunk_size from {} to {} (model context limit)",
-            original_chunk_size,
-            runtime.chunk_size
-        );
-    }
-
-    // Open or create index
-    let idx = Index::open(&path_plan.project_root)?;
-
-    let config = IndexConfig {
-        model_name: embedder.model_name().to_string(),
-        embedding_dim: embedder.embedding_dim(),
-        chunk_size: runtime.chunk_size,
-        chunk_overlap: runtime.chunk_overlap,
-    };
-
-    // Check if config changed
-    let config_valid = idx.check_config(&config)?;
-    if !config_valid || args.reindex {
-        if !config_valid {
-            status!(quiet, "Index configuration changed, rebuilding...");
-        }
-        idx.rebuild_for_config(&config)?;
-    } else {
-        idx.set_config(&config)?;
-    }
-
-    // Stream files from walker thread through a channel
-    let walk_opts = walker::WalkOptions {
-        file_types: args.file_type.clone(),
-        file_types_not: args.file_type_not.clone(),
-        globs: args.glob.clone(),
-        ignore_files: args.ignore_file.clone(),
-        hidden: args.hidden,
-        follow: args.follow,
-        no_ignore: args.no_ignore,
-        max_depth: args.max_depth,
-    };
-
-    let batch_size = 32;
-    // 2× batch_size so the walker stays ahead of the embedder — keeps the
-    // model fed even on slow I/O (NFS, spinning disks, etc.).
-    let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(batch_size * 2);
-    let walk_paths = args.paths.clone();
-    let stream_progress = Arc::new(walker::StreamProgress::new());
-    let walker_progress = Arc::clone(&stream_progress);
-    let walker_join_handle = std::thread::spawn(move || {
-        walker::walk_paths_streaming_with_progress(&walk_paths, &walk_opts, tx, walker_progress)
-    });
-
     let threshold = runtime.index_warn_threshold;
-    let root_str = path_plan.project_root_canon.to_string_lossy().to_string();
-
-    let indexer = pipeline::StreamingIndexer::new(
-        rx,
-        runtime.chunk_size,
-        runtime.chunk_overlap,
-        batch_size,
-        &path_plan.cwd_suffix,
-        Some(stream_progress),
-    );
+    let ExecutionContext {
+        mut embedder,
+        idx,
+        mut indexer,
+        mut walker_handle,
+        root,
+    } = prepare_execution(&args, &mut runtime, &path_plan)?;
 
     let query = resolve_query(&args)?;
     let run_mode = determine_run_mode(&args);
@@ -671,8 +715,6 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    let mut indexer = indexer;
-    let mut walker_handle = Some(walker_join_handle);
     let mut progress_reporter =
         (!quiet && std::io::stderr().is_terminal()).then(CliProgressReporter::new);
 
@@ -754,7 +796,7 @@ fn run() -> Result<bool> {
             runtime.top_k,
             runtime.threshold,
             quiet,
-            &root_str,
+            &root,
             &mut walker_handle,
         );
     }
@@ -780,7 +822,7 @@ fn run() -> Result<bool> {
 
     let results = idx.search(&query_embedding, runtime.top_k, runtime.threshold)?;
 
-    let found = render_cli_results(results, &args, color_choice, &path_plan.cwd_suffix, &root_str)?;
+    let found = render_cli_results(results, &args, color_choice, &path_plan.cwd_suffix, &root)?;
     if !found {
         status!(quiet, "No results found.");
     }
@@ -815,7 +857,7 @@ fn finish_indexing(
     idx: &Index,
     stale_removal_scope: &StaleRemovalScope,
     quiet: bool,
-    walker_handle: &mut Option<std::thread::JoinHandle<anyhow::Result<usize>>>,
+    walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<()> {
     if let Some(handle) = walker_handle.take() {
         match handle.join() {
