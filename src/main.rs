@@ -253,6 +253,20 @@ struct RuntimeConfig {
     port: Option<u16>,
 }
 
+#[derive(Clone, Copy)]
+struct SearchConfig {
+    top_k: usize,
+    threshold: f32,
+}
+
+#[derive(Clone, Copy)]
+struct CliOutputContext<'a> {
+    color_choice: termcolor::ColorChoice,
+    cwd_suffix: &'a Path,
+    quiet: bool,
+    root: &'a str,
+}
+
 struct Invocation {
     args: Args,
     path_plan: PathPlan,
@@ -379,6 +393,13 @@ fn build_runtime_config(args: &Args) -> RuntimeConfig {
         embedder_url: args.embedder_url.clone(),
         embedder_model: args.embedder_model.clone(),
         port: args.port,
+    }
+}
+
+fn search_config(runtime: &RuntimeConfig) -> SearchConfig {
+    SearchConfig {
+        top_k: runtime.top_k,
+        threshold: runtime.threshold,
     }
 }
 
@@ -600,13 +621,20 @@ fn run_serve_mode(
     idx: Index,
     indexer: pipeline::StreamingIndexer,
     port: Option<u16>,
-    top_k: usize,
-    threshold: f32,
-    quiet: bool,
-    root: &str,
+    search: SearchConfig,
+    output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<bool> {
-    serve::run_streaming(embedder, idx, indexer, port, top_k, threshold, quiet, root)?;
+    serve::run_streaming(
+        embedder,
+        idx,
+        indexer,
+        port,
+        search.top_k,
+        search.threshold,
+        output.quiet,
+        output.root,
+    )?;
     if let Some(h) = walker_handle.take() {
         let _ = h.join();
     }
@@ -618,12 +646,19 @@ fn run_interactive_mode(
     idx: Index,
     indexer: pipeline::StreamingIndexer,
     query: &str,
-    top_k: usize,
-    threshold: f32,
-    cwd_suffix: &Path,
+    search: SearchConfig,
+    output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
 ) -> Result<bool> {
-    tui::interactive::run_streaming(embedder, idx, indexer, query, top_k, threshold, cwd_suffix)?;
+    tui::interactive::run_streaming(
+        embedder,
+        idx,
+        indexer,
+        query,
+        search.top_k,
+        search.threshold,
+        output.cwd_suffix,
+    )?;
     if let Some(h) = walker_handle.take() {
         let _ = h.join();
     }
@@ -666,22 +701,24 @@ fn run_cli_search(
     idx: &Index,
     args: &Args,
     query: &str,
-    top_k: usize,
-    threshold: f32,
-    color_choice: termcolor::ColorChoice,
-    cwd_suffix: &Path,
-    quiet: bool,
-    root: &str,
+    search: SearchConfig,
+    output: CliOutputContext<'_>,
 ) -> Result<bool> {
     let chunk_count = idx.chunk_count()?;
-    status!(quiet, "Index has {} chunks.", chunk_count);
+    status!(output.quiet, "Index has {} chunks.", chunk_count);
 
     let query_embedding = embedder.embed(query)?;
-    let results = idx.search(&query_embedding, top_k, threshold)?;
+    let results = idx.search(&query_embedding, search.top_k, search.threshold)?;
 
-    let found = render_cli_results(results, args, color_choice, cwd_suffix, root)?;
+    let found = render_cli_results(
+        results,
+        args,
+        output.color_choice,
+        output.cwd_suffix,
+        output.root,
+    )?;
     if !found {
-        status!(quiet, "No results found.");
+        status!(output.quiet, "No results found.");
     }
 
     Ok(found)
@@ -830,6 +867,13 @@ fn run() -> Result<bool> {
         mut walker_handle,
         root,
     } = prepare_execution(&args, &mut runtime, &path_plan)?;
+    let search = search_config(&runtime);
+    let output = CliOutputContext {
+        color_choice,
+        cwd_suffix: &path_plan.cwd_suffix,
+        quiet,
+        root: &root,
+    };
     if query.is_empty() && matches!(run_mode, RunMode::Cli) && !args.stats && !args.reindex {
         return Ok(true);
     }
@@ -885,10 +929,8 @@ fn run() -> Result<bool> {
             idx,
             indexer,
             runtime.port,
-            runtime.top_k,
-            runtime.threshold,
-            quiet,
-            &root,
+            search,
+            output,
             &mut walker_handle,
         );
     }
@@ -899,25 +941,13 @@ fn run() -> Result<bool> {
             idx,
             indexer,
             &query,
-            runtime.top_k,
-            runtime.threshold,
-            &path_plan.cwd_suffix,
+            search,
+            output,
             &mut walker_handle,
         );
     }
 
-    let found = run_cli_search(
-        &mut embedder,
-        &idx,
-        &args,
-        &query,
-        runtime.top_k,
-        runtime.threshold,
-        color_choice,
-        &path_plan.cwd_suffix,
-        quiet,
-        &root,
-    )?;
+    let found = run_cli_search(&mut embedder, &idx, &args, &query, search, output)?;
 
     // TUI/serve may return here with indexing still in progress, but CLI has
     // already drained above.
