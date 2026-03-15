@@ -220,6 +220,120 @@ enum StaleRemovalScope {
     None,
 }
 
+struct PathPlan {
+    project_root: PathBuf,
+    project_root_canon: PathBuf,
+    cwd_suffix: PathBuf,
+    inside_paths: Vec<String>,
+    outside_paths: Vec<String>,
+    stale_removal_scope: StaleRemovalScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunMode {
+    Cli,
+    Interactive,
+    Serve,
+    IndexOnly,
+}
+
+fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
+    let cwd_project_root = find_project_root(cwd);
+
+    if has_project_marker(&cwd_project_root) {
+        cwd_project_root
+    } else if paths.len() == 1 && Path::new(&paths[0]).is_dir() {
+        find_project_root(Path::new(&paths[0]))
+    } else {
+        cwd.to_path_buf()
+    }
+}
+
+fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[String]) -> PathPlan {
+    let project_root_canon = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let (inside_paths, outside_paths) = split_paths_by_root(paths, &cwd_canon, &project_root_canon);
+
+    let cwd_suffix = cwd_canon
+        .strip_prefix(&project_root_canon)
+        .unwrap_or(Path::new(""))
+        .to_path_buf();
+
+    let stale_removal_scope = if inside_paths.len() == 1 && Path::new(&inside_paths[0]).is_dir() {
+        let walk_root_abs = Path::new(&inside_paths[0])
+            .canonicalize()
+            .unwrap_or_else(|_| cwd_canon.join(&inside_paths[0]));
+        let walk_prefix = walk_root_abs
+            .strip_prefix(&project_root_canon)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        if walk_prefix.as_os_str().is_empty() {
+            StaleRemovalScope::All
+        } else {
+            StaleRemovalScope::Prefix(walk_prefix)
+        }
+    } else {
+        StaleRemovalScope::None
+    };
+
+    PathPlan {
+        project_root: project_root.to_path_buf(),
+        project_root_canon,
+        cwd_suffix,
+        inside_paths,
+        outside_paths,
+        stale_removal_scope,
+    }
+}
+
+fn apply_path_plan(args: &mut Args, plan: &PathPlan) -> Result<()> {
+    if !plan.outside_paths.is_empty() && !args.skip_outside_root {
+        anyhow::bail!(
+            "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
+            plan.outside_paths[0],
+            plan.project_root_canon.display()
+        );
+    }
+    if !plan.outside_paths.is_empty() && args.skip_outside_root && !args.quiet {
+        eprintln!(
+            "Skipping {} path(s) outside project root {}.",
+            plan.outside_paths.len(),
+            plan.project_root_canon.display()
+        );
+    }
+    if plan.inside_paths.is_empty() {
+        anyhow::bail!(
+            "All provided paths are outside the selected project root '{}'.",
+            plan.project_root_canon.display()
+        );
+    }
+    args.paths = plan.inside_paths.clone();
+    Ok(())
+}
+
+fn resolve_query(args: &Args) -> Result<String> {
+    match &args.query {
+        Some(q) => Ok(q.clone()),
+        None if args.interactive => Ok(String::new()),
+        None if args.serve || args.index_only || args.stats || args.reindex => Ok(String::new()),
+        None => Ok(String::new()),
+    }
+}
+
+fn determine_run_mode(args: &Args) -> RunMode {
+    if args.serve {
+        RunMode::Serve
+    } else if args.interactive {
+        RunMode::Interactive
+    } else if args.index_only {
+        RunMode::IndexOnly
+    } else {
+        RunMode::Cli
+    }
+}
+
 /// Apply config file values where CLI flags weren't explicitly provided.
 fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
     // Option fields: apply if CLI is None
@@ -309,17 +423,7 @@ fn run() -> Result<bool> {
     let color_choice = output::resolve_color_choice(&args.color);
 
     let cwd = std::env::current_dir()?;
-    let cwd_project_root = find_project_root(&cwd);
-
-    // If cwd is already inside a project, that project owns the invocation.
-    // Otherwise, fall back to the single-directory path heuristic.
-    let project_root = if has_project_marker(&cwd_project_root) {
-        cwd_project_root
-    } else if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
-        find_project_root(Path::new(&args.paths[0]))
-    } else {
-        cwd.clone()
-    };
+    let project_root = resolve_project_root(&cwd, &args.paths);
 
     // Apply config: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml) > defaults
     let config = vecgrep::config::load_config(&project_root);
@@ -333,60 +437,14 @@ fn run() -> Result<bool> {
         println!("{}", canon.display());
         return Ok(true);
     }
-    let project_root_canon = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.clone());
-    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-    let (inside_paths, outside_paths) =
-        split_paths_by_root(&args.paths, &cwd_canon, &project_root_canon);
-    if !outside_paths.is_empty() && !args.skip_outside_root {
-        anyhow::bail!(
-            "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
-            outside_paths[0],
-            project_root_canon.display()
-        );
-    }
-    if !outside_paths.is_empty() && args.skip_outside_root && !args.quiet {
-        eprintln!(
-            "Skipping {} path(s) outside project root {}.",
-            outside_paths.len(),
-            project_root_canon.display()
-        );
-    }
-    if inside_paths.is_empty() {
-        anyhow::bail!(
-            "All provided paths are outside the selected project root '{}'.",
-            project_root_canon.display()
-        );
-    }
-    args.paths = inside_paths;
-
-    let cwd_suffix = cwd_canon
-        .strip_prefix(&project_root_canon)
-        .unwrap_or(Path::new(""))
-        .to_path_buf();
-    let stale_removal_scope = if args.paths.len() == 1 && Path::new(&args.paths[0]).is_dir() {
-        let walk_root_abs = Path::new(&args.paths[0])
-            .canonicalize()
-            .unwrap_or_else(|_| cwd_canon.join(&args.paths[0]));
-        let walk_prefix = walk_root_abs
-            .strip_prefix(&project_root_canon)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        if walk_prefix.as_os_str().is_empty() {
-            StaleRemovalScope::All
-        } else {
-            StaleRemovalScope::Prefix(walk_prefix)
-        }
-    } else {
-        StaleRemovalScope::None
-    };
+    let path_plan = build_path_plan(&cwd, &project_root, &args.paths);
+    apply_path_plan(&mut args, &path_plan)?;
 
     let quiet = args.quiet;
 
     // Handle --clear-cache
     if args.clear_cache {
-        let cache_dir = project_root.join(".vecgrep");
+        let cache_dir = path_plan.project_root.join(".vecgrep");
         if cache_dir.exists() {
             std::fs::remove_dir_all(&cache_dir)?;
             status!(quiet, "Cache cleared.");
@@ -400,7 +458,7 @@ fn run() -> Result<bool> {
 
     // Handle --stats (without loading model)
     if args.stats && args.query.is_none() && !args.index_only {
-        let idx = Index::open(&project_root)?;
+        let idx = Index::open(&path_plan.project_root)?;
         let stats = idx.stats()?;
         output::print_stats(
             stats.file_count,
@@ -445,7 +503,7 @@ fn run() -> Result<bool> {
     }
 
     // Open or create index
-    let idx = Index::open(&project_root)?;
+    let idx = Index::open(&path_plan.project_root)?;
 
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
@@ -489,24 +547,22 @@ fn run() -> Result<bool> {
     });
 
     let threshold = args.index_warn_threshold;
-    let root_str = project_root_canon.to_string_lossy().to_string();
+    let root_str = path_plan.project_root_canon.to_string_lossy().to_string();
 
     let indexer = pipeline::StreamingIndexer::new(
         rx,
         args.chunk_size,
         args.chunk_overlap,
         batch_size,
-        &cwd_suffix,
+        &path_plan.cwd_suffix,
         Some(stream_progress),
     );
 
-    // Need a query from here on (unless interactive/serve mode)
-    let query = match &args.query {
-        Some(q) => q.clone(),
-        None if args.interactive => String::new(),
-        None if args.serve || args.index_only || args.stats || args.reindex => String::new(),
-        None => return Ok(true),
-    };
+    let query = resolve_query(&args)?;
+    let run_mode = determine_run_mode(&args);
+    if query.is_empty() && matches!(run_mode, RunMode::Cli) && !args.stats && !args.reindex {
+        return Ok(true);
+    }
 
     let mut indexer = indexer;
     let mut walker_handle = Some(walker_join_handle);
@@ -516,7 +572,7 @@ fn run() -> Result<bool> {
     // CLI and --index-only always drain before proceeding so first-run searches
     // don't miss freshly discovered files. TUI/serve stay progressive unless
     // --full-index was requested explicitly.
-    let must_drain_before_search = args.index_only || (!args.serve && !args.interactive);
+    let must_drain_before_search = matches!(run_mode, RunMode::IndexOnly | RunMode::Cli);
     if args.full_index || must_drain_before_search {
         let mut threshold_prompted = false;
         indexer.drain_all(&mut embedder, &idx, |progress| {
@@ -556,7 +612,7 @@ fn run() -> Result<bool> {
         finish_indexing(
             &mut indexer,
             &idx,
-            &stale_removal_scope,
+            &path_plan.stale_removal_scope,
             quiet,
             &mut walker_handle,
         )?;
@@ -594,7 +650,7 @@ fn run() -> Result<bool> {
 
     // TUI and serve: pass the indexer for progressive indexing.
     // If --full-index was used, the indexer is already drained.
-    if args.serve {
+    if matches!(run_mode, RunMode::Serve) {
         serve::run_streaming(
             embedder,
             idx,
@@ -611,7 +667,7 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    if args.interactive {
+    if matches!(run_mode, RunMode::Interactive) {
         tui::interactive::run_streaming(
             embedder,
             idx,
@@ -619,7 +675,7 @@ fn run() -> Result<bool> {
             &query,
             args.top_k,
             args.threshold,
-            &cwd_suffix,
+            &path_plan.cwd_suffix,
         )?;
         if let Some(h) = walker_handle.take() {
             let _ = h.join();
@@ -639,9 +695,10 @@ fn run() -> Result<bool> {
     let found = !results.is_empty();
     if found {
         let mut results = results;
-        if !args.json && !cwd_suffix.as_os_str().is_empty() {
+        if !args.json && !path_plan.cwd_suffix.as_os_str().is_empty() {
             for r in &mut results {
-                r.chunk.file_path = paths::to_cwd_relative(&r.chunk.file_path, &cwd_suffix);
+                r.chunk.file_path =
+                    paths::to_cwd_relative(&r.chunk.file_path, &path_plan.cwd_suffix);
             }
         }
 
@@ -674,7 +731,7 @@ fn run() -> Result<bool> {
         finish_indexing(
             &mut indexer,
             &idx,
-            &stale_removal_scope,
+            &path_plan.stale_removal_scope,
             quiet,
             &mut walker_handle,
         )?;
