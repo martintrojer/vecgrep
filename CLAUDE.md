@@ -114,3 +114,17 @@ These came out of a design review and should be treated as intentional unless re
 - **Index warn threshold prompts only once**: Re-prompting as discovery continues would make large-vault indexing noisy and frustrating. Users can already abort at any time.
 - **Config invalidation stays coarse-grained**: If `IndexConfig` changes, rebuild the cache. Do not add partial “embeddings are probably still valid” exceptions for chunking or overlap changes unless there is a very strong correctness story.
 - **Index holes are currently surfaced via `--stats`**: Failed remote embeddings become zero vectors and are counted as `Holes`. That is the current user-visible surfacing mechanism; search output itself does not yet annotate them.
+
+## Allium Spec
+
+The repo includes an Allium spec at `vecgrep.allium`. Upstream Allium lives at https://github.com/juxt/allium. Treat the local spec as the clearest product-model description of vecgrep's intended behavior, not as a parser-checked source of truth.
+
+- The spec is intentionally higher-level than the Rust code. It models root selection, path admission, config precedence, indexing/search lifecycles, and the CLI/TUI/server surfaces. It does **not** try to capture threading, exact chunking internals, or storage details.
+- When refactoring, prefer moving the code **toward** the spec's shape: explicit invocation resolution, one selected root, admitted vs rejected paths, clear blocking vs progressive indexing behavior, and distinct CLI/TUI/server surfaces.
+- Do not assume every helper or field in `main.rs` needs a direct one-to-one counterpart in the spec. The spec is an idealized behavior model, not a mandate to over-abstract the implementation.
+- Use the spec to spot design drift:
+  - duplicated user-visible policy across CLI/TUI/server
+  - hidden precedence rules
+  - mixed parsing/runtime state
+  - behavior that depends on incidental implementation details rather than explicit lifecycle/state
+- If code and spec diverge, decide explicitly whether the spec is wrong, the code is wrong, or the spec is intentionally aspirational before changing either.
