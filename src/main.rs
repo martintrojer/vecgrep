@@ -237,6 +237,19 @@ enum RunMode {
     IndexOnly,
 }
 
+struct RuntimeConfig {
+    top_k: usize,
+    threshold: f32,
+    chunk_size: usize,
+    chunk_overlap: usize,
+    quiet: bool,
+    full_index: bool,
+    index_warn_threshold: usize,
+    embedder_url: Option<String>,
+    embedder_model: Option<String>,
+    port: Option<u16>,
+}
+
 fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
     let cwd_project_root = find_project_root(cwd);
 
@@ -331,6 +344,21 @@ fn determine_run_mode(args: &Args) -> RunMode {
         RunMode::IndexOnly
     } else {
         RunMode::Cli
+    }
+}
+
+fn build_runtime_config(args: &Args) -> RuntimeConfig {
+    RuntimeConfig {
+        top_k: args.top_k,
+        threshold: args.threshold,
+        chunk_size: args.chunk_size,
+        chunk_overlap: args.chunk_overlap,
+        quiet: args.quiet,
+        full_index: args.full_index,
+        index_warn_threshold: args.index_warn_threshold,
+        embedder_url: args.embedder_url.clone(),
+        embedder_model: args.embedder_model.clone(),
+        port: args.port,
     }
 }
 
@@ -517,7 +545,8 @@ fn run() -> Result<bool> {
     let path_plan = build_path_plan(&cwd, &project_root, &args.paths);
     apply_path_plan(&mut args, &path_plan)?;
 
-    let quiet = args.quiet;
+    let mut runtime = build_runtime_config(&args);
+    let quiet = runtime.quiet;
 
     // Handle --clear-cache
     if args.clear_cache {
@@ -542,7 +571,7 @@ fn run() -> Result<bool> {
 
     // Initialize embedder
     let mut embedder =
-        if let (Some(ref url), Some(ref model)) = (&args.embedder_url, &args.embedder_model) {
+        if let (Some(ref url), Some(ref model)) = (&runtime.embedder_url, &runtime.embedder_model) {
             status!(quiet, "Using external embedder: {} ({})", url, model);
             let mut e = Embedder::new_remote(url, model);
             // Probe to discover embedding dimension before building config
@@ -562,14 +591,14 @@ fn run() -> Result<bool> {
             e
         };
 
-    let original_chunk_size = args.chunk_size;
-    args.chunk_size = capped_chunk_size(args.chunk_size, embedder.context_tokens());
-    if args.chunk_size < original_chunk_size {
+    let original_chunk_size = runtime.chunk_size;
+    runtime.chunk_size = capped_chunk_size(runtime.chunk_size, embedder.context_tokens());
+    if runtime.chunk_size < original_chunk_size {
         status!(
             quiet,
             "Reducing chunk_size from {} to {} (model context limit)",
             original_chunk_size,
-            args.chunk_size
+            runtime.chunk_size
         );
     }
 
@@ -579,8 +608,8 @@ fn run() -> Result<bool> {
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
-        chunk_size: args.chunk_size,
-        chunk_overlap: args.chunk_overlap,
+        chunk_size: runtime.chunk_size,
+        chunk_overlap: runtime.chunk_overlap,
     };
 
     // Check if config changed
@@ -617,13 +646,13 @@ fn run() -> Result<bool> {
         walker::walk_paths_streaming_with_progress(&walk_paths, &walk_opts, tx, walker_progress)
     });
 
-    let threshold = args.index_warn_threshold;
+    let threshold = runtime.index_warn_threshold;
     let root_str = path_plan.project_root_canon.to_string_lossy().to_string();
 
     let indexer = pipeline::StreamingIndexer::new(
         rx,
-        args.chunk_size,
-        args.chunk_overlap,
+        runtime.chunk_size,
+        runtime.chunk_overlap,
         batch_size,
         &path_plan.cwd_suffix,
         Some(stream_progress),
@@ -644,7 +673,7 @@ fn run() -> Result<bool> {
     // don't miss freshly discovered files. TUI/serve stay progressive unless
     // --full-index was requested explicitly.
     let must_drain_before_search = matches!(run_mode, RunMode::IndexOnly | RunMode::Cli);
-    if args.full_index || must_drain_before_search {
+    if runtime.full_index || must_drain_before_search {
         let mut threshold_prompted = false;
         indexer.drain_all(&mut embedder, &idx, |progress| {
             if !quiet && !threshold_prompted && threshold > 0 && progress.indexed_count >= threshold
@@ -714,9 +743,9 @@ fn run() -> Result<bool> {
             embedder,
             idx,
             indexer,
-            args.port,
-            args.top_k,
-            args.threshold,
+            runtime.port,
+            runtime.top_k,
+            runtime.threshold,
             quiet,
             &root_str,
             &mut walker_handle,
@@ -729,8 +758,8 @@ fn run() -> Result<bool> {
             idx,
             indexer,
             &query,
-            args.top_k,
-            args.threshold,
+            runtime.top_k,
+            runtime.threshold,
             &path_plan.cwd_suffix,
             &mut walker_handle,
         );
@@ -742,7 +771,7 @@ fn run() -> Result<bool> {
 
     let query_embedding = embedder.embed(&query)?;
 
-    let results = idx.search(&query_embedding, args.top_k, args.threshold)?;
+    let results = idx.search(&query_embedding, runtime.top_k, runtime.threshold)?;
 
     let found = render_cli_results(results, &args, color_choice, &path_plan.cwd_suffix, &root_str)?;
     if !found {
