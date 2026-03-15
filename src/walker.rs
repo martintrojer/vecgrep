@@ -39,6 +39,12 @@ impl StreamProgress {
     }
 }
 
+impl Default for StreamProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Options for file walking, mapped from CLI flags.
 pub struct WalkOptions {
     pub file_types: Option<Vec<String>>,
