@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use clap::parser::ValueSource;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -440,22 +441,27 @@ fn render_cli_results(
 }
 
 /// Apply config file values where CLI flags weren't explicitly provided.
-fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
+fn cli_provided(matches: &ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::CommandLine)
+}
+
+/// Apply config file values where CLI flags weren't explicitly provided.
+fn apply_config(args: &mut Args, config: &vecgrep::config::Config, matches: &ArgMatches) {
     // Option fields: apply if CLI is None
-    if args.embedder_url.is_none() {
+    if !cli_provided(matches, "embedder_url") {
         args.embedder_url.clone_from(&config.embedder_url);
     }
-    if args.embedder_model.is_none() {
+    if !cli_provided(matches, "embedder_model") {
         args.embedder_model.clone_from(&config.embedder_model);
     }
-    if args.max_depth.is_none() {
+    if !cli_provided(matches, "max_depth") {
         args.max_depth = config.max_depth;
     }
 
-    // Fields with clap defaults: apply config if value matches the hardcoded default
-    macro_rules! apply_default {
-        ($field:ident, $default:expr) => {
-            if args.$field == $default {
+    // Fields with clap defaults: apply config unless the CLI explicitly set them.
+    macro_rules! apply_value {
+        ($field:ident, $id:literal) => {
+            if !cli_provided(matches, $id) {
                 if let Some(v) = config.$field {
                     args.$field = v;
                 }
@@ -463,17 +469,17 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
         };
     }
 
-    apply_default!(top_k, 10);
-    apply_default!(threshold, 0.3);
-    apply_default!(context, 3);
-    apply_default!(chunk_size, 500);
-    apply_default!(chunk_overlap, 100);
-    apply_default!(index_warn_threshold, 1000);
+    apply_value!(top_k, "top_k");
+    apply_value!(threshold, "threshold");
+    apply_value!(context, "context");
+    apply_value!(chunk_size, "chunk_size");
+    apply_value!(chunk_overlap, "chunk_overlap");
+    apply_value!(index_warn_threshold, "index_warn_threshold");
 
-    // Bool fields: apply config if CLI is false (default)
+    // Bool fields: apply config unless the CLI explicitly set them.
     macro_rules! apply_bool {
-        ($field:ident) => {
-            if !args.$field {
+        ($field:ident, $id:literal) => {
+            if !cli_provided(matches, $id) {
                 if let Some(true) = config.$field {
                     args.$field = true;
                 }
@@ -481,11 +487,11 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
         };
     }
 
-    apply_bool!(full_index);
-    apply_bool!(hidden);
-    apply_bool!(follow);
-    apply_bool!(no_ignore);
-    apply_bool!(quiet);
+    apply_bool!(full_index, "full_index");
+    apply_bool!(hidden, "hidden");
+    apply_bool!(follow, "follow");
+    apply_bool!(no_ignore, "no_ignore");
+    apply_bool!(quiet, "quiet");
 
     // Ignore files: merge config into CLI (additive)
     if let Some(ref config_files) = config.ignore_files {
@@ -498,7 +504,7 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config) {
     }
 
     // Color: apply if CLI is Auto (default)
-    if matches!(args.color, vecgrep::cli::ColorChoice::Auto) {
+    if !cli_provided(matches, "color") {
         if let Some(ref c) = config.color {
             match c.as_str() {
                 "always" => args.color = vecgrep::cli::ColorChoice::Always,
@@ -517,7 +523,8 @@ fn run() -> Result<bool> {
         .with_writer(std::io::stderr)
         .init();
 
-    let mut args = Args::parse();
+    let matches = Args::command().get_matches();
+    let mut args = Args::from_arg_matches(&matches).expect("clap validated matches");
 
     // Handle --type-list (no model or index needed)
     if args.type_list {
@@ -532,7 +539,7 @@ fn run() -> Result<bool> {
 
     // Apply config: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml) > defaults
     let config = vecgrep::config::load_config(&project_root);
-    apply_config(&mut args, &config);
+    apply_config(&mut args, &config, &matches);
 
     // Handle --show-root (no model or index needed)
     if args.show_root {
