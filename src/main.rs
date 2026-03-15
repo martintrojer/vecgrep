@@ -89,6 +89,13 @@ fn split_paths_by_root(
     (inside, outside)
 }
 
+fn capped_chunk_size(chunk_size: usize, context_tokens: Option<usize>) -> usize {
+    match context_tokens {
+        Some(ctx) => chunk_size.min(ctx),
+        None => chunk_size,
+    }
+}
+
 fn main() {
     std::process::exit(match run() {
         Ok(matched) => {
@@ -413,18 +420,6 @@ fn run() -> Result<bool> {
             e.embed("probe")
                 .context("Failed to connect to external embedder")?;
             status!(quiet, "Embedding dimension: {}", e.embedding_dim());
-            // Cap chunk_size to remote model's context length
-            if let Some(ctx) = e.context_tokens() {
-                if args.chunk_size > ctx {
-                    status!(
-                        quiet,
-                        "Reducing chunk_size from {} to {} (model context limit)",
-                        args.chunk_size,
-                        ctx
-                    );
-                    args.chunk_size = ctx;
-                }
-            }
             e
         } else {
             if !quiet {
@@ -437,6 +432,17 @@ fn run() -> Result<bool> {
             }
             e
         };
+
+    let original_chunk_size = args.chunk_size;
+    args.chunk_size = capped_chunk_size(args.chunk_size, embedder.context_tokens());
+    if args.chunk_size < original_chunk_size {
+        status!(
+            quiet,
+            "Reducing chunk_size from {} to {} (model context limit)",
+            original_chunk_size,
+            args.chunk_size
+        );
+    }
 
     // Open or create index
     let idx = Index::open(&project_root)?;
@@ -839,5 +845,20 @@ mod tests {
         let result = find_project_root(Path::new("/nonexistent/path/that/doesnt/exist"));
         // canonicalize fails, falls back to the input path
         assert_eq!(result, PathBuf::from("/nonexistent/path/that/doesnt/exist"));
+    }
+
+    #[test]
+    fn test_capped_chunk_size_reduces_local_default_to_model_context() {
+        assert_eq!(capped_chunk_size(500, Some(256)), 256);
+    }
+
+    #[test]
+    fn test_capped_chunk_size_keeps_smaller_values() {
+        assert_eq!(capped_chunk_size(200, Some(256)), 200);
+    }
+
+    #[test]
+    fn test_capped_chunk_size_without_context_is_unchanged() {
+        assert_eq!(capped_chunk_size(500, None), 500);
     }
 }

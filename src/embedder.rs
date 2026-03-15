@@ -125,11 +125,10 @@ impl Embedder {
         matches!(self, Embedder::Remote(_))
     }
 
-    /// Max context in estimated tokens for the remote model.
-    /// Returns None for the local model (it handles its own context).
+    /// Max context in tokens for this embedder, if known.
     pub fn context_tokens(&self) -> Option<usize> {
         match self {
-            Embedder::Local(_) => None,
+            Embedder::Local(_) => Some(MAX_SEQ_LEN),
             Embedder::Remote(r) => Some(r.max_chars * 2 / 5), // reverse the 2.5 chars/token
         }
     }
@@ -620,7 +619,7 @@ mod tests {
     #[test]
     fn test_context_tokens_local() {
         let local = Embedder::new_local().unwrap();
-        assert!(local.context_tokens().is_none());
+        assert_eq!(local.context_tokens(), Some(MAX_SEQ_LEN));
     }
 
     #[test]
