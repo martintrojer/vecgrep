@@ -96,6 +96,12 @@ pub fn load_config(project_root: &std::path::Path) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_parse_full_config() {
@@ -224,5 +230,54 @@ mod tests {
         let config = load_config(dir.path());
         assert_eq!(config.top_k, Some(42));
         assert_eq!(config.hidden, Some(true));
+    }
+
+    #[test]
+    fn test_global_config_path_prefers_xdg_config_home() {
+        let _guard = env_lock().lock().unwrap();
+        let xdg = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+            std::env::set_var("HOME", home.path());
+        }
+
+        let path = global_config_path().unwrap();
+        assert_eq!(path, xdg.path().join("vecgrep").join("config.toml"));
+    }
+
+    #[test]
+    fn test_global_config_path_falls_back_to_home_dot_config() {
+        let _guard = env_lock().lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::set_var("HOME", home.path());
+        }
+
+        let path = global_config_path().unwrap();
+        assert_eq!(path, home.path().join(".config/vecgrep/config.toml"));
+    }
+
+    #[test]
+    fn test_load_config_reads_global_from_xdg_config_home() {
+        let _guard = env_lock().lock().unwrap();
+        let xdg = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        let global_dir = xdg.path().join("vecgrep");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("config.toml"), "top_k = 17\nquiet = true\n").unwrap();
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+            std::env::set_var("HOME", home.path());
+        }
+
+        let config = load_config(project.path());
+        assert_eq!(config.top_k, Some(17));
+        assert_eq!(config.quiet, Some(true));
     }
 }
