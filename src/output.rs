@@ -176,12 +176,13 @@ pub(crate) fn collect_counts(results: &[SearchResult]) -> BTreeMap<&str, usize> 
 }
 
 /// Print index statistics.
-pub fn print_stats(file_count: usize, chunk_count: usize, db_size: u64) {
+pub fn print_stats(file_count: usize, chunk_count: usize, failed_chunk_count: usize, db_size: u64) {
     let size_str = format_size(db_size);
 
     eprintln!("Index statistics:");
     eprintln!("  Files:  {}", file_count);
     eprintln!("  Chunks: {}", chunk_count);
+    eprintln!("  Holes:  {}", failed_chunk_count);
     eprintln!("  Size:   {}", size_str);
 }
 

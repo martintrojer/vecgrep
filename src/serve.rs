@@ -219,6 +219,7 @@ mod tests {
                         &format!("hash{i}"),
                         &[chunk.clone()],
                         &[emb.clone()],
+                        &[false],
                     )
                     .unwrap();
                 }

@@ -46,12 +46,24 @@ fn test_index_and_search_roundtrip() {
 
     // Store main.rs chunks
     index
-        .upsert_file("main.rs", "hash_main", &chunks[0..2], &embeddings[0..2])
+        .upsert_file(
+            "main.rs",
+            "hash_main",
+            &chunks[0..2],
+            &embeddings[0..2],
+            &[false, false],
+        )
         .unwrap();
 
     // Store lib.rs chunk
     index
-        .upsert_file("lib.rs", "hash_lib", &chunks[2..3], &embeddings[2..3])
+        .upsert_file(
+            "lib.rs",
+            "hash_lib",
+            &chunks[2..3],
+            &embeddings[2..3],
+            &[false],
+        )
         .unwrap();
 
     assert_eq!(index.chunk_count().unwrap(), 3);
@@ -85,7 +97,7 @@ fn test_incremental_indexing() {
     }];
     let emb_a = vec![make_embedding(dim, 1.0)];
     index
-        .upsert_file("a.rs", "hash_a_v1", &chunk_a, &emb_a)
+        .upsert_file("a.rs", "hash_a_v1", &chunk_a, &emb_a, &[false])
         .unwrap();
 
     // Index file b.rs
@@ -97,7 +109,7 @@ fn test_incremental_indexing() {
     }];
     let emb_b = vec![make_embedding(dim, 2.0)];
     index
-        .upsert_file("b.rs", "hash_b", &chunk_b, &emb_b)
+        .upsert_file("b.rs", "hash_b", &chunk_b, &emb_b, &[false])
         .unwrap();
 
     // Verify both are present
@@ -118,7 +130,7 @@ fn test_incremental_indexing() {
 
     // Re-index only a.rs
     index
-        .upsert_file("a.rs", "hash_a_v2", &chunk_a_v2, &emb_a_v2)
+        .upsert_file("a.rs", "hash_a_v2", &chunk_a_v2, &emb_a_v2, &[false])
         .unwrap();
 
     // Verify: still 2 chunks total
@@ -371,10 +383,22 @@ fn test_search_with_non_default_embedding_dim() {
     let embeddings = vec![make_embedding(dim, 1.0), make_embedding(dim, 2.0)];
 
     index
-        .upsert_file("main.rs", "hash1", &chunks[0..1], &embeddings[0..1])
+        .upsert_file(
+            "main.rs",
+            "hash1",
+            &chunks[0..1],
+            &embeddings[0..1],
+            &[false],
+        )
         .unwrap();
     index
-        .upsert_file("lib.rs", "hash2", &chunks[1..2], &embeddings[1..2])
+        .upsert_file(
+            "lib.rs",
+            "hash2",
+            &chunks[1..2],
+            &embeddings[1..2],
+            &[false],
+        )
         .unwrap();
 
     assert_eq!(index.chunk_count().unwrap(), 2);
@@ -391,6 +415,59 @@ fn test_search_empty_index() {
     let query = make_embedding(EMBEDDING_DIM, 1.0);
     let results = index.search(&query, 10, 0.0).unwrap();
     assert!(results.is_empty());
+}
+
+#[test]
+fn test_stats_reports_holes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+    let index = Index::open(dir.path()).unwrap();
+    let dim = EMBEDDING_DIM;
+    let chunks = vec![
+        Chunk {
+            file_path: "mixed.rs".to_string(),
+            text: "fn healthy() {}".to_string(),
+            start_line: 1,
+            end_line: 1,
+        },
+        Chunk {
+            file_path: "mixed.rs".to_string(),
+            text: "fn broken() {}".to_string(),
+            start_line: 1,
+            end_line: 1,
+        },
+    ];
+    let embeddings = vec![make_embedding(dim, 1.0), vec![0.0; dim]];
+
+    index
+        .upsert_file("mixed.rs", "hash1", &chunks, &embeddings, &[false, true])
+        .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--stats")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Index statistics:"),
+        "expected stats header, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Files:  1"),
+        "expected file count, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Chunks: 2"),
+        "expected chunk count, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Holes:  1"),
+        "expected hole count, got: {stderr}"
+    );
 }
 
 // --- Index scoping tests ---
