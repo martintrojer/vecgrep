@@ -27,18 +27,73 @@ fn init_sqlite_vec() {
     });
 }
 
+// --- Helper functions that take &Connection directly ---
+// These can be called both inside and outside transactions.
+
+fn get_file_id(conn: &Connection, path: &str) -> Result<i64> {
+    Ok(
+        conn.query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+fn delete_file_by_id(conn: &Connection, file_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?1)",
+        params![file_id],
+    )?;
+    conn.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+    conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+    Ok(())
+}
+
+fn all_file_paths(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM files")?;
+    let paths: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(paths)
+}
+
+fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
+    let val = stmt
+        .query_row(params![key], |row| row.get::<_, String>(0))
+        .ok();
+    Ok(val)
+}
+
+fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn clear_all_data(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS vec_chunks;
+         DELETE FROM chunks;
+         DELETE FROM files;
+         DELETE FROM meta;",
+    )?;
+    Ok(())
+}
+
 pub struct Index {
     conn: Connection,
 }
 
 impl Index {
-    fn with_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    fn with_transaction<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         debug_assert!(
             self.conn.is_autocommit(),
             "with_transaction called inside an existing transaction"
         );
         self.conn.execute("BEGIN IMMEDIATE", [])?;
-        match f() {
+        match f(&self.conn) {
             Ok(value) => {
                 self.conn.execute("COMMIT", [])?;
                 Ok(value)
@@ -86,9 +141,9 @@ impl Index {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
-        self.with_transaction(|| {
+        self.with_transaction(|conn| {
             if current_version != SCHEMA_VERSION {
-                self.conn.execute_batch(
+                conn.execute_batch(
                     "DROP TABLE IF EXISTS vec_chunks;
                      DROP TABLE IF EXISTS chunks;
                      DROP TABLE IF EXISTS files;
@@ -96,7 +151,7 @@ impl Index {
                 )?;
             }
 
-            self.conn.execute_batch(
+            conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -116,9 +171,8 @@ impl Index {
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);",
             )?;
-            self.conn.execute(&vec_table_ddl(EMBEDDING_DIM), [])?;
-            self.conn
-                .execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
+            conn.execute(&vec_table_ddl(EMBEDDING_DIM), [])?;
+            conn.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
 
             Ok(())
         })
@@ -126,7 +180,7 @@ impl Index {
 
     /// Check if the index config matches. If not, return false.
     pub fn check_config(&self, config: &IndexConfig) -> Result<bool> {
-        let stored = self.get_meta("config")?;
+        let stored = get_meta(&self.conn, "config")?;
         let config_json = serde_json::to_string(config)?;
 
         match stored {
@@ -137,15 +191,14 @@ impl Index {
 
     /// Store the current config and ensure vec_chunks table has correct dimension.
     pub fn set_config(&self, config: &IndexConfig) -> Result<()> {
-        self.with_transaction(|| {
+        self.with_transaction(|conn| {
             let config_json = serde_json::to_string(config)?;
-            self.set_meta("config", &config_json)?;
+            set_meta(conn, "config", &config_json)?;
 
             // Create vec_chunks if it doesn't exist (new DB or after clear()).
             // The dimension is correct because clear() drops vec_chunks when
             // config changes, so this always creates with the right dimension.
-            self.conn
-                .execute(&vec_table_ddl(config.embedding_dim), [])?;
+            conn.execute(&vec_table_ddl(config.embedding_dim), [])?;
 
             Ok(())
         })
@@ -153,13 +206,12 @@ impl Index {
 
     /// Rebuild all index data for a new configuration atomically.
     pub fn rebuild_for_config(&self, config: &IndexConfig) -> Result<()> {
-        self.with_transaction(|| {
-            self.clear_all_data()?;
+        self.with_transaction(|conn| {
+            clear_all_data(conn)?;
 
             let config_json = serde_json::to_string(config)?;
-            self.set_meta("config", &config_json)?;
-            self.conn
-                .execute(&vec_table_ddl(config.embedding_dim), [])?;
+            set_meta(conn, "config", &config_json)?;
+            conn.execute(&vec_table_ddl(config.embedding_dim), [])?;
 
             Ok(())
         })
@@ -168,17 +220,7 @@ impl Index {
     /// Clear all data (for testing).
     #[cfg(test)]
     pub fn clear(&self) -> Result<()> {
-        self.with_transaction(|| self.clear_all_data())
-    }
-
-    fn clear_all_data(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "DROP TABLE IF EXISTS vec_chunks;
-             DELETE FROM chunks;
-             DELETE FROM files;
-             DELETE FROM meta;",
-        )?;
-        Ok(())
+        self.with_transaction(|conn| clear_all_data(conn))
     }
 
     /// Get the stored content hash for a file path.
@@ -201,27 +243,26 @@ impl Index {
         embeddings: &[Vec<f32>],
         embedding_failed: &[bool],
     ) -> Result<()> {
-        self.with_transaction(|| {
+        self.with_transaction(|conn| {
             // Delete existing data for this file
-            if let Ok(file_id) = self.get_file_id(path) {
-                self.delete_file_by_id(file_id)?;
+            if let Ok(file_id) = get_file_id(conn, path) {
+                delete_file_by_id(conn, file_id)?;
             }
 
             // Insert file record
-            self.conn.execute(
+            conn.execute(
                 "INSERT INTO files (path, content_hash) VALUES (?1, ?2)",
                 params![path, content_hash],
             )?;
-            let file_id = self.conn.last_insert_rowid();
+            let file_id = conn.last_insert_rowid();
 
             // Insert chunks and their vector embeddings
-            let mut chunk_stmt = self.conn.prepare(
+            let mut chunk_stmt = conn.prepare(
                 "INSERT INTO chunks (file_id, text, embedding_failed, start_line, end_line)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
-            let mut vec_stmt = self
-                .conn
-                .prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
+            let mut vec_stmt =
+                conn.prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
 
             for ((chunk, embedding), failed) in chunks
                 .iter()
@@ -235,7 +276,7 @@ impl Index {
                     chunk.start_line as i64,
                     chunk.end_line as i64,
                 ])?;
-                let chunk_id = self.conn.last_insert_rowid();
+                let chunk_id = conn.last_insert_rowid();
                 vec_stmt.execute(params![chunk_id, embedding.as_slice().as_bytes()])?;
             }
 
@@ -314,8 +355,8 @@ impl Index {
         current_paths: &[String],
         prefix: Option<&str>,
     ) -> Result<usize> {
-        self.with_transaction(|| {
-            let stored_paths = self.all_file_paths()?;
+        self.with_transaction(|conn| {
+            let stored_paths = all_file_paths(conn)?;
             let current_set: std::collections::HashSet<&str> =
                 current_paths.iter().map(|s| s.as_str()).collect();
 
@@ -323,8 +364,8 @@ impl Index {
             for path in &stored_paths {
                 let in_scope = prefix.is_none_or(|p| path.starts_with(p));
                 if in_scope && !current_set.contains(path.as_str()) {
-                    if let Ok(file_id) = self.get_file_id(path) {
-                        self.delete_file_by_id(file_id)?;
+                    if let Ok(file_id) = get_file_id(conn, path) {
+                        delete_file_by_id(conn, file_id)?;
                         removed += 1;
                     }
                 }
@@ -363,50 +404,6 @@ impl Index {
             .conn
             .query_row("PRAGMA database_list", [], |r| r.get(2))?;
         Ok(PathBuf::from(path))
-    }
-
-    fn get_file_id(&self, path: &str) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
-                r.get(0)
-            })?)
-    }
-
-    fn delete_file_by_id(&self, file_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?1)",
-            params![file_id],
-        )?;
-        self.conn
-            .execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
-        self.conn
-            .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
-        Ok(())
-    }
-
-    fn all_file_paths(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT path FROM files")?;
-        let paths: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(paths)
-    }
-
-    fn get_meta(&self, key: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
-        let val = stmt
-            .query_row(params![key], |row| row.get::<_, String>(0))
-            .ok();
-        Ok(val)
-    }
-
-    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
-            params![key, value],
-        )?;
-        Ok(())
     }
 }
 
