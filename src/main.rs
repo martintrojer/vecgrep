@@ -864,6 +864,7 @@ fn run() -> Result<bool> {
         && matches!(invocation.run_mode, RunMode::Cli)
         && !invocation.args.stats
         && !invocation.args.reindex
+        && !invocation.args.index_only
     {
         return Ok(true);
     }
