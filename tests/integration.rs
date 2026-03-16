@@ -902,6 +902,65 @@ fn test_explicit_ignored_file_does_not_pollute_persistent_index() {
 }
 
 #[test]
+fn test_explicit_file_survives_directory_walk_and_is_reusable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(dir.path().join("normal.rs"), "fn normal() {}").unwrap();
+    std::fs::write(dir.path().join("debug.log"), "debug log data for search").unwrap();
+
+    // 1. Search the explicit gitignored file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "debug log",
+            &dir.path().join("debug.log").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("debug.log"),
+        "expected debug.log in first explicit search, got: {stdout}"
+    );
+
+    // 2. Do a directory walk — should NOT delete the explicit file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "normal function"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // 3. Search the same explicit file again — should still be cached
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "debug log",
+            &dir.path().join("debug.log").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("debug.log"),
+        "explicit file should still be cached after directory walk, got: {stdout}"
+    );
+}
+
+#[test]
 fn test_explicit_file_returns_results() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
