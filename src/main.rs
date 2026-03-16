@@ -431,31 +431,34 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
         .cloned()
         .partition(|p| Path::new(p).is_file());
 
-    if !file_paths.is_empty() && !invocation.args.index_only {
-        let config = IndexConfig {
-            model_name: embedder.model_name().to_string(),
-            embedding_dim: embedder.embedding_dim(),
-            chunk_size: invocation.args.chunk_size.unwrap(),
-            chunk_overlap: invocation.args.chunk_overlap.unwrap(),
-        };
-        if let Some(ephemeral) = build_ephemeral_index(
-            &file_paths,
-            &mut embedder,
-            &invocation.path_plan.cwd_suffix,
-            invocation.args.chunk_size.unwrap(),
-            invocation.args.chunk_overlap.unwrap(),
-            &config,
-        )? {
-            idx.attach_ephemeral(ephemeral);
+    if !file_paths.is_empty() {
+        if invocation.args.index_only {
+            status!(
+                invocation.args.quiet,
+                "Skipping {} explicit file path(s) — explicit files are not persisted to the index.",
+                file_paths.len()
+            );
+        } else {
+            let config = IndexConfig {
+                model_name: embedder.model_name().to_string(),
+                embedding_dim: embedder.embedding_dim(),
+                chunk_size: invocation.args.chunk_size.unwrap(),
+                chunk_overlap: invocation.args.chunk_overlap.unwrap(),
+            };
+            if let Some(ephemeral) = build_ephemeral_index(
+                &file_paths,
+                &mut embedder,
+                &invocation.path_plan.cwd_suffix,
+                invocation.args.chunk_size.unwrap(),
+                invocation.args.chunk_overlap.unwrap(),
+                &config,
+            )? {
+                idx.attach_ephemeral(ephemeral);
+            }
         }
     }
 
-    // Walker only walks directory paths (or all paths for --index-only)
-    let walk_paths = if invocation.args.index_only {
-        invocation.args.paths.clone()
-    } else {
-        dir_paths
-    };
+    let walk_paths = dir_paths;
 
     let batch_size = 32;
     let walk_opts = build_walk_options(&invocation.args);
