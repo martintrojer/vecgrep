@@ -1082,10 +1082,10 @@ fn finish_indexing(
     join_walker(walker_handle)?;
 
     let removed = match stale_removal_scope {
-        StaleRemovalScope::All => idx.remove_stale_files(&indexer.all_paths)?,
+        StaleRemovalScope::All => idx.remove_stale_files(&indexer.all_paths, None)?,
         StaleRemovalScope::Prefix(walk_prefix) => {
             let prefix = format!("{}/", walk_prefix.display());
-            idx.remove_stale_files_under(&indexer.all_paths, &prefix)?
+            idx.remove_stale_files(&indexer.all_paths, Some(&prefix))?
         }
         StaleRemovalScope::None => 0,
     };

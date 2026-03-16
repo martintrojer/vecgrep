@@ -126,14 +126,8 @@ impl StreamingIndexer {
 
         if !batch.is_empty() {
             self.indexed_count += batch.len();
-            let chunk_count = process_batch(
-                embedder,
-                idx,
-                &batch,
-                self.chunk_size,
-                self.chunk_overlap,
-                self.stream_progress.as_ref(),
-            )?;
+            let chunk_count =
+                process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
             self.indexed_chunks += chunk_count;
             return Ok(true);
         }
@@ -174,14 +168,8 @@ impl StreamingIndexer {
 
             if !batch.is_empty() {
                 self.indexed_count += batch.len();
-                let chunk_count = process_batch(
-                    embedder,
-                    idx,
-                    &batch,
-                    self.chunk_size,
-                    self.chunk_overlap,
-                    self.stream_progress.as_ref(),
-                )?;
+                let chunk_count =
+                    process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
                 self.indexed_chunks += chunk_count;
 
                 if !on_batch(self.cli_progress())? {
@@ -433,7 +421,6 @@ pub fn process_batch(
     files_with_hashes: &[(WalkedFile, String)],
     chunk_size: usize,
     chunk_overlap: usize,
-    _stream_progress: Option<&Arc<StreamProgress>>,
 ) -> Result<usize> {
     let mut all_chunks = Vec::new();
     let mut chunk_file_info: Vec<(String, String)> = Vec::new();
@@ -553,7 +540,7 @@ mod tests {
             ),
         ];
 
-        let chunk_count = process_batch(&mut embedder, &idx, &files, 500, 100, None).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
         assert_eq!(chunk_count, 2);
 
         assert_eq!(idx.chunk_count().unwrap(), chunk_count);
@@ -577,7 +564,7 @@ mod tests {
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
-        let chunk_count = process_batch(&mut embedder, &idx, &[], 500, 100, None).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &[], 500, 100).unwrap();
         assert_eq!(chunk_count, 0);
         assert_eq!(idx.chunk_count().unwrap(), 0);
     }
@@ -615,7 +602,7 @@ mod tests {
 
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
-        let chunk_count = process_batch(&mut embedder, &idx, &batch, 500, 100, None).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &batch, 500, 100).unwrap();
         assert_eq!(chunk_count, 2);
         assert_eq!(idx.chunk_count().unwrap(), 2);
     }
@@ -633,7 +620,7 @@ mod tests {
             },
             "hash_a1".to_string(),
         )];
-        process_batch(&mut embedder, &idx, &batch1, 500, 100, None).unwrap();
+        process_batch(&mut embedder, &idx, &batch1, 500, 100).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 1);
 
         // Batch 2
@@ -644,7 +631,7 @@ mod tests {
             },
             "hash_b1".to_string(),
         )];
-        process_batch(&mut embedder, &idx, &batch2, 500, 100, None).unwrap();
+        process_batch(&mut embedder, &idx, &batch2, 500, 100).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 2);
 
         // Batch 3: re-index a.rs with new content
@@ -655,7 +642,7 @@ mod tests {
             },
             "hash_a2".to_string(),
         )];
-        process_batch(&mut embedder, &idx, &batch3, 500, 100, None).unwrap();
+        process_batch(&mut embedder, &idx, &batch3, 500, 100).unwrap();
         assert_eq!(idx.chunk_count().unwrap(), 2);
 
         // Verify a.rs has the updated content
@@ -686,7 +673,7 @@ mod tests {
             "hash_big".to_string(),
         )];
 
-        let chunk_count = process_batch(&mut embedder, &idx, &files, 10, 2, None).unwrap();
+        let chunk_count = process_batch(&mut embedder, &idx, &files, 10, 2).unwrap();
         assert!(
             chunk_count > 1,
             "expected multiple chunks, got {chunk_count}"
@@ -708,7 +695,7 @@ mod tests {
             },
             hash.clone(),
         )];
-        process_batch(&mut embedder, &idx, &files, 500, 100, None).unwrap();
+        process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
 
         let (tx, rx) = mpsc::sync_channel(32);
         tx.send(WalkedFile {
