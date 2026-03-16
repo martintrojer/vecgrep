@@ -291,6 +291,32 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
     })
 }
 
+/// Reopen /dev/tty as stdin so the TUI can read keyboard events even when
+/// stdin was redirected by a pipe or xargs.
+#[cfg(unix)]
+fn ensure_tty_stdin() -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    if !std::io::stdin().is_terminal() {
+        let tty =
+            std::fs::File::open("/dev/tty").context("Interactive mode requires a terminal")?;
+        extern "C" {
+            fn dup2(oldfd: std::ffi::c_int, newfd: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        if unsafe { dup2(tty.as_raw_fd(), 0) } == -1 {
+            anyhow::bail!("Failed to redirect stdin to /dev/tty");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_tty_stdin() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("Interactive mode requires a terminal on stdin");
+    }
+    Ok(())
+}
+
 fn prompt_to_continue() -> Result<bool> {
     if !std::io::stdin().is_terminal() {
         return Ok(true);
@@ -554,6 +580,12 @@ fn run() -> Result<bool> {
         .init();
 
     let args = Args::parse();
+
+    // Reopen /dev/tty early so crossterm can use it for the TUI,
+    // even when stdin was redirected by a pipe or xargs.
+    if args.interactive {
+        ensure_tty_stdin()?;
+    }
 
     if args.type_list {
         walker::print_type_list();
