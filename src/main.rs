@@ -224,7 +224,6 @@ enum RunMode {
     Cli,
     Interactive,
     Serve,
-    IndexOnly,
 }
 
 type WalkerHandle = std::thread::JoinHandle<anyhow::Result<usize>>;
@@ -385,8 +384,6 @@ fn determine_run_mode(args: &Args) -> RunMode {
         RunMode::Serve
     } else if args.interactive {
         RunMode::Interactive
-    } else if args.index_only {
-        RunMode::IndexOnly
     } else {
         RunMode::Cli
     }
@@ -975,7 +972,8 @@ fn run() -> Result<bool> {
     // CLI and --index-only always drain before proceeding so first-run searches
     // don't miss freshly discovered files. TUI/serve stay progressive unless
     // --full-index was requested explicitly.
-    let must_drain_before_search = matches!(invocation.run_mode, RunMode::IndexOnly | RunMode::Cli);
+    let must_drain_before_search =
+        matches!(invocation.run_mode, RunMode::Cli) || invocation.args.index_only;
     if invocation.args.full_index || must_drain_before_search {
         let drain_outcome = drain_initial_indexing(
             &mut indexer,
@@ -1349,7 +1347,7 @@ mod tests {
         assert_eq!(determine_run_mode(&interactive_args), RunMode::Interactive);
 
         let (index_only_args, _) = parse_args(&["vecgrep", "--index-only"]);
-        assert_eq!(determine_run_mode(&index_only_args), RunMode::IndexOnly);
+        assert_eq!(determine_run_mode(&index_only_args), RunMode::Cli);
     }
 
     #[test]
