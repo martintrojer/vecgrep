@@ -315,7 +315,7 @@ fn handle_search(
     result_tx: &mpsc::Sender<SearchOutcome>,
 ) {
     let outcome = match embedder.embed(query) {
-        Ok(emb) => match idx.search(&emb, top_k, threshold) {
+        Ok(emb) => match idx.search(&emb, top_k, threshold, true) {
             Ok(results) => SearchOutcome::Results {
                 request_id,
                 results,
@@ -493,7 +493,7 @@ mod tests {
 
         // Verify both files are searchable
         let query_emb = embedder.embed("fn main").unwrap();
-        let results = idx.search(&query_emb, 10, 0.0).unwrap();
+        let results = idx.search(&query_emb, 10, 0.0, true).unwrap();
         let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
         assert!(
             paths.contains(&"a.rs"),
@@ -596,7 +596,7 @@ mod tests {
 
         // Verify a.rs has the updated content
         let query_emb = embedder.embed("alpha_v2 updated").unwrap();
-        let results = idx.search(&query_emb, 1, 0.0).unwrap();
+        let results = idx.search(&query_emb, 1, 0.0, true).unwrap();
         assert_eq!(results[0].chunk.file_path, "a.rs");
         assert!(
             results[0].chunk.text.contains("alpha_v2"),
