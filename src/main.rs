@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use clap::parser::ValueSource;
-use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use clap::Parser;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -277,23 +276,13 @@ fn build_invocation(
     }
 }
 
-fn with_config(mut args: Args, config: &vecgrep::config::Config, matches: &ArgMatches) -> Args {
-    apply_config(&mut args, config, matches);
-    args
-}
-
-fn resolve_invocation(
-    args: Args,
-    matches: &ArgMatches,
-    cwd: &Path,
-    project_root: &Path,
-) -> Result<Invocation> {
+fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
     let config = vecgrep::config::load_config(project_root);
-    let args = with_config(args, &config, matches);
+    resolve_config(&mut args, &config);
     let (args, path_plan) = admit_paths(args, cwd, project_root)?;
     let query = resolve_query(&args);
     let run_mode = determine_run_mode(&args);
-    let color_choice = output::resolve_color_choice(&args.color);
+    let color_choice = output::resolve_color_choice(args.color.as_ref().unwrap());
 
     Ok(build_invocation(
         args,
@@ -329,15 +318,17 @@ fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
         embedder
     };
 
-    let original_chunk_size = invocation.args.chunk_size;
-    invocation.args.chunk_size =
-        capped_chunk_size(invocation.args.chunk_size, embedder.context_tokens());
-    if invocation.args.chunk_size < original_chunk_size {
+    let original_chunk_size = invocation.args.chunk_size.unwrap();
+    invocation.args.chunk_size = Some(capped_chunk_size(
+        original_chunk_size,
+        embedder.context_tokens(),
+    ));
+    if invocation.args.chunk_size.unwrap() < original_chunk_size {
         status!(
             quiet,
             "Reducing chunk_size from {} to {} (model context limit)",
             original_chunk_size,
-            invocation.args.chunk_size
+            invocation.args.chunk_size.unwrap()
         );
     }
 
@@ -354,8 +345,8 @@ fn prepare_index(
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
-        chunk_size: invocation.args.chunk_size,
-        chunk_overlap: invocation.args.chunk_overlap,
+        chunk_size: invocation.args.chunk_size.unwrap(),
+        chunk_overlap: invocation.args.chunk_overlap.unwrap(),
     };
 
     let config_valid = idx.check_config(&config)?;
@@ -408,8 +399,8 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
 
     let indexer = pipeline::StreamingIndexer::new(
         rx,
-        invocation.args.chunk_size,
-        invocation.args.chunk_overlap,
+        invocation.args.chunk_size.unwrap(),
+        invocation.args.chunk_overlap.unwrap(),
         batch_size,
         &invocation.path_plan.cwd_suffix,
         Some(stream_progress),
@@ -593,8 +584,8 @@ fn run_serve_mode(
         idx,
         indexer,
         invocation.args.port,
-        invocation.args.top_k,
-        invocation.args.threshold,
+        invocation.args.top_k.unwrap(),
+        invocation.args.threshold.unwrap(),
         output.quiet,
         output.root,
     )?;
@@ -615,8 +606,8 @@ fn run_interactive_mode(
         idx,
         indexer,
         &invocation.query,
-        invocation.args.top_k,
-        invocation.args.threshold,
+        invocation.args.top_k.unwrap(),
+        invocation.args.threshold.unwrap(),
         output.cwd_suffix,
     )?;
     join_walker(walker_handle)?;
@@ -681,60 +672,51 @@ fn run_cli_search(
     Ok(found)
 }
 
-/// Apply config file values where CLI flags weren't explicitly provided.
-fn cli_provided(matches: &ArgMatches, id: &str) -> bool {
-    matches.value_source(id) == Some(ValueSource::CommandLine)
-}
+/// Merge CLI args with config file values: cli > config > hardcoded defaults.
+/// Bool flags use ||: CLI flag present wins, else config value, else false.
+/// Option fields use .or(): CLI value if present, else config value, else default.
+fn resolve_config(args: &mut Args, config: &vecgrep::config::Config) {
+    use vecgrep::cli::*;
 
-/// Apply config file values where CLI flags weren't explicitly provided.
-fn apply_config(args: &mut Args, config: &vecgrep::config::Config, matches: &ArgMatches) {
-    // Option fields: apply if CLI is None
-    if !cli_provided(matches, "embedder_url") {
-        args.embedder_url.clone_from(&config.embedder_url);
-    }
-    if !cli_provided(matches, "embedder_model") {
-        args.embedder_model.clone_from(&config.embedder_model);
-    }
-    if !cli_provided(matches, "max_depth") {
-        args.max_depth = config.max_depth;
-    }
+    // Value fields: cli.or(config).or(default)
+    args.top_k = args.top_k.or(config.top_k).or(Some(DEFAULT_TOP_K));
+    args.threshold = args
+        .threshold
+        .or(config.threshold)
+        .or(Some(DEFAULT_THRESHOLD));
+    args.context = args.context.or(config.context).or(Some(DEFAULT_CONTEXT));
+    args.chunk_size = args
+        .chunk_size
+        .or(config.chunk_size)
+        .or(Some(DEFAULT_CHUNK_SIZE));
+    args.chunk_overlap = args
+        .chunk_overlap
+        .or(config.chunk_overlap)
+        .or(Some(DEFAULT_CHUNK_OVERLAP));
+    args.index_warn_threshold = args
+        .index_warn_threshold
+        .or(config.index_warn_threshold)
+        .or(Some(DEFAULT_INDEX_WARN_THRESHOLD));
 
-    // Fields with clap defaults: apply config unless the CLI explicitly set them.
-    macro_rules! apply_value {
-        ($field:ident, $id:literal) => {
-            if !cli_provided(matches, $id) {
-                if let Some(v) = config.$field {
-                    args.$field = v;
-                }
-            }
-        };
-    }
+    // Option fields: cli.or(config)
+    args.embedder_url = args
+        .embedder_url
+        .take()
+        .or_else(|| config.embedder_url.clone());
+    args.embedder_model = args
+        .embedder_model
+        .take()
+        .or_else(|| config.embedder_model.clone());
+    args.max_depth = args.max_depth.or(config.max_depth);
 
-    apply_value!(top_k, "top_k");
-    apply_value!(threshold, "threshold");
-    apply_value!(context, "context");
-    apply_value!(chunk_size, "chunk_size");
-    apply_value!(chunk_overlap, "chunk_overlap");
-    apply_value!(index_warn_threshold, "index_warn_threshold");
+    // Bool flags: CLI flag || config value
+    args.full_index = args.full_index || config.full_index.unwrap_or(false);
+    args.hidden = args.hidden || config.hidden.unwrap_or(false);
+    args.follow = args.follow || config.follow.unwrap_or(false);
+    args.no_ignore = args.no_ignore || config.no_ignore.unwrap_or(false);
+    args.quiet = args.quiet || config.quiet.unwrap_or(false);
 
-    // Bool fields: apply config unless the CLI explicitly set them.
-    macro_rules! apply_bool {
-        ($field:ident, $id:literal) => {
-            if !cli_provided(matches, $id) {
-                if let Some(true) = config.$field {
-                    args.$field = true;
-                }
-            }
-        };
-    }
-
-    apply_bool!(full_index, "full_index");
-    apply_bool!(hidden, "hidden");
-    apply_bool!(follow, "follow");
-    apply_bool!(no_ignore, "no_ignore");
-    apply_bool!(quiet, "quiet");
-
-    // Ignore files: merge config into CLI (additive)
+    // Ignore files: additive merge
     if let Some(ref config_files) = config.ignore_files {
         let cli_files = args.ignore_file.get_or_insert_with(Vec::new);
         for f in config_files {
@@ -744,15 +726,16 @@ fn apply_config(args: &mut Args, config: &vecgrep::config::Config, matches: &Arg
         }
     }
 
-    // Color: apply if CLI is Auto (default)
-    if !cli_provided(matches, "color") {
-        if let Some(ref c) = config.color {
-            match c.as_str() {
-                "always" => args.color = vecgrep::cli::ColorChoice::Always,
-                "never" => args.color = vecgrep::cli::ColorChoice::Never,
-                _ => {}
-            }
-        }
+    // Color: cli.or(config parsed).or(Auto)
+    if args.color.is_none() {
+        args.color = config.color.as_deref().and_then(|c| match c {
+            "always" => Some(ColorChoice::Always),
+            "never" => Some(ColorChoice::Never),
+            _ => None,
+        });
+    }
+    if args.color.is_none() {
+        args.color = Some(ColorChoice::Auto);
     }
 }
 
@@ -764,8 +747,7 @@ fn run() -> Result<bool> {
         .with_writer(std::io::stderr)
         .init();
 
-    let matches = Args::command().get_matches();
-    let args = Args::from_arg_matches(&matches).expect("clap validated matches");
+    let args = Args::parse();
 
     // Handle --type-list (no model or index needed)
     if args.type_list {
@@ -782,7 +764,7 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    let mut invocation = resolve_invocation(args, &matches, &cwd, &project_root)?;
+    let mut invocation = resolve_invocation(args, &cwd, &project_root)?;
     let quiet = invocation.args.quiet;
 
     if let Some(result) =
@@ -825,7 +807,7 @@ fn run() -> Result<bool> {
             &mut embedder,
             &idx,
             quiet,
-            invocation.args.index_warn_threshold,
+            invocation.args.index_warn_threshold.unwrap(),
             show_spinner,
             prompt_to_continue,
         )?;
@@ -874,8 +856,8 @@ fn run() -> Result<bool> {
         &idx,
         &invocation.args,
         &invocation.query,
-        invocation.args.top_k,
-        invocation.args.threshold,
+        invocation.args.top_k.unwrap(),
+        invocation.args.threshold.unwrap(),
         output,
     )?;
 
@@ -941,17 +923,14 @@ fn finish_indexing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, FromArgMatches};
     use std::path::Path;
     use std::time::Instant;
     use tempfile::TempDir;
     use vecgrep::embedder::EMBEDDING_DIM;
     use vecgrep::types::{Chunk, IndexConfig};
 
-    fn parse_args(argv: &[&str]) -> (Args, ArgMatches) {
-        let matches = Args::command().get_matches_from(argv);
-        let args = Args::from_arg_matches(&matches).expect("clap validated matches");
-        (args, matches)
+    fn parse_args(argv: &[&str]) -> Args {
+        Args::parse_from(argv)
     }
 
     fn make_chunk(file_path: &str, text: &str) -> Chunk {
@@ -1094,7 +1073,7 @@ mod tests {
         let cwd = dir.path().canonicalize().unwrap();
         let src = dir.path().join("src").display().to_string();
 
-        let (args, _) = parse_args(&["vecgrep", "needle", &src]);
+        let args = parse_args(&["vecgrep", "needle", &src]);
         let (result_args, plan) = admit_paths(args, &cwd, &cwd).unwrap();
 
         assert_eq!(result_args.paths, vec![src]);
@@ -1111,7 +1090,7 @@ mod tests {
         std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
         let cwd = dir.path().canonicalize().unwrap();
 
-        let (args, _) = parse_args(&["vecgrep", "needle", "lib.rs"]);
+        let args = parse_args(&["vecgrep", "needle", "lib.rs"]);
         let (_, plan) = admit_paths(args, &cwd, &cwd).unwrap();
 
         assert!(matches!(plan.stale_removal_scope, StaleRemovalScope::None));
@@ -1125,7 +1104,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
 
         let outside_path = outside.path().join("elsewhere.rs").display().to_string();
-        let (args, _) = parse_args(&["vecgrep", "needle", &outside_path]);
+        let args = parse_args(&["vecgrep", "needle", &outside_path]);
 
         let err = admit_paths(args, &cwd, &cwd).unwrap_err();
         assert!(err
@@ -1135,28 +1114,28 @@ mod tests {
 
     #[test]
     fn test_resolve_query_for_cli_and_serve_modes() {
-        let (cli_args, _) = parse_args(&["vecgrep", "needle"]);
+        let cli_args = parse_args(&["vecgrep", "needle"]);
         assert_eq!(resolve_query(&cli_args), "needle");
 
-        let (serve_args, _) = parse_args(&["vecgrep", "--serve"]);
+        let serve_args = parse_args(&["vecgrep", "--serve"]);
         assert_eq!(resolve_query(&serve_args), "");
     }
 
     #[test]
     fn test_determine_run_mode_prefers_expected_mode() {
-        let (serve_args, _) = parse_args(&["vecgrep", "--serve"]);
+        let serve_args = parse_args(&["vecgrep", "--serve"]);
         assert_eq!(determine_run_mode(&serve_args), RunMode::Serve);
 
-        let (interactive_args, _) = parse_args(&["vecgrep", "--interactive"]);
+        let interactive_args = parse_args(&["vecgrep", "--interactive"]);
         assert_eq!(determine_run_mode(&interactive_args), RunMode::Interactive);
 
-        let (index_only_args, _) = parse_args(&["vecgrep", "--index-only"]);
+        let index_only_args = parse_args(&["vecgrep", "--index-only"]);
         assert_eq!(determine_run_mode(&index_only_args), RunMode::Cli);
     }
 
     #[test]
     fn test_build_invocation_carries_runtime_fields() {
-        let (args, _) = parse_args(&[
+        let args = parse_args(&[
             "vecgrep",
             "--top-k",
             "7",
@@ -1183,17 +1162,17 @@ mod tests {
             termcolor::ColorChoice::Never,
         );
 
-        assert_eq!(invocation.args.chunk_size, 123);
-        assert_eq!(invocation.args.chunk_overlap, 17);
+        assert_eq!(invocation.args.chunk_size, Some(123));
+        assert_eq!(invocation.args.chunk_overlap, Some(17));
         assert!(invocation.args.full_index);
         assert!(invocation.args.quiet);
-        assert_eq!(invocation.args.top_k, 7);
-        assert_eq!(invocation.args.threshold, 0.45);
+        assert_eq!(invocation.args.top_k, Some(7));
+        assert_eq!(invocation.args.threshold, Some(0.45));
     }
 
     #[test]
-    fn test_apply_config_sets_bool_and_color_when_cli_omits_them() {
-        let (mut args, matches) = parse_args(&["vecgrep", "needle"]);
+    fn test_resolve_config_sets_bool_and_color_when_cli_omits_them() {
+        let mut args = parse_args(&["vecgrep", "needle"]);
         let config = vecgrep::config::Config {
             hidden: Some(true),
             follow: Some(true),
@@ -1204,27 +1183,27 @@ mod tests {
             ..Default::default()
         };
 
-        apply_config(&mut args, &config, &matches);
+        resolve_config(&mut args, &config);
 
         assert!(args.hidden);
         assert!(args.follow);
         assert!(args.no_ignore);
         assert!(args.quiet);
         assert!(args.full_index);
-        assert!(matches!(args.color, vecgrep::cli::ColorChoice::Always));
+        assert_eq!(args.color, Some(vecgrep::cli::ColorChoice::Always));
     }
 
     #[test]
-    fn test_apply_config_does_not_override_explicit_cli_color() {
-        let (mut args, matches) = parse_args(&["vecgrep", "--color", "never", "needle"]);
+    fn test_resolve_config_does_not_override_explicit_cli_color() {
+        let mut args = parse_args(&["vecgrep", "--color", "never", "needle"]);
         let config = vecgrep::config::Config {
             color: Some("always".to_string()),
             ..Default::default()
         };
 
-        apply_config(&mut args, &config, &matches);
+        resolve_config(&mut args, &config);
 
-        assert!(matches!(args.color, vecgrep::cli::ColorChoice::Never));
+        assert_eq!(args.color, Some(vecgrep::cli::ColorChoice::Never));
     }
 
     #[test]
@@ -1236,7 +1215,7 @@ mod tests {
             cwd_suffix: PathBuf::new(),
             stale_removal_scope: StaleRemovalScope::Prefix(PathBuf::new()),
         };
-        let (args, _) = parse_args(&["vecgrep", "--stats"]);
+        let args = parse_args(&["vecgrep", "--stats"]);
 
         let outcome = handle_pre_execution_actions(&args, &path_plan, true).unwrap();
 
@@ -1246,7 +1225,7 @@ mod tests {
     #[test]
     fn test_handle_post_index_actions_returns_after_index_only() {
         let index = Index::open_in_memory().unwrap();
-        let (args, _) = parse_args(&["vecgrep", "--index-only"]);
+        let args = parse_args(&["vecgrep", "--index-only"]);
 
         let outcome = handle_post_index_actions(&args, &index).unwrap();
 
@@ -1382,11 +1361,11 @@ mod tests {
         .unwrap();
 
         let cwd = dir.path().canonicalize().unwrap();
-        let (args, matches) = parse_args(&["vecgrep", "needle"]);
-        let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
+        let args = parse_args(&["vecgrep", "needle"]);
+        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
 
-        assert_eq!(invocation.args.top_k, 42);
-        assert_eq!(invocation.args.threshold, 0.15);
+        assert_eq!(invocation.args.top_k, Some(42));
+        assert_eq!(invocation.args.threshold, Some(0.15));
         assert!(invocation.args.quiet);
     }
 
@@ -1402,12 +1381,11 @@ mod tests {
         .unwrap();
 
         let cwd = dir.path().canonicalize().unwrap();
-        let (args, matches) =
-            parse_args(&["vecgrep", "--top-k", "7", "--threshold", "0.6", "needle"]);
-        let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
+        let args = parse_args(&["vecgrep", "--top-k", "7", "--threshold", "0.6", "needle"]);
+        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
 
-        assert_eq!(invocation.args.top_k, 7);
-        assert_eq!(invocation.args.threshold, 0.6);
+        assert_eq!(invocation.args.top_k, Some(7));
+        assert_eq!(invocation.args.threshold, Some(0.6));
         assert!(invocation.args.quiet);
     }
 
@@ -1423,7 +1401,7 @@ mod tests {
         .unwrap();
 
         let cwd = dir.path().canonicalize().unwrap();
-        let (args, matches) = parse_args(&[
+        let args = parse_args(&[
             "vecgrep",
             "--ignore-file",
             "from-cli.ignore",
@@ -1431,7 +1409,7 @@ mod tests {
             "shared.ignore",
             "needle",
         ]);
-        let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
+        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
 
         assert_eq!(
             invocation.args.ignore_file,
@@ -1449,8 +1427,8 @@ mod tests {
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let cwd = dir.path().canonicalize().unwrap();
 
-        let (args, matches) = parse_args(&["vecgrep", "--serve"]);
-        let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
+        let args = parse_args(&["vecgrep", "--serve"]);
+        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
 
         assert_eq!(invocation.run_mode, RunMode::Serve);
         assert!(invocation.query.is_empty());
