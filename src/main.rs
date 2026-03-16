@@ -453,6 +453,7 @@ fn render_cli_results(
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_cli_search(
     embedder: &mut Embedder,
     idx: &Index,
@@ -460,13 +461,14 @@ fn run_cli_search(
     query: &str,
     top_k: usize,
     threshold: f32,
+    include_explicit: bool,
     output: CliOutputContext<'_>,
 ) -> Result<bool> {
     let chunk_count = idx.chunk_count()?;
     status!(output.quiet, "Index has {} chunks.", chunk_count);
 
     let query_embedding = embedder.embed(query)?;
-    let results = idx.search(&query_embedding, top_k, threshold)?;
+    let results = idx.search(&query_embedding, top_k, threshold, include_explicit)?;
 
     let found = render_cli_results(
         results,
@@ -593,6 +595,8 @@ fn run() -> Result<bool> {
         );
     }
 
+    // Include explicit files in results when any path is a file
+    let has_explicit_files = invocation.args.paths.iter().any(|p| Path::new(p).is_file());
     let found = run_cli_search(
         &mut embedder,
         &idx,
@@ -600,6 +604,7 @@ fn run() -> Result<bool> {
         &invocation.query,
         invocation.args.top_k.unwrap(),
         invocation.args.threshold.unwrap(),
+        has_explicit_files,
         output,
     )?;
 

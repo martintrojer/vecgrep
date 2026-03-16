@@ -69,7 +69,7 @@ fn test_index_and_search_roundtrip() {
     assert_eq!(index.chunk_count().unwrap(), 3);
 
     // Search with the first embedding as query — should find itself as top match
-    let results = index.search(&embeddings[0], 3, 0.0).unwrap();
+    let results = index.search(&embeddings[0], 3, 0.0, true).unwrap();
     assert!(!results.is_empty());
     // The top result should have a very high similarity (close to 1.0)
     assert!(results[0].score > 0.99);
@@ -137,11 +137,11 @@ fn test_incremental_indexing() {
     assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Verify a.rs has the updated content
-    let results = index.search(&emb_a_v2[0], 1, -1.0).unwrap();
+    let results = index.search(&emb_a_v2[0], 1, -1.0, true).unwrap();
     assert_eq!(results[0].chunk.text, "fn a_modified() {}");
 
     // Verify b.rs is still intact
-    let results = index.search(&emb_b[0], 1, -1.0).unwrap();
+    let results = index.search(&emb_b[0], 1, -1.0, true).unwrap();
     assert_eq!(results[0].chunk.text, "fn b() {}");
 
     // Verify updated hash
@@ -574,7 +574,7 @@ fn test_search_with_non_default_embedding_dim() {
     assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Search should work with the correct dimension
-    let results = index.search(&embeddings[0], 2, 0.0).unwrap();
+    let results = index.search(&embeddings[0], 2, 0.0, true).unwrap();
     assert!(!results.is_empty());
     assert!(results[0].score > 0.99); // should find itself
 }

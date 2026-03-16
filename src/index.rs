@@ -48,12 +48,14 @@ fn delete_file_by_id(conn: &Connection, file_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn all_file_paths(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT path FROM files")?;
-    let paths: Vec<String> = stmt
-        .query_map([], |row| row.get(0))?
+fn all_file_paths_with_explicit(conn: &Connection) -> Result<Vec<(String, bool)>> {
+    let mut stmt = conn.prepare("SELECT path, explicit FROM files")?;
+    let rows: Vec<(String, bool)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(paths)
+    Ok(rows)
 }
 
 fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -84,9 +86,6 @@ fn clear_all_data(conn: &Connection) -> Result<()> {
 
 pub struct Index {
     conn: Connection,
-    /// Optional in-memory index for explicit file paths.
-    /// When present, search queries both and merges results by score.
-    ephemeral: Option<Box<Index>>,
 }
 
 impl Index {
@@ -124,10 +123,7 @@ impl Index {
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
-        let index = Self {
-            conn,
-            ephemeral: None,
-        };
+        let index = Self { conn };
         index.create_tables()?;
         Ok(index)
     }
@@ -137,10 +133,7 @@ impl Index {
         init_sqlite_vec();
 
         let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
-        let index = Self {
-            conn,
-            ephemeral: None,
-        };
+        let index = Self { conn };
         index.create_tables()?;
         Ok(index)
     }
@@ -316,55 +309,40 @@ impl Index {
         })
     }
 
-    /// Attach an ephemeral in-memory index for explicit file paths.
-    /// Searches will query both indexes and merge results by score.
-    pub fn attach_ephemeral(&mut self, ephemeral: Index) {
-        self.ephemeral = Some(Box::new(ephemeral));
-    }
-
     /// Search for chunks most similar to the query embedding.
-    /// If an ephemeral index is attached, results from both are merged.
+    /// When `include_explicit` is false, files marked as explicit are excluded
+    /// from results. This prevents explicitly-indexed files (e.g. gitignored
+    /// files passed by path) from appearing in directory-scoped searches.
     pub fn search(
         &self,
         query_embedding: &[f32],
         top_k: usize,
         threshold: f32,
+        include_explicit: bool,
     ) -> Result<Vec<SearchResult>> {
         if top_k == 0 {
             return Ok(vec![]);
         }
 
-        let mut results = self.search_conn(query_embedding, top_k, threshold)?;
-
-        if let Some(ref ephemeral) = self.ephemeral {
-            let extra = ephemeral.search_conn(query_embedding, top_k, threshold)?;
-            results.extend(extra);
-            results.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            results.truncate(top_k);
-        }
-
-        Ok(results)
-    }
-
-    fn search_conn(
-        &self,
-        query_embedding: &[f32],
-        top_k: usize,
-        threshold: f32,
-    ) -> Result<Vec<SearchResult>> {
-        let mut stmt = self.conn.prepare(
+        let query = if include_explicit {
             "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
              FROM vec_chunks v \
              JOIN chunks c ON c.id = v.chunk_id \
              JOIN files f ON f.id = c.file_id \
              WHERE v.embedding MATCH ?1 \
                AND k = ?2 \
-             ORDER BY v.distance",
-        )?;
+             ORDER BY v.distance"
+        } else {
+            "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
+             FROM vec_chunks v \
+             JOIN chunks c ON c.id = v.chunk_id \
+             JOIN files f ON f.id = c.file_id \
+             WHERE v.embedding MATCH ?1 \
+               AND k = ?2 \
+               AND f.explicit = 0 \
+             ORDER BY v.distance"
+        };
+        let mut stmt = self.conn.prepare(query)?;
 
         let results = stmt
             .query_map(params![query_embedding.as_bytes(), top_k as i64], |row| {
@@ -403,39 +381,53 @@ impl Index {
 
     /// Get the number of chunks in the index.
     pub fn chunk_count(&self) -> Result<usize> {
-        let mut count: i64 = self
+        let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
-        if let Some(ref ephemeral) = self.ephemeral {
-            count += ephemeral
-                .conn
-                .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0))?;
-        }
         Ok(count as usize)
     }
 
-    /// Remove files that are no longer present on disk.
-    /// If `prefix` is provided, only files under that prefix are considered stale.
+    /// Remove non-explicit stale files and clear the explicit flag on walked files.
+    /// If `prefix` is provided, only non-explicit files under that prefix are
+    /// considered stale. Explicit files are never removed (they stay cached for
+    /// fast re-search). Files seen in the walk have their explicit flag cleared
+    /// so they become normal cached entries.
     pub fn remove_stale_files(
         &self,
         current_paths: &[String],
         prefix: Option<&str>,
     ) -> Result<usize> {
         self.with_transaction(|conn| {
-            let stored_paths = all_file_paths(conn)?;
+            let stored = all_file_paths_with_explicit(conn)?;
             let current_set: std::collections::HashSet<&str> =
                 current_paths.iter().map(|s| s.as_str()).collect();
 
             let mut removed = 0;
-            for path in &stored_paths {
-                let in_scope = prefix.is_none_or(|p| path.starts_with(p));
-                if in_scope && !current_set.contains(path.as_str()) {
-                    if let Ok(file_id) = get_file_id(conn, path) {
-                        delete_file_by_id(conn, file_id)?;
-                        removed += 1;
+            for (path, is_explicit) in &stored {
+                if !current_set.contains(path.as_str()) {
+                    // Only remove non-explicit files within the prefix scope.
+                    // Explicit files stay cached for fast re-search.
+                    if !is_explicit {
+                        let in_scope = prefix.is_none_or(|p| path.starts_with(p));
+                        if in_scope {
+                            if let Ok(file_id) = get_file_id(conn, path) {
+                                delete_file_by_id(conn, file_id)?;
+                                removed += 1;
+                            }
+                        }
                     }
                 }
             }
+
+            // Clear explicit flag on files seen in the walk (handles hash-match case
+            // where the file wasn't re-indexed but should become a normal entry)
+            for path in current_paths {
+                conn.execute(
+                    "UPDATE files SET explicit = 0 WHERE path = ?1 AND explicit = 1",
+                    params![path],
+                )?;
+            }
+
             Ok(removed)
         })
     }
@@ -623,7 +615,7 @@ mod tests {
         assert_eq!(index.chunk_count().unwrap(), 2);
 
         // Search with first embedding — should find itself as top match
-        let results = index.search(&embeddings[0], 2, -1.0).unwrap();
+        let results = index.search(&embeddings[0], 2, -1.0, true).unwrap();
         assert_eq!(results.len(), 2);
         assert!(
             results[0].score > 0.99,
@@ -662,7 +654,7 @@ mod tests {
 
         assert_eq!(index.chunk_count().unwrap(), 1);
 
-        let results = index.search(&emb_v2[0], 1, 0.0).unwrap();
+        let results = index.search(&emb_v2[0], 1, 0.0, true).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "version 2");
     }
@@ -770,7 +762,7 @@ mod tests {
     fn test_search_empty() {
         let index = Index::open_in_memory().unwrap();
         let query = make_test_embedding(EMBEDDING_DIM, 1.0);
-        let results = index.search(&query, 10, 0.0).unwrap();
+        let results = index.search(&query, 10, 0.0, true).unwrap();
         assert!(results.is_empty());
     }
 
@@ -807,7 +799,7 @@ mod tests {
         assert_eq!(index.chunk_count().unwrap(), 2);
 
         // High threshold — only the near-exact match should pass
-        let results = index.search(&emb1, 10, 0.99).unwrap();
+        let results = index.search(&emb1, 10, 0.99, true).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "similar");
     }
@@ -961,7 +953,7 @@ mod tests {
                 .unwrap();
         }
 
-        let results = index.search(&query, 10, -1.0).unwrap();
+        let results = index.search(&query, 10, -1.0, true).unwrap();
         assert!(results.len() >= 2);
         // The exact match must be first
         assert_eq!(results[0].chunk.text, "exact");
@@ -1004,7 +996,7 @@ mod tests {
 
         // top_k=100 but only 3 chunks — should return all 3
         let query = make_test_embedding(dim, 1.0);
-        let results = index.search(&query, 100, -1.0).unwrap();
+        let results = index.search(&query, 100, -1.0, true).unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -1012,7 +1004,7 @@ mod tests {
     fn test_search_top_k_zero() {
         let index = Index::open_in_memory().unwrap();
         let query = make_test_embedding(EMBEDDING_DIM, 1.0);
-        let results = index.search(&query, 0, -1.0).unwrap();
+        let results = index.search(&query, 0, -1.0, true).unwrap();
         assert!(results.is_empty());
     }
 
@@ -1034,7 +1026,7 @@ mod tests {
 
         // Use a very different query and high threshold
         let query = make_test_embedding(dim, 100.0);
-        let results = index.search(&query, 10, 0.99).unwrap();
+        let results = index.search(&query, 10, 0.99, true).unwrap();
         assert!(results.is_empty());
     }
 
@@ -1068,7 +1060,7 @@ mod tests {
         index.set_config(&config).unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 0);
-        let results = index.search(&emb[0], 10, -1.0).unwrap();
+        let results = index.search(&emb[0], 10, -1.0, true).unwrap();
         assert!(results.is_empty());
 
         // Re-index and search again
@@ -1083,7 +1075,7 @@ mod tests {
             .upsert_file("b.rs", "h2", &chunks2, &emb2, &[false])
             .unwrap();
 
-        let results = index.search(&emb2[0], 1, -1.0).unwrap();
+        let results = index.search(&emb2[0], 1, -1.0, true).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "rebuilt");
     }
@@ -1179,7 +1171,7 @@ mod tests {
 
         assert_eq!(index.chunk_count().unwrap(), 1);
 
-        let results = index.search(&emb[0], 1, -1.0).unwrap();
+        let results = index.search(&emb[0], 1, -1.0, true).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "test content");
     }
