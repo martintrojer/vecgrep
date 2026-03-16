@@ -852,3 +852,221 @@ fn test_search_from_subdirectory_shows_relative_paths() {
         "path should be relative to cwd (src/), not project root, got: {stdout}"
     );
 }
+
+// --- Ephemeral index / explicit file path tests ---
+
+#[test]
+fn test_explicit_ignored_file_does_not_pollute_persistent_index() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // Initialize git repo so .gitignore is respected
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(dir.path().join("normal.rs"), "fn normal_function() {}").unwrap();
+    std::fs::write(dir.path().join("secret.log"), "secret log data to search").unwrap();
+
+    // First: search an explicit gitignored file — should find it
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "secret log",
+            &dir.path().join("secret.log").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("secret.log"),
+        "expected secret.log in explicit file results, got: {stdout}"
+    );
+
+    // Second: search the directory — secret.log should NOT appear
+    // because it's gitignored and was only in the ephemeral index
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "secret log"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("secret.log"),
+        "gitignored file from ephemeral should not pollute persistent index, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_explicit_file_returns_results() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("target.rs"),
+        "fn search_target_function() { return 42; }",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "search target",
+            &dir.path().join("target.rs").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("target.rs"),
+        "expected target.rs in results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_mixed_file_and_directory_search() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "fn library_code() {}").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "some important notes here").unwrap();
+
+    // Search with a directory AND an explicit file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "code",
+            &dir.path().join("src").to_string_lossy(),
+            &dir.path().join("notes.txt").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Both should appear: lib.rs from persistent, notes.txt from ephemeral
+    assert!(
+        stdout.contains("lib.rs"),
+        "expected lib.rs from directory walk, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("notes.txt"),
+        "expected notes.txt from explicit file, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_index_only_with_dir_does_not_include_explicit_file_results() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    // --index-only indexes the directory into persistent cache
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Verify the file is in the persistent index via --stats
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--stats"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Files:  1"),
+        "expected 1 file in index, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_search_explicit_file_with_query() {
+    // When a query and explicit file paths are both provided,
+    // the file goes to paths (not query) and is searched ephemerally.
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("data.txt"),
+        "important data for semantic search",
+    )
+    .unwrap();
+
+    let file_path = dir.path().join("data.txt");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "semantic search",
+            &file_path.to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("data.txt"),
+        "expected data.txt in results, got: {stdout}"
+    );
+
+    // Verify it didn't pollute the persistent index
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--stats"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Files:  0"),
+        "explicit file should not be in persistent index, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_multiple_explicit_files_all_searched() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("alpha.rs"), "fn alpha_function() {}").unwrap();
+    std::fs::write(dir.path().join("beta.rs"), "fn beta_function() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "function",
+            &dir.path().join("alpha.rs").to_string_lossy(),
+            &dir.path().join("beta.rs").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("alpha.rs"),
+        "expected alpha.rs in results, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("beta.rs"),
+        "expected beta.rs in results, got: {stdout}"
+    );
+}
