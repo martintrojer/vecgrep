@@ -541,6 +541,66 @@ mod tests {
     }
 
     #[test]
+    fn test_walk_type_filter_negative() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("code.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("readme.md"), "# Hello").unwrap();
+        std::fs::write(dir.path().join("data.json"), "{}").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let opts = WalkOptions {
+            file_types_not: Some(vec!["markdown".to_string()]),
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.contains("readme.md")),
+            "markdown should be excluded, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("code.rs")),
+            "rust should be included, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("data.json")),
+            "json should be included, got: {names:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_walk_follows_symlinks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/real.txt"), "content").unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("target/real.txt"),
+            dir.path().join("link.txt"),
+        )
+        .unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+
+        // Without follow: symlink may or may not be followed depending on platform
+        // With follow: symlink should definitely be included
+        let opts = WalkOptions {
+            follow: true,
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("link.txt")),
+            "symlink should be followed, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("real.txt")),
+            "real file should be found, got: {names:?}"
+        );
+    }
+
+    #[test]
     fn test_walk_streaming_matches_walk_paths() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "aaa").unwrap();

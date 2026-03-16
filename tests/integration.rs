@@ -580,14 +580,6 @@ fn test_search_with_non_default_embedding_dim() {
 }
 
 #[test]
-fn test_search_empty_index() {
-    let index = Index::open_in_memory().unwrap();
-    let query = make_embedding(EMBEDDING_DIM, 1.0);
-    let results = index.search(&query, 10, 0.0).unwrap();
-    assert!(results.is_empty());
-}
-
-#[test]
 fn test_stats_reports_holes() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();

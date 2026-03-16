@@ -74,7 +74,7 @@ impl StreamingIndexer {
     /// Receive one file from the channel, hash-check it, and return it if it needs indexing.
     /// Returns `None` if the file is up-to-date or the channel is empty/closed.
     fn recv_one(&mut self, idx: &Index, blocking: bool) -> Option<(WalkedFile, String)> {
-        let file = if blocking {
+        let mut file = if blocking {
             match self.rx.recv() {
                 Ok(f) => f,
                 Err(_) => {
@@ -92,8 +92,6 @@ impl StreamingIndexer {
                 }
             }
         };
-
-        let mut file = file;
         file.rel_path = paths::to_project_relative(&file.rel_path, &self.cwd_suffix);
         self.all_paths.push(file.rel_path.clone());
 
@@ -186,6 +184,9 @@ impl StreamingIndexer {
 
 /// Worker batch size — small for responsiveness between search request checks.
 const WORKER_BATCH_SIZE: usize = 2;
+
+/// Embedding sub-batch size for chunked embed calls within process_batch.
+const EMBED_BATCH_SIZE: usize = 64;
 
 enum WorkerRequest {
     Search {
@@ -446,7 +447,7 @@ pub fn process_batch(
 
     // Embed all chunks in sub-batches
     let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
-    let embed_batch_size = 64;
+    let embed_batch_size = EMBED_BATCH_SIZE;
     let mut all_embeddings = Vec::new();
     let mut embedding_failed = Vec::new();
     for (batch_idx, text_batch) in texts.chunks(embed_batch_size).enumerate() {

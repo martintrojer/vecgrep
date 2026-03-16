@@ -103,6 +103,35 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// RAII guard that restores an environment variable on drop (including panic).
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     #[test]
     fn test_parse_full_config() {
         let toml = r#"
@@ -234,14 +263,11 @@ mod tests {
 
     #[test]
     fn test_global_config_path_prefers_xdg_config_home() {
-        let _guard = env_lock().lock().unwrap();
+        let _lock = env_lock().lock().unwrap();
         let xdg = tempfile::TempDir::new().unwrap();
         let home = tempfile::TempDir::new().unwrap();
-
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", xdg.path());
-            std::env::set_var("HOME", home.path());
-        }
+        let _g1 = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+        let _g2 = EnvGuard::set("HOME", home.path());
 
         let path = global_config_path().unwrap();
         assert_eq!(path, xdg.path().join("vecgrep").join("config.toml"));
@@ -249,13 +275,10 @@ mod tests {
 
     #[test]
     fn test_global_config_path_falls_back_to_home_dot_config() {
-        let _guard = env_lock().lock().unwrap();
+        let _lock = env_lock().lock().unwrap();
         let home = tempfile::TempDir::new().unwrap();
-
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::set_var("HOME", home.path());
-        }
+        let _g1 = EnvGuard::remove("XDG_CONFIG_HOME");
+        let _g2 = EnvGuard::set("HOME", home.path());
 
         let path = global_config_path().unwrap();
         assert_eq!(path, home.path().join(".config/vecgrep/config.toml"));
@@ -263,18 +286,15 @@ mod tests {
 
     #[test]
     fn test_load_config_reads_global_from_xdg_config_home() {
-        let _guard = env_lock().lock().unwrap();
+        let _lock = env_lock().lock().unwrap();
         let xdg = tempfile::TempDir::new().unwrap();
         let home = tempfile::TempDir::new().unwrap();
         let project = tempfile::TempDir::new().unwrap();
         let global_dir = xdg.path().join("vecgrep");
         std::fs::create_dir_all(&global_dir).unwrap();
         std::fs::write(global_dir.join("config.toml"), "top_k = 17\nquiet = true\n").unwrap();
-
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", xdg.path());
-            std::env::set_var("HOME", home.path());
-        }
+        let _g1 = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+        let _g2 = EnvGuard::set("HOME", home.path());
 
         let config = load_config(project.path());
         assert_eq!(config.top_k, Some(17));

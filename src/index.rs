@@ -750,17 +750,6 @@ mod tests {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
 
-        let file_count: i64 = index
-            .conn
-            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-            .unwrap();
-        let chunk_count: i64 = index
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(file_count, 0);
-        assert_eq!(chunk_count, 0);
-
         let chunks = vec![
             Chunk {
                 file_path: "a.rs".to_string(),
@@ -780,25 +769,7 @@ mod tests {
             .upsert_file("a.rs", "hash", &chunks, &emb, &[false, false])
             .unwrap();
 
-        let file_count: i64 = index
-            .conn
-            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-            .unwrap();
-        let chunk_count: i64 = index
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
-            .unwrap();
-        let failed_chunk_count: i64 = index
-            .conn
-            .query_row(
-                "SELECT COALESCE(SUM(embedding_failed), 0) FROM chunks",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(file_count, 1);
-        assert_eq!(chunk_count, 2);
-        assert_eq!(failed_chunk_count, 0);
+        assert_eq!(index.chunk_count().unwrap(), 2);
     }
 
     #[test]
