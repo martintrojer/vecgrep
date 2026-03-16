@@ -365,15 +365,21 @@ surface CommandLine {
         ClearCache(operator, invocation)
             when invocation.clear_cache_requested
 
+    @guarantee SearchResultsScopedToRequestedPaths
+        -- Search results are post-filtered to only include files under
+        -- the requested directory paths or matching requested file paths.
+        -- Searching "src/" only returns results from src/, not the entire
+        -- index. Consistent with ripgrep path scoping. Applies across
+        -- CLI, TUI, and serve.
+
     @guarantee ExplicitFilesAreCachedButFiltered
         -- Paths with kind = file are indexed with an explicit flag and
-        -- stay cached permanently for fast re-search. Searches filter
-        -- explicit files by the specific paths passed in the invocation:
-        -- only those explicit files appear in results, not all explicit
-        -- files from prior invocations. Directory-only searches exclude
-        -- all explicit files. This rule is consistent across CLI, TUI,
-        -- and serve. When a directory walk rediscovers an explicit file,
-        -- its flag is cleared and it becomes a normal cached entry.
+        -- stay cached permanently for fast re-search. Only the specific
+        -- explicit files passed in the invocation appear in results, not
+        -- all explicit files from prior invocations. Directory-only
+        -- searches exclude all explicit files. When a directory walk
+        -- rediscovers an explicit file, its flag is cleared and it
+        -- becomes a normal cached entry.
 
     @guarantee JsonOutputUsesRootRelativePaths
         -- When output_format = json, file paths are relative to the project

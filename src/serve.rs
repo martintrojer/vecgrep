@@ -8,6 +8,7 @@ use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::output::format_json_result;
 use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
+use crate::types::SearchScope;
 
 fn respond(request: Request, response: Response<std::io::Cursor<Vec<u8>>>) {
     if let Err(err) = request.respond(response) {
@@ -122,7 +123,7 @@ pub struct ServeConfig<'a> {
     pub default_threshold: f32,
     pub quiet: bool,
     pub root: &'a str,
-    pub explicit_paths: Option<Vec<String>>,
+    pub scope: SearchScope,
 }
 
 pub fn run_streaming(
@@ -143,7 +144,7 @@ pub fn run_streaming(
         eprintln!("Listening on http://127.0.0.1:{actual_port}");
     }
 
-    let worker = EmbedWorker::spawn(embedder, idx, indexer, config.explicit_paths);
+    let worker = EmbedWorker::spawn(embedder, idx, indexer, config.scope);
     let mut indexing_announced = false;
 
     loop {
@@ -247,7 +248,7 @@ mod tests {
                         default_threshold: 0.3,
                         quiet: true,
                         root: "/test/root",
-                        explicit_paths: None,
+                        scope: SearchScope::default(),
                     },
                 )
                 .expect("run shared test HTTP server");

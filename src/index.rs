@@ -5,7 +5,7 @@ use std::sync::Once;
 use zerocopy::IntoBytes;
 
 use crate::embedder::EMBEDDING_DIM;
-use crate::types::{Chunk, IndexConfig, SearchResult};
+use crate::types::{Chunk, IndexConfig, SearchResult, SearchScope};
 
 static SQLITE_VEC_INIT: Once = Once::new();
 const SCHEMA_VERSION: i64 = 2;
@@ -310,38 +310,37 @@ impl Index {
     }
 
     /// Search for chunks most similar to the query embedding.
-    /// `explicit_paths` controls which explicit files appear in results:
-    /// - `None`: exclude all explicit files (directory-only searches)
-    /// - `Some(paths)`: include only these specific explicit files alongside
-    ///   normal files (when the user passed file paths on the command line)
+    /// See `SearchScope` for how explicit files and path scoping work.
     pub fn search(
         &self,
         query_embedding: &[f32],
         top_k: usize,
         threshold: f32,
-        explicit_paths: Option<&[String]>,
+        scope: &SearchScope,
     ) -> Result<Vec<SearchResult>> {
+        let explicit_paths = &scope.explicit_paths;
+        let path_scopes = &scope.path_scopes;
         if top_k == 0 {
             return Ok(vec![]);
         }
 
-        let query = match explicit_paths {
-            Some(paths) if !paths.is_empty() => {
-                let placeholders: Vec<String> =
-                    (0..paths.len()).map(|i| format!("?{}", i + 3)).collect();
-                format!(
-                    "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
-                     FROM vec_chunks v \
-                     JOIN chunks c ON c.id = v.chunk_id \
-                     JOIN files f ON f.id = c.file_id \
-                     WHERE v.embedding MATCH ?1 \
-                       AND k = ?2 \
-                       AND (f.explicit = 0 OR f.path IN ({})) \
-                     ORDER BY v.distance",
-                    placeholders.join(", ")
-                )
-            }
-            _ => "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
+        let query = if !explicit_paths.is_empty() {
+            let placeholders: Vec<String> = (0..explicit_paths.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect();
+            format!(
+                "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
+                 FROM vec_chunks v \
+                 JOIN chunks c ON c.id = v.chunk_id \
+                 JOIN files f ON f.id = c.file_id \
+                 WHERE v.embedding MATCH ?1 \
+                   AND k = ?2 \
+                   AND (f.explicit = 0 OR f.path IN ({})) \
+                 ORDER BY v.distance",
+                placeholders.join(", ")
+            )
+        } else {
+            "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
                  FROM vec_chunks v \
                  JOIN chunks c ON c.id = v.chunk_id \
                  JOIN files f ON f.id = c.file_id \
@@ -349,7 +348,7 @@ impl Index {
                    AND k = ?2 \
                    AND f.explicit = 0 \
                  ORDER BY v.distance"
-                .to_string(),
+                .to_string()
         };
         let mut stmt = self.conn.prepare(&query)?;
 
@@ -357,10 +356,8 @@ impl Index {
             Box::new(query_embedding.as_bytes().to_vec()),
             Box::new(top_k as i64),
         ];
-        if let Some(paths) = explicit_paths {
-            for p in paths {
-                param_values.push(Box::new(p.clone()));
-            }
+        for p in explicit_paths {
+            param_values.push(Box::new(p.clone()));
         }
         let params: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
@@ -397,7 +394,26 @@ impl Index {
             })
             .collect();
 
-        Ok(search_results)
+        // Scope results to the requested paths (unless searching the project root)
+        let needs_scoping = !path_scopes.is_empty()
+            && !path_scopes
+                .iter()
+                .all(|s| s.is_empty() || Path::new(s) == Path::new("."));
+        if needs_scoping {
+            let scoped: Vec<SearchResult> = search_results
+                .into_iter()
+                .filter(|r| {
+                    path_scopes.iter().any(|scope| {
+                        let scope = Path::new(scope);
+                        let file = Path::new(&r.chunk.file_path);
+                        file == scope || file.starts_with(scope)
+                    })
+                })
+                .collect();
+            Ok(scoped)
+        } else {
+            Ok(search_results)
+        }
     }
 
     /// Get the number of chunks in the index.
@@ -636,7 +652,9 @@ mod tests {
         assert_eq!(index.chunk_count().unwrap(), 2);
 
         // Search with first embedding — should find itself as top match
-        let results = index.search(&embeddings[0], 2, -1.0, None).unwrap();
+        let results = index
+            .search(&embeddings[0], 2, -1.0, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert!(
             results[0].score > 0.99,
@@ -675,7 +693,9 @@ mod tests {
 
         assert_eq!(index.chunk_count().unwrap(), 1);
 
-        let results = index.search(&emb_v2[0], 1, 0.0, None).unwrap();
+        let results = index
+            .search(&emb_v2[0], 1, 0.0, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "version 2");
     }
@@ -783,7 +803,9 @@ mod tests {
     fn test_search_empty() {
         let index = Index::open_in_memory().unwrap();
         let query = make_test_embedding(EMBEDDING_DIM, 1.0);
-        let results = index.search(&query, 10, 0.0, None).unwrap();
+        let results = index
+            .search(&query, 10, 0.0, &SearchScope::default())
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -820,7 +842,9 @@ mod tests {
         assert_eq!(index.chunk_count().unwrap(), 2);
 
         // High threshold — only the near-exact match should pass
-        let results = index.search(&emb1, 10, 0.99, None).unwrap();
+        let results = index
+            .search(&emb1, 10, 0.99, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "similar");
     }
@@ -974,7 +998,9 @@ mod tests {
                 .unwrap();
         }
 
-        let results = index.search(&query, 10, -1.0, None).unwrap();
+        let results = index
+            .search(&query, 10, -1.0, &SearchScope::default())
+            .unwrap();
         assert!(results.len() >= 2);
         // The exact match must be first
         assert_eq!(results[0].chunk.text, "exact");
@@ -1017,7 +1043,9 @@ mod tests {
 
         // top_k=100 but only 3 chunks — should return all 3
         let query = make_test_embedding(dim, 1.0);
-        let results = index.search(&query, 100, -1.0, None).unwrap();
+        let results = index
+            .search(&query, 100, -1.0, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -1025,7 +1053,9 @@ mod tests {
     fn test_search_top_k_zero() {
         let index = Index::open_in_memory().unwrap();
         let query = make_test_embedding(EMBEDDING_DIM, 1.0);
-        let results = index.search(&query, 0, -1.0, None).unwrap();
+        let results = index
+            .search(&query, 0, -1.0, &SearchScope::default())
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -1047,7 +1077,9 @@ mod tests {
 
         // Use a very different query and high threshold
         let query = make_test_embedding(dim, 100.0);
-        let results = index.search(&query, 10, 0.99, None).unwrap();
+        let results = index
+            .search(&query, 10, 0.99, &SearchScope::default())
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -1081,7 +1113,9 @@ mod tests {
         index.set_config(&config).unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 0);
-        let results = index.search(&emb[0], 10, -1.0, None).unwrap();
+        let results = index
+            .search(&emb[0], 10, -1.0, &SearchScope::default())
+            .unwrap();
         assert!(results.is_empty());
 
         // Re-index and search again
@@ -1096,7 +1130,9 @@ mod tests {
             .upsert_file("b.rs", "h2", &chunks2, &emb2, &[false])
             .unwrap();
 
-        let results = index.search(&emb2[0], 1, -1.0, None).unwrap();
+        let results = index
+            .search(&emb2[0], 1, -1.0, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "rebuilt");
     }
@@ -1192,7 +1228,9 @@ mod tests {
 
         assert_eq!(index.chunk_count().unwrap(), 1);
 
-        let results = index.search(&emb[0], 1, -1.0, None).unwrap();
+        let results = index
+            .search(&emb[0], 1, -1.0, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "test content");
     }
@@ -1293,10 +1331,11 @@ mod tests {
         assert_eq!(index.chunk_count().unwrap(), 3);
 
         // explicit_paths=Some(["secret.log"]): normal + only secret.log
-        let paths_filter = vec!["secret.log".to_string()];
-        let results = index
-            .search(&emb_explicit1, 10, -1.0, Some(&paths_filter))
-            .unwrap();
+        let scope = SearchScope {
+            explicit_paths: vec!["secret.log".to_string()],
+            ..Default::default()
+        };
+        let results = index.search(&emb_explicit1, 10, -1.0, &scope).unwrap();
         let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
         assert!(
             paths.contains(&"secret.log"),
@@ -1312,7 +1351,9 @@ mod tests {
         );
 
         // explicit_paths=None: only normal file appears
-        let results = index.search(&emb_normal, 10, -1.0, None).unwrap();
+        let results = index
+            .search(&emb_normal, 10, -1.0, &SearchScope::default())
+            .unwrap();
         let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
         assert!(
             paths.contains(&"normal.rs"),
@@ -1400,7 +1441,9 @@ mod tests {
             .unwrap();
 
         // Verify it's excluded from non-explicit search
-        let results = index.search(&emb, 10, -1.0, None).unwrap();
+        let results = index
+            .search(&emb, 10, -1.0, &SearchScope::default())
+            .unwrap();
         assert!(results.is_empty(), "explicit file should be excluded");
 
         // Simulate a directory walk that found main.rs (hash matched, not re-indexed)
@@ -1408,7 +1451,9 @@ mod tests {
         index.remove_stale_files(&walked, None).unwrap();
 
         // Now main.rs should appear in non-explicit search (flag cleared)
-        let results = index.search(&emb, 10, -1.0, None).unwrap();
+        let results = index
+            .search(&emb, 10, -1.0, &SearchScope::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.file_path, "main.rs");
     }

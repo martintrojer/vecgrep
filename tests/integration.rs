@@ -1,6 +1,6 @@
 use vecgrep::embedder::EMBEDDING_DIM;
 use vecgrep::index::Index;
-use vecgrep::types::{Chunk, IndexConfig};
+use vecgrep::types::{Chunk, IndexConfig, SearchScope};
 
 fn make_embedding(dim: usize, seed: f32) -> Vec<f32> {
     let mut v: Vec<f32> = (0..dim).map(|i| (i as f32 * seed).sin()).collect();
@@ -69,7 +69,9 @@ fn test_index_and_search_roundtrip() {
     assert_eq!(index.chunk_count().unwrap(), 3);
 
     // Search with the first embedding as query — should find itself as top match
-    let results = index.search(&embeddings[0], 3, 0.0, None).unwrap();
+    let results = index
+        .search(&embeddings[0], 3, 0.0, &SearchScope::default())
+        .unwrap();
     assert!(!results.is_empty());
     // The top result should have a very high similarity (close to 1.0)
     assert!(results[0].score > 0.99);
@@ -137,11 +139,15 @@ fn test_incremental_indexing() {
     assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Verify a.rs has the updated content
-    let results = index.search(&emb_a_v2[0], 1, -1.0, None).unwrap();
+    let results = index
+        .search(&emb_a_v2[0], 1, -1.0, &SearchScope::default())
+        .unwrap();
     assert_eq!(results[0].chunk.text, "fn a_modified() {}");
 
     // Verify b.rs is still intact
-    let results = index.search(&emb_b[0], 1, -1.0, None).unwrap();
+    let results = index
+        .search(&emb_b[0], 1, -1.0, &SearchScope::default())
+        .unwrap();
     assert_eq!(results[0].chunk.text, "fn b() {}");
 
     // Verify updated hash
@@ -627,7 +633,9 @@ fn test_search_with_non_default_embedding_dim() {
     assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Search should work with the correct dimension
-    let results = index.search(&embeddings[0], 2, 0.0, None).unwrap();
+    let results = index
+        .search(&embeddings[0], 2, 0.0, &SearchScope::default())
+        .unwrap();
     assert!(!results.is_empty());
     assert!(results[0].score > 0.99); // should find itself
 }
@@ -1295,5 +1303,48 @@ fn test_explicit_file_search_does_not_leak_prior_explicit_files() {
     assert!(
         !stdout.contains("first.rs"),
         "first.rs should not leak into search for second.rs only, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_search_scoped_to_given_directory() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main_function() { startup(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\nHow to start up the application",
+    )
+    .unwrap();
+
+    // Index everything first
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search scoped to src/ only — should NOT return docs/guide.md
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "startup", "src/"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("main.rs"),
+        "expected main.rs in scoped results, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("guide.md"),
+        "docs/guide.md should not appear when searching only src/, got: {stdout}"
     );
 }

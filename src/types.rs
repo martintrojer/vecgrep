@@ -21,6 +21,20 @@ pub struct SearchResult {
     pub score: f32,
 }
 
+/// Controls which files appear in search results.
+///
+/// `explicit_paths`: only these specific explicit files appear alongside
+/// normal files. Empty means exclude all explicit files.
+///
+/// `path_scopes`: results are filtered to only include files under these
+/// directory prefixes or matching these exact paths. Empty means no scoping
+/// (return results from the entire index).
+#[derive(Debug, Clone, Default)]
+pub struct SearchScope {
+    pub explicit_paths: Vec<String>,
+    pub path_scopes: Vec<String>,
+}
+
 /// Index configuration, stored in meta table to detect config changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexConfig {

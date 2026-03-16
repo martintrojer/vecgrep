@@ -13,6 +13,7 @@ use vecgrep::invocation::{
 use vecgrep::pipeline::CliIndexingProgress;
 use vecgrep::root::resolve_project_root;
 use vecgrep::types::IndexConfig;
+use vecgrep::types::SearchScope;
 use vecgrep::{invocation, output, paths, pipeline, serve, tui, walker};
 
 /// Print a status message to stderr unless --quiet is set.
@@ -338,7 +339,7 @@ fn run_serve_mode(
     invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
-    explicit_paths: Option<Vec<String>>,
+    scope: SearchScope,
 ) -> Result<bool> {
     serve::run_streaming(
         embedder,
@@ -350,7 +351,7 @@ fn run_serve_mode(
             default_threshold: invocation.args.threshold.unwrap(),
             quiet: output.quiet,
             root: output.root,
-            explicit_paths,
+            scope,
         },
     )?;
     join_walker(walker_handle)?;
@@ -364,7 +365,7 @@ fn run_interactive_mode(
     invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
-    explicit_paths: Option<Vec<String>>,
+    scope: SearchScope,
 ) -> Result<bool> {
     tui::interactive::run_streaming(
         embedder,
@@ -373,7 +374,7 @@ fn run_interactive_mode(
         &invocation.query,
         &invocation.args,
         output.cwd_suffix,
-        explicit_paths,
+        scope,
     )?;
     join_walker(walker_handle)?;
     Ok(true)
@@ -413,7 +414,7 @@ fn run_cli_search(
     idx: &Index,
     args: &Args,
     query: &str,
-    explicit_paths: Option<&[String]>,
+    scope: &SearchScope,
     output: CliOutputContext<'_>,
 ) -> Result<bool> {
     let chunk_count = idx.chunk_count()?;
@@ -424,7 +425,7 @@ fn run_cli_search(
         &query_embedding,
         args.top_k.unwrap(),
         args.threshold.unwrap(),
-        explicit_paths,
+        scope,
     )?;
 
     let found = render_cli_results(
@@ -556,21 +557,15 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
-    // Collect explicit file paths for filtering: only these specific files
-    // (not all prior explicit files) will appear in search results.
-    let explicit_paths: Option<Vec<String>> = {
-        let files: Vec<String> = invocation
+    let search_scope = SearchScope {
+        explicit_paths: invocation
             .args
             .paths
             .iter()
             .filter(|p| Path::new(p).is_file())
             .cloned()
-            .collect();
-        if files.is_empty() {
-            None
-        } else {
-            Some(files)
-        }
+            .collect(),
+        path_scopes: invocation.args.paths.clone(),
     };
 
     if matches!(invocation.run_mode, RunMode::Serve) {
@@ -581,7 +576,7 @@ fn run() -> Result<bool> {
             &invocation,
             output,
             &mut walker_handle,
-            explicit_paths,
+            search_scope.clone(),
         );
     }
 
@@ -593,7 +588,7 @@ fn run() -> Result<bool> {
             &invocation,
             output,
             &mut walker_handle,
-            explicit_paths,
+            search_scope.clone(),
         );
     }
 
@@ -602,7 +597,7 @@ fn run() -> Result<bool> {
         &idx,
         &invocation.args,
         &invocation.query,
-        explicit_paths.as_deref(),
+        &search_scope,
         output,
     )?;
 
