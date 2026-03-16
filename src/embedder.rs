@@ -120,11 +120,6 @@ impl Embedder {
         }
     }
 
-    /// Whether this is a remote embedder.
-    pub fn is_remote(&self) -> bool {
-        matches!(self, Embedder::Remote(_))
-    }
-
     /// Max context in tokens for this embedder, if known.
     pub fn context_tokens(&self) -> Option<usize> {
         match self {
