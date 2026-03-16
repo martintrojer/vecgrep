@@ -259,11 +259,6 @@ struct ExecutionContext {
     root: String,
 }
 
-enum FlowControl {
-    Continue,
-    Return(bool),
-}
-
 fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec<ResolvedPath> {
     let project_root_canon = project_root
         .canonicalize()
@@ -678,11 +673,12 @@ fn print_index_stats(idx: &Index) -> Result<()> {
     Ok(())
 }
 
+/// Returns `Some(exit_status)` if the invocation should stop early, `None` to continue.
 fn handle_pre_execution_actions(
     args: &Args,
     path_plan: &PathPlan,
     quiet: bool,
-) -> Result<FlowControl> {
+) -> Result<Option<bool>> {
     if args.clear_cache {
         let cache_dir = path_plan.project_root.join(".vecgrep");
         if cache_dir.exists() {
@@ -692,37 +688,38 @@ fn handle_pre_execution_actions(
             status!(quiet, "No cache found.");
         }
         if args.query.is_none() {
-            return Ok(FlowControl::Return(true));
+            return Ok(Some(true));
         }
     }
 
     if args.stats && args.query.is_none() && !args.index_only {
         let idx = Index::open(&path_plan.project_root)?;
         print_index_stats(&idx)?;
-        return Ok(FlowControl::Return(true));
+        return Ok(Some(true));
     }
 
-    Ok(FlowControl::Continue)
+    Ok(None)
 }
 
-fn handle_post_index_actions(args: &Args, idx: &Index) -> Result<FlowControl> {
+/// Returns `Some(exit_status)` if the invocation should stop early, `None` to continue.
+fn handle_post_index_actions(args: &Args, idx: &Index) -> Result<Option<bool>> {
     if args.index_only {
         print_index_stats(idx)?;
-        return Ok(FlowControl::Return(true));
+        return Ok(Some(true));
     }
 
     if args.reindex && args.query.is_none() {
-        return Ok(FlowControl::Return(true));
+        return Ok(Some(true));
     }
 
     if args.stats {
         print_index_stats(idx)?;
         if args.query.is_none() {
-            return Ok(FlowControl::Return(true));
+            return Ok(Some(true));
         }
     }
 
-    Ok(FlowControl::Continue)
+    Ok(None)
 }
 
 fn join_walker(walker_handle: &mut Option<WalkerHandle>) -> Result<()> {
@@ -945,7 +942,7 @@ fn run() -> Result<bool> {
     let mut invocation = resolve_invocation(args, &matches, &cwd, &project_root)?;
     let quiet = invocation.args.quiet;
 
-    if let FlowControl::Return(result) =
+    if let Some(result) =
         handle_pre_execution_actions(&invocation.args, &invocation.path_plan, quiet)?
     {
         return Ok(result);
@@ -1000,7 +997,7 @@ fn run() -> Result<bool> {
         )?;
     }
 
-    if let FlowControl::Return(result) = handle_post_index_actions(&invocation.args, &idx)? {
+    if let Some(result) = handle_post_index_actions(&invocation.args, &idx)? {
         return Ok(result);
     }
 
@@ -1447,7 +1444,7 @@ mod tests {
 
         let outcome = handle_pre_execution_actions(&args, &path_plan, true).unwrap();
 
-        assert!(matches!(outcome, FlowControl::Return(true)));
+        assert_eq!(outcome, Some(true));
     }
 
     #[test]
@@ -1457,7 +1454,7 @@ mod tests {
 
         let outcome = handle_post_index_actions(&args, &index).unwrap();
 
-        assert!(matches!(outcome, FlowControl::Return(true)));
+        assert_eq!(outcome, Some(true));
     }
 
     #[test]
