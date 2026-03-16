@@ -213,11 +213,10 @@ pub enum SearchOutcome {
 
 impl SearchOutcome {
     pub fn request_id(&self) -> u64 {
-        match self {
-            SearchOutcome::Results { request_id, .. } => *request_id,
-            SearchOutcome::SearchError { request_id, .. } => *request_id,
-            SearchOutcome::EmbedError { request_id, .. } => *request_id,
-        }
+        let (Self::Results { request_id, .. }
+        | Self::SearchError { request_id, .. }
+        | Self::EmbedError { request_id, .. }) = self;
+        *request_id
     }
 }
 
