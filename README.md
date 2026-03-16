@@ -279,8 +279,8 @@ Options:
       --json                    JSONL output (includes "root" field)
       --serve                   Start HTTP server mode
       --port <PORT>             Port for HTTP server [default: auto]
-      --chunk-size <N>          Tokens per chunk [default: 500]
-      --chunk-overlap <N>       Overlap tokens [default: 100]
+      --chunk-size <N>          Tokens per chunk [default: 256]
+      --chunk-overlap <N>       Overlap tokens [default: 64]
 ```
 
 ## Integrations
