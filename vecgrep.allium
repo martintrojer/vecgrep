@@ -244,18 +244,18 @@ rule StaleEntriesRemovedAfterIndexing {
     when: run: IndexRun.status becomes completed
     requires: run.stale_cleanup_scope = walked_directory_prefix
     ensures: StaleEntriesRemoved(run.root, scope: walked_directory_prefix)
-    ensures: ExplicitEntriesCleaned(run.root, walked_paths: run.walked_paths)
+    ensures: ExplicitFlagCleared(run.root, walked_paths: run.walked_paths)
     @guidance
-        -- When the walk covers a single subdirectory, only stale entries
-        -- under that prefix are removed. Entries outside the walked
-        -- prefix are intentionally preserved so that narrow searches
-        -- don't force project-wide cleanup.
+        -- When the walk covers a single subdirectory, only non-explicit
+        -- stale entries under that prefix are removed. Entries outside
+        -- the walked prefix are intentionally preserved so that narrow
+        -- searches don't force project-wide cleanup.
         --
-        -- Explicit entries (from file paths, not directory walks) are
-        -- cleaned up project-wide: any explicit file not seen in the
-        -- current walk is removed. Files seen in the walk have their
-        -- explicit flag cleared, even if their content hash matched
-        -- and they were not re-embedded.
+        -- Explicit files (from file paths, not directory walks) are never
+        -- deleted — they stay cached for fast re-search. Files seen in
+        -- the walk have their explicit flag cleared so they become normal
+        -- cached entries (even if their content hash matched and they
+        -- were not re-embedded).
 }
 
 -- Search lifecycle --------------------------------------------------------
@@ -362,12 +362,12 @@ surface CommandLine {
         ClearCache(operator, invocation)
             when invocation.clear_cache_requested
 
-    @guarantee ExplicitFilesAreTransient
-        -- Paths with kind = file are indexed with an explicit flag.
-        -- They are searchable immediately but cleaned up on the next
-        -- directory walk: any explicit file not rediscovered by the
-        -- walker is removed from the cache. Files that are rediscovered
-        -- have their explicit flag cleared and become normal cached entries.
+    @guarantee ExplicitFilesAreCachedButFiltered
+        -- Paths with kind = file are indexed with an explicit flag and
+        -- stay cached permanently for fast re-search. Directory-scoped
+        -- searches exclude explicit files so they don't pollute results.
+        -- When a directory walk rediscovers an explicit file, its flag
+        -- is cleared and it becomes a normal cached entry.
 
     @guarantee JsonOutputUsesRootRelativePaths
         -- When output_format = json, file paths are relative to the project

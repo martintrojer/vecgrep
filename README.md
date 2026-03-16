@@ -126,7 +126,7 @@ Search is a vector KNN query via [sqlite-vec](https://github.com/asg017/sqlite-v
 - One invocation uses one selected project root and one cache. Paths outside that root are rejected by default.
 - Single directory path: vecgrep walks that subtree recursively and performs stale cleanup for that subtree.
 - Multiple directory paths: vecgrep walks all of them and updates the shared cache, but skips stale cleanup because the input is not one contiguous subtree.
-- Explicit file paths: vecgrep embeds those files into a throwaway in-memory index, so they are searched but never pollute the persistent cache. This is safe for gitignored or hidden files and the right mode for commands like `rg -l ... | xargs vecgrep ...`.
+- Explicit file paths: vecgrep indexes them with an `explicit` flag. They stay cached for fast re-search but are excluded from directory-scoped search results. When a directory walk rediscovers the file, the flag is cleared. This is safe for gitignored or hidden files and the right mode for commands like `rg -l ... | xargs vecgrep ...`.
 - `--skip-outside-root`: ignore outside-root paths instead of failing. Skipped paths are not indexed and cannot appear in results.
 - No path given: equivalent to `.`.
 
