@@ -250,6 +250,9 @@ fn query_context_length(agent: &ureq::Agent, embedder_url: &str, model: &str) ->
         .content_type("application/json")
         .send(serde_json::to_string(&body).unwrap().as_bytes())
         .ok()?;
+    if resp.status().as_u16() >= 400 {
+        return None;
+    }
     let text = resp.into_body().read_to_string().ok()?;
     let info: serde_json::Value = serde_json::from_str(&text).ok()?;
 
@@ -711,6 +714,39 @@ mod tests {
 
         let err = remote.parse_embeddings(&response, 2).unwrap_err();
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn test_extract_error_message_openai_style() {
+        let body = r#"{"error": {"message": "model not found", "type": "invalid_request"}}"#;
+        assert_eq!(extract_error_message(body), "model not found");
+    }
+
+    #[test]
+    fn test_extract_error_message_simple_error() {
+        let body = r#"{"error": "something went wrong"}"#;
+        assert_eq!(extract_error_message(body), "something went wrong");
+    }
+
+    #[test]
+    fn test_extract_error_message_ollama_style() {
+        let body = r#"{"message": "model 'mxbai' not found, try pulling it first"}"#;
+        assert_eq!(
+            extract_error_message(body),
+            "model 'mxbai' not found, try pulling it first"
+        );
+    }
+
+    #[test]
+    fn test_extract_error_message_plain_text() {
+        let body = "Internal Server Error";
+        assert_eq!(extract_error_message(body), "Internal Server Error");
+    }
+
+    #[test]
+    fn test_extract_error_message_truncates_long_body() {
+        let body = "x".repeat(300);
+        assert_eq!(extract_error_message(&body).len(), 200);
     }
 
     #[test]
