@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{
-    Args, ColorChoice, DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, DEFAULT_CONTEXT,
-    DEFAULT_INDEX_WARN_THRESHOLD, DEFAULT_THRESHOLD, DEFAULT_TOP_K,
+    Args, ColorChoice, DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, DEFAULT_INDEX_WARN_THRESHOLD,
+    DEFAULT_THRESHOLD, DEFAULT_TOP_K,
 };
 use crate::root::resolve_input_path;
 use crate::{config, output};
@@ -101,7 +101,7 @@ pub fn admit_paths(args: Args, cwd: &Path, project_root: &Path) -> Result<(Args,
     };
 
     let args = Args {
-        paths: admitted.clone(),
+        paths: admitted,
         ..args
     };
     let plan = PathPlan {
@@ -130,7 +130,6 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
         .threshold
         .or(config.threshold)
         .or(Some(DEFAULT_THRESHOLD));
-    args.context = args.context.or(config.context).or(Some(DEFAULT_CONTEXT));
     args.chunk_size = args
         .chunk_size
         .or(config.chunk_size)
@@ -350,7 +349,6 @@ mod tests {
         assert_eq!(args.threshold, Some(DEFAULT_THRESHOLD));
         assert_eq!(args.chunk_size, Some(DEFAULT_CHUNK_SIZE));
         assert_eq!(args.chunk_overlap, Some(DEFAULT_CHUNK_OVERLAP));
-        assert_eq!(args.context, Some(DEFAULT_CONTEXT));
         assert_eq!(
             args.index_warn_threshold,
             Some(DEFAULT_INDEX_WARN_THRESHOLD)
@@ -450,5 +448,6 @@ mod tests {
         assert_eq!(capped_chunk_size(256, Some(256)), 256);
         assert_eq!(capped_chunk_size(200, Some(256)), 200);
         assert_eq!(capped_chunk_size(500, None), 500);
+        assert_eq!(capped_chunk_size(500, Some(256)), 256);
     }
 }

@@ -10,7 +10,6 @@ pub struct Config {
     pub embedder_model: Option<String>,
     pub top_k: Option<usize>,
     pub threshold: Option<f32>,
-    pub context: Option<usize>,
     pub chunk_size: Option<usize>,
     pub chunk_overlap: Option<usize>,
     pub full_index: Option<bool>,
@@ -56,7 +55,6 @@ fn merge(base: Config, override_config: Config) -> Config {
         embedder_model: override_config.embedder_model.or(base.embedder_model),
         top_k: override_config.top_k.or(base.top_k),
         threshold: override_config.threshold.or(base.threshold),
-        context: override_config.context.or(base.context),
         chunk_size: override_config.chunk_size.or(base.chunk_size),
         chunk_overlap: override_config.chunk_overlap.or(base.chunk_overlap),
         full_index: override_config.full_index.or(base.full_index),
@@ -139,7 +137,6 @@ mod tests {
             embedder_model = "mxbai-embed-large"
             top_k = 20
             threshold = 0.25
-            context = 5
             chunk_size = 400
             chunk_overlap = 80
             full_index = true
@@ -159,7 +156,6 @@ mod tests {
         assert_eq!(config.embedder_model.as_deref(), Some("mxbai-embed-large"));
         assert_eq!(config.top_k, Some(20));
         assert_eq!(config.threshold, Some(0.25));
-        assert_eq!(config.context, Some(5));
         assert_eq!(config.chunk_size, Some(400));
         assert_eq!(config.chunk_overlap, Some(80));
         assert_eq!(config.full_index, Some(true));
