@@ -157,108 +157,18 @@ fn build_walk_options(args: &Args) -> walker::WalkOptions {
     }
 }
 
-/// Build an ephemeral in-memory index for explicit file paths.
-fn build_ephemeral_index(
-    file_paths: &[String],
-    embedder: &mut Embedder,
-    cwd_suffix: &Path,
-    chunk_size: usize,
-    chunk_overlap: usize,
-    config: &IndexConfig,
-) -> Result<Option<Index>> {
-    if file_paths.is_empty() {
-        return Ok(None);
-    }
-
-    let eidx = Index::open_in_memory()?;
-    eidx.rebuild_for_config(config)?;
-
-    let mut files_with_hashes = Vec::new();
-    for path_str in file_paths {
-        let path = Path::new(path_str);
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) if !c.is_empty() => c,
-            Ok(_) => continue,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::InvalidData {
-                    eprintln!("Warning: skipping binary file: {}", path_str);
-                } else {
-                    tracing::warn!("Failed to read {}: {}", path_str, e);
-                }
-                continue;
-            }
-        };
-
-        let rel_path = paths::to_project_relative(path_str, cwd_suffix);
-        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        files_with_hashes.push((walker::WalkedFile { rel_path, content }, hash));
-    }
-
-    if !files_with_hashes.is_empty() {
-        pipeline::process_batch(
-            embedder,
-            &eidx,
-            &files_with_hashes,
-            chunk_size,
-            chunk_overlap,
-        )?;
-    }
-
-    Ok(Some(eidx))
-}
-
 fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
-    let mut embedder = initialize_embedder(invocation)?;
-    let mut idx = prepare_index(
+    let embedder = initialize_embedder(invocation)?;
+    let idx = prepare_index(
         &invocation.path_plan.project_root,
         &embedder,
         invocation,
         invocation.args.reindex,
     )?;
 
-    // Split paths: explicit files go to ephemeral index, directories to walker.
-    let (file_paths, dir_paths): (Vec<_>, Vec<_>) = invocation
-        .args
-        .paths
-        .iter()
-        .cloned()
-        .partition(|p| Path::new(p).is_file());
-
-    if !file_paths.is_empty() {
-        if invocation.args.index_only {
-            status!(
-                invocation.args.quiet,
-                "Skipping {} explicit file path(s) — explicit files are not persisted to the index.",
-                file_paths.len()
-            );
-        } else {
-            let config = IndexConfig {
-                model_name: embedder.model_name().to_string(),
-                embedding_dim: embedder.embedding_dim(),
-                chunk_size: invocation.args.chunk_size.unwrap(),
-                chunk_overlap: invocation.args.chunk_overlap.unwrap(),
-            };
-            if let Some(ephemeral) = build_ephemeral_index(
-                &file_paths,
-                &mut embedder,
-                &invocation.path_plan.cwd_suffix,
-                invocation.args.chunk_size.unwrap(),
-                invocation.args.chunk_overlap.unwrap(),
-                &config,
-            )? {
-                let n = file_paths.len();
-                status!(
-                    invocation.args.quiet,
-                    "Embedded {} explicit file{}.",
-                    n,
-                    if n == 1 { "" } else { "s" }
-                );
-                idx.attach_ephemeral(ephemeral);
-            }
-        }
-    }
-
-    let walk_paths = dir_paths;
+    // All paths go through the same walker pipeline. The walker marks
+    // explicit file paths so the index can clean them up on subsequent walks.
+    let walk_paths = invocation.args.paths.clone();
 
     let batch_size = 32;
     let walk_opts = build_walk_options(&invocation.args);
@@ -780,6 +690,7 @@ mod tests {
         tx.send(walker::WalkedFile {
             rel_path: "main.rs".to_string(),
             content: "fn search_target() {}\n".to_string(),
+            explicit: false,
         })
         .unwrap();
         drop(tx);

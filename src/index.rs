@@ -168,7 +168,8 @@ impl Index {
                 CREATE TABLE IF NOT EXISTS files (
                     id INTEGER PRIMARY KEY,
                     path TEXT NOT NULL UNIQUE,
-                    content_hash TEXT NOT NULL
+                    content_hash TEXT NOT NULL,
+                    explicit INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS chunks (
                     id INTEGER PRIMARY KEY,
@@ -252,6 +253,28 @@ impl Index {
         embeddings: &[Vec<f32>],
         embedding_failed: &[bool],
     ) -> Result<()> {
+        self.upsert_file_with_explicit(
+            path,
+            content_hash,
+            chunks,
+            embeddings,
+            embedding_failed,
+            false,
+        )
+    }
+
+    /// Insert or update a file and its chunks, with an explicit flag.
+    /// Explicit files (from direct file paths, not directory walks) are
+    /// cleaned up on subsequent directory walks.
+    pub fn upsert_file_with_explicit(
+        &self,
+        path: &str,
+        content_hash: &str,
+        chunks: &[Chunk],
+        embeddings: &[Vec<f32>],
+        embedding_failed: &[bool],
+        explicit: bool,
+    ) -> Result<()> {
         self.with_transaction(|conn| {
             // Delete existing data for this file
             if let Ok(file_id) = get_file_id(conn, path) {
@@ -260,8 +283,8 @@ impl Index {
 
             // Insert file record
             conn.execute(
-                "INSERT INTO files (path, content_hash) VALUES (?1, ?2)",
-                params![path, content_hash],
+                "INSERT INTO files (path, content_hash, explicit) VALUES (?1, ?2, ?3)",
+                params![path, content_hash, explicit as i64],
             )?;
             let file_id = conn.last_insert_rowid();
 

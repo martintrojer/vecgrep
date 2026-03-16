@@ -1026,7 +1026,8 @@ fn test_search_explicit_file_with_query() {
         "expected data.txt in results, got: {stdout}"
     );
 
-    // Verify it didn't pollute the persistent index
+    // The file is in the persistent index (with explicit flag) but gets
+    // cleaned up on the next directory walk
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .args(["--stats"])
         .current_dir(dir.path())
@@ -1034,9 +1035,18 @@ fn test_search_explicit_file_with_query() {
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("Files:  0"),
-        "explicit file should not be in persistent index, got: {stderr}"
+        stderr.contains("Files:  1"),
+        "explicit file should be in index with explicit flag, got: {stderr}"
     );
+
+    // A directory walk should clean up the explicit file (data.txt is not
+    // gitignored, so the walker finds it and clears the explicit flag)
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "data"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 }
 
 #[test]
