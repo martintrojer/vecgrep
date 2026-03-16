@@ -161,7 +161,8 @@ impl Index {
         })
     }
 
-    /// Clear all data (for reindex or config change).
+    /// Clear all data (for testing).
+    #[cfg(test)]
     pub fn clear(&self) -> Result<()> {
         self.with_transaction(|| self.clear_all_data())
     }

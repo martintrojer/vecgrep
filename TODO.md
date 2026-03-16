@@ -8,10 +8,10 @@
 - [x] Remove dead `_stream_progress` parameter from `process_batch` in `pipeline.rs`
 
 ### Medium
-- [ ] Eliminate `Invocation`/`Args` field duplication in `main.rs` — access values through `invocation.args.*` instead of copying them out
-- [ ] Duplicated score-to-color thresholds in `tui.rs` — convert from `termcolor::Color` instead of duplicating logic from `output.rs`
-- [ ] Unify or document the two `l2_norm` / `l2_norm_vec` functions in `embedder.rs`
-- [ ] Mark `Index::clear()` as `#[cfg(test)]` — only used in tests
+- [x] Eliminate `Invocation`/`Args` field duplication in `main.rs` — access values through `invocation.args.*` instead of copying them out
+- [x] Duplicated score-to-color thresholds in `tui.rs` — convert from `termcolor::Color` instead of duplicating logic from `output.rs`
+- [x] Unify or document the two `l2_norm` / `l2_norm_vec` functions in `embedder.rs`
+- [x] Mark `Index::clear()` as `#[cfg(test)]` — only used in tests
 
 ### Low
 - [ ] Extract magic number `embed_batch_size = 64` in `pipeline.rs` to a named constant

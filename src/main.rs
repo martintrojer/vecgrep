@@ -235,16 +235,6 @@ struct Invocation {
     query: String,
     run_mode: RunMode,
     color_choice: termcolor::ColorChoice,
-    top_k: usize,
-    threshold: f32,
-    chunk_size: usize,
-    chunk_overlap: usize,
-    quiet: bool,
-    full_index: bool,
-    index_warn_threshold: usize,
-    embedder_url: Option<String>,
-    embedder_model: Option<String>,
-    port: Option<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -415,16 +405,6 @@ fn build_invocation(
     color_choice: termcolor::ColorChoice,
 ) -> Invocation {
     Invocation {
-        top_k: args.top_k,
-        threshold: args.threshold,
-        chunk_size: args.chunk_size,
-        chunk_overlap: args.chunk_overlap,
-        quiet: args.quiet,
-        full_index: args.full_index,
-        index_warn_threshold: args.index_warn_threshold,
-        embedder_url: args.embedder_url.clone(),
-        embedder_model: args.embedder_model.clone(),
-        port: args.port,
         args,
         path_plan,
         query,
@@ -463,10 +443,11 @@ fn resolve_invocation(
 }
 
 fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
-    let quiet = invocation.quiet;
-    let embedder = if let (Some(ref url), Some(ref model)) =
-        (&invocation.embedder_url, &invocation.embedder_model)
-    {
+    let quiet = invocation.args.quiet;
+    let embedder = if let (Some(ref url), Some(ref model)) = (
+        &invocation.args.embedder_url,
+        &invocation.args.embedder_model,
+    ) {
         status!(quiet, "Using external embedder: {} ({})", url, model);
         let mut embedder = Embedder::new_remote(url, model);
         embedder
@@ -486,14 +467,15 @@ fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
         embedder
     };
 
-    let original_chunk_size = invocation.chunk_size;
-    invocation.chunk_size = capped_chunk_size(invocation.chunk_size, embedder.context_tokens());
-    if invocation.chunk_size < original_chunk_size {
+    let original_chunk_size = invocation.args.chunk_size;
+    invocation.args.chunk_size =
+        capped_chunk_size(invocation.args.chunk_size, embedder.context_tokens());
+    if invocation.args.chunk_size < original_chunk_size {
         status!(
             quiet,
             "Reducing chunk_size from {} to {} (model context limit)",
             original_chunk_size,
-            invocation.chunk_size
+            invocation.args.chunk_size
         );
     }
 
@@ -510,15 +492,15 @@ fn prepare_index(
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
-        chunk_size: invocation.chunk_size,
-        chunk_overlap: invocation.chunk_overlap,
+        chunk_size: invocation.args.chunk_size,
+        chunk_overlap: invocation.args.chunk_overlap,
     };
 
     let config_valid = idx.check_config(&config)?;
     if !config_valid || reindex {
         if !config_valid {
             status!(
-                invocation.quiet,
+                invocation.args.quiet,
                 "Index configuration changed, rebuilding..."
             );
         }
@@ -564,8 +546,8 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
 
     let indexer = pipeline::StreamingIndexer::new(
         rx,
-        invocation.chunk_size,
-        invocation.chunk_overlap,
+        invocation.args.chunk_size,
+        invocation.args.chunk_overlap,
         batch_size,
         &invocation.path_plan.cwd_suffix,
         Some(stream_progress),
@@ -767,9 +749,9 @@ fn run_serve_mode(
         embedder,
         idx,
         indexer,
-        invocation.port,
-        invocation.top_k,
-        invocation.threshold,
+        invocation.args.port,
+        invocation.args.top_k,
+        invocation.args.threshold,
         output.quiet,
         output.root,
     )?;
@@ -790,8 +772,8 @@ fn run_interactive_mode(
         idx,
         indexer,
         &invocation.query,
-        invocation.top_k,
-        invocation.threshold,
+        invocation.args.top_k,
+        invocation.args.threshold,
         output.cwd_suffix,
     )?;
     join_walker(walker_handle)?;
@@ -961,7 +943,7 @@ fn run() -> Result<bool> {
     }
 
     let mut invocation = resolve_invocation(args, &matches, &cwd, &project_root)?;
-    let quiet = invocation.quiet;
+    let quiet = invocation.args.quiet;
 
     if let FlowControl::Return(result) =
         handle_pre_execution_actions(&invocation.args, &invocation.path_plan, quiet)?
@@ -997,13 +979,13 @@ fn run() -> Result<bool> {
     // don't miss freshly discovered files. TUI/serve stay progressive unless
     // --full-index was requested explicitly.
     let must_drain_before_search = matches!(invocation.run_mode, RunMode::IndexOnly | RunMode::Cli);
-    if invocation.full_index || must_drain_before_search {
+    if invocation.args.full_index || must_drain_before_search {
         let drain_outcome = drain_initial_indexing(
             &mut indexer,
             &mut embedder,
             &idx,
             quiet,
-            invocation.index_warn_threshold,
+            invocation.args.index_warn_threshold,
             &mut progress_reporter,
         )?;
         if matches!(drain_outcome, IndexDrainOutcome::Aborted) {
@@ -1051,8 +1033,8 @@ fn run() -> Result<bool> {
         &idx,
         &invocation.args,
         &invocation.query,
-        invocation.top_k,
-        invocation.threshold,
+        invocation.args.top_k,
+        invocation.args.threshold,
         output,
     )?;
 
@@ -1400,12 +1382,12 @@ mod tests {
             termcolor::ColorChoice::Never,
         );
 
-        assert_eq!(invocation.chunk_size, 123);
-        assert_eq!(invocation.chunk_overlap, 17);
-        assert!(invocation.full_index);
-        assert!(invocation.quiet);
-        assert_eq!(invocation.top_k, 7);
-        assert_eq!(invocation.threshold, 0.45);
+        assert_eq!(invocation.args.chunk_size, 123);
+        assert_eq!(invocation.args.chunk_overlap, 17);
+        assert!(invocation.args.full_index);
+        assert!(invocation.args.quiet);
+        assert_eq!(invocation.args.top_k, 7);
+        assert_eq!(invocation.args.threshold, 0.45);
     }
 
     #[test]
@@ -1605,9 +1587,9 @@ mod tests {
         let (args, matches) = parse_args(&["vecgrep", "needle"]);
         let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
 
-        assert_eq!(invocation.top_k, 42);
-        assert_eq!(invocation.threshold, 0.15);
-        assert!(invocation.quiet);
+        assert_eq!(invocation.args.top_k, 42);
+        assert_eq!(invocation.args.threshold, 0.15);
+        assert!(invocation.args.quiet);
     }
 
     #[test]
@@ -1626,9 +1608,9 @@ mod tests {
             parse_args(&["vecgrep", "--top-k", "7", "--threshold", "0.6", "needle"]);
         let invocation = resolve_invocation(args, &matches, &cwd, &cwd).unwrap();
 
-        assert_eq!(invocation.top_k, 7);
-        assert_eq!(invocation.threshold, 0.6);
-        assert!(invocation.quiet);
+        assert_eq!(invocation.args.top_k, 7);
+        assert_eq!(invocation.args.threshold, 0.6);
+        assert!(invocation.args.quiet);
     }
 
     #[test]
