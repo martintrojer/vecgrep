@@ -33,7 +33,7 @@ pub fn find_project_root(start: &Path) -> PathBuf {
     }
 }
 
-pub fn has_project_marker(path: &Path) -> bool {
+fn has_project_marker(path: &Path) -> bool {
     PROJECT_MARKERS
         .iter()
         .any(|marker| path.join(marker).exists())
