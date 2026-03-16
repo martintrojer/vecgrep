@@ -293,6 +293,59 @@ fn test_skip_outside_root_flag_skips_file_outside_selected_root() {
 }
 
 #[test]
+fn test_skip_outside_root_with_explicit_files_does_not_pollute() {
+    let parent = tempfile::TempDir::new().unwrap();
+    let repo = parent.path().join("repo");
+    let other = parent.path().join("other");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&repo.join(".git")).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(repo.join("lib.rs"), "fn library_code() {}").unwrap();
+    std::fs::write(other.join("outside.rs"), "fn outside_code() {}").unwrap();
+
+    // Search with explicit inside file + skipped outside file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--skip-outside-root",
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "code",
+            "lib.rs",
+            "../other/outside.rs",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("lib.rs"),
+        "expected inside explicit file in results, got: {stdout}"
+    );
+
+    // Directory walk should NOT include the explicit file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "code"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // lib.rs should appear because the directory walk finds it and clears
+    // the explicit flag
+    assert!(
+        stdout.contains("lib.rs"),
+        "lib.rs should appear in directory search (walk clears explicit flag), got: {stdout}"
+    );
+    // outside.rs was skipped, never indexed
+    assert!(
+        !stdout.contains("outside.rs"),
+        "outside file should never have been indexed, got: {stdout}"
+    );
+}
+
+#[test]
 fn test_reindex_without_query_repopulates_index() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
