@@ -750,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stats() {
+    fn test_stats_in_memory() {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
 
@@ -770,10 +770,14 @@ mod tests {
         ];
         let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, false])
+            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, true])
             .unwrap();
 
-        assert_eq!(index.chunk_count().unwrap(), 2);
+        let stats = index.stats().unwrap();
+        assert_eq!(stats.file_count, 1);
+        assert_eq!(stats.chunk_count, 2);
+        assert_eq!(stats.failed_chunk_count, 1);
+        assert_eq!(stats.db_size_bytes, 0); // in-memory DB has no file
     }
 
     #[test]
@@ -942,6 +946,14 @@ mod tests {
     }
 
     #[test]
+    fn test_search_top_k_zero() {
+        let index = Index::open_in_memory().unwrap();
+        let query = make_test_embedding(EMBEDDING_DIM, 1.0);
+        let results = index.search(&query, 0, -1.0).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn test_search_all_below_threshold() {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
@@ -1072,5 +1084,42 @@ mod tests {
         };
         index.set_config(&config).unwrap();
         assert_eq!(vec_count(&index), 0);
+    }
+
+    #[test]
+    fn test_rebuild_for_config_clears_old_data() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let config1 = IndexConfig {
+            model_name: "model-a".to_string(),
+            embedding_dim: dim,
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+        index.set_config(&config1).unwrap();
+        let chunks = vec![Chunk {
+            file_path: "old.rs".to_string(),
+            text: "old data".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb = vec![make_test_embedding(dim, 1.0)];
+        index
+            .upsert_file("old.rs", "hash1", &chunks, &emb, &[false])
+            .unwrap();
+        assert_eq!(index.chunk_count().unwrap(), 1);
+
+        let config2 = IndexConfig {
+            model_name: "model-b".to_string(),
+            embedding_dim: dim,
+            chunk_size: 200,
+            chunk_overlap: 50,
+        };
+        index.rebuild_for_config(&config2).unwrap();
+
+        assert_eq!(index.chunk_count().unwrap(), 0);
+        assert_eq!(index.get_file_hash("old.rs").unwrap(), None);
+        assert!(index.check_config(&config2).unwrap());
+        assert!(!index.check_config(&config1).unwrap());
     }
 }

@@ -1170,6 +1170,30 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_config_applies_hardcoded_defaults() {
+        let mut args = parse_args(&["vecgrep", "needle"]);
+        let config = vecgrep::config::Config::default();
+
+        resolve_config(&mut args, &config);
+
+        assert_eq!(args.top_k, Some(vecgrep::cli::DEFAULT_TOP_K));
+        assert_eq!(args.threshold, Some(vecgrep::cli::DEFAULT_THRESHOLD));
+        assert_eq!(args.chunk_size, Some(vecgrep::cli::DEFAULT_CHUNK_SIZE));
+        assert_eq!(
+            args.chunk_overlap,
+            Some(vecgrep::cli::DEFAULT_CHUNK_OVERLAP)
+        );
+        assert_eq!(args.context, Some(vecgrep::cli::DEFAULT_CONTEXT));
+        assert_eq!(
+            args.index_warn_threshold,
+            Some(vecgrep::cli::DEFAULT_INDEX_WARN_THRESHOLD)
+        );
+        assert_eq!(args.color, Some(vecgrep::cli::ColorChoice::Auto));
+        assert!(!args.quiet);
+        assert!(!args.hidden);
+    }
+
+    #[test]
     fn test_handle_pre_execution_actions_returns_after_stats_without_query() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
