@@ -5,6 +5,7 @@ pub mod interactive {
     use crate::paths;
     use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
     use crate::types::SearchResult;
+    use crate::types::SearchScope;
     use anyhow::Result;
     use crossterm::{
         event::{self, Event, KeyCode},
@@ -23,6 +24,7 @@ pub mod interactive {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_streaming(
         embedder: Embedder,
         idx: Index,
@@ -30,7 +32,7 @@ pub mod interactive {
         initial_query: &str,
         args: &crate::cli::Args,
         cwd_suffix: &Path,
-        explicit_paths: Option<Vec<String>>,
+        scope: SearchScope,
     ) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -38,7 +40,7 @@ pub mod interactive {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let worker = EmbedWorker::spawn(embedder, idx, indexer, explicit_paths);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
 
         let result = event_loop(
             &mut terminal,
