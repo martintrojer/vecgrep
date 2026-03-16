@@ -15,12 +15,17 @@ pub enum ColorChoice {
 )]
 pub struct Args {
     /// The search query (natural language or code snippet).
-    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive", "serve", "show_root"])]
+    #[arg(required_unless_present_any = ["reindex", "stats", "clear_cache", "index_only", "type_list", "interactive", "serve", "show_root", "query_flag"])]
     pub query: Option<String>,
 
     /// Paths to search (files or directories). Defaults to current directory.
     #[arg(default_values_t = vec![".".to_string()])]
     pub paths: Vec<String>,
+
+    /// Explicit query for interactive/serve mode. When set, all positional
+    /// arguments are treated as paths. Requires -i or --serve.
+    #[arg(long = "query")]
+    pub query_flag: Option<String>,
 
     /// Number of top results to return.
     #[arg(short = 'k', long = "top-k")]

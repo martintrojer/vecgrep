@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -441,23 +441,30 @@ fn run_cli_search(
     Ok(found)
 }
 
-/// In interactive/serve mode, the query is typed in the TUI or sent via HTTP.
-/// If clap parsed a positional "query" that is actually an existing file path,
-/// move it into `paths` so `| xargs vecgrep -i` works naturally: all
-/// xargs-appended arguments become paths, and the user types the query in the
-/// TUI search box.
-fn reclassify_query_as_path(args: &mut Args) {
-    if (args.interactive || args.serve) && !args.index_only {
-        if let Some(ref q) = args.query {
-            if Path::new(q).exists() {
-                let q = args.query.take().unwrap();
-                if args.paths == ["."] {
-                    args.paths = vec![q];
-                } else {
-                    args.paths.insert(0, q);
-                }
+/// When `--query` is provided, use it as the search query and treat all
+/// positional args as paths. If a positional query was also parsed, move
+/// it into paths. This makes `| xargs vecgrep -i --query "search"` work:
+/// xargs-appended files become paths, the query is explicit.
+fn resolve_query_flag(args: &mut Args) {
+    if let Some(q) = args.query_flag.take() {
+        if !args.interactive && !args.serve {
+            use clap::error::ErrorKind;
+            Args::command()
+                .error(
+                    ErrorKind::MissingRequiredArgument,
+                    "--query requires --interactive (-i) or --serve",
+                )
+                .exit();
+        }
+        // Move positional "query" (if any) into paths
+        if let Some(positional_query) = args.query.take() {
+            if args.paths == ["."] {
+                args.paths = vec![positional_query];
+            } else {
+                args.paths.insert(0, positional_query);
             }
         }
+        args.query = Some(q);
     }
 }
 
@@ -470,7 +477,7 @@ fn run() -> Result<bool> {
 
     let mut args = Args::parse();
 
-    reclassify_query_as_path(&mut args);
+    resolve_query_flag(&mut args);
 
     if args.type_list {
         walker::print_type_list();
@@ -852,75 +859,43 @@ mod tests {
     }
 
     #[test]
-    fn test_reclassify_query_moves_existing_file_to_paths_in_interactive_mode() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("main.rs");
-        std::fs::write(&file, "fn main() {}").unwrap();
+    fn test_query_flag_moves_positional_to_paths() {
+        // vecgrep --query "search" -i file1.rs file2.rs
+        // clap: query=file1.rs, paths=[file2.rs], query_flag="search"
+        let mut args =
+            Args::parse_from(["vecgrep", "--query", "search", "-i", "file1.rs", "file2.rs"]);
+        assert_eq!(args.query.as_deref(), Some("file1.rs"));
+        assert_eq!(args.query_flag.as_deref(), Some("search"));
+        assert_eq!(args.paths, ["file2.rs"]);
 
-        // Simulates: vecgrep -i main.rs  (xargs appended main.rs as first positional)
-        let mut args = Args::parse_from(["vecgrep", "-i", &file.to_string_lossy()]);
-        assert!(args.query.is_some());
-        assert_eq!(args.paths, ["."]);
+        resolve_query_flag(&mut args);
 
-        reclassify_query_as_path(&mut args);
-
-        assert!(args.query.is_none(), "query should be moved to paths");
-        assert_eq!(args.paths, [file.to_string_lossy().to_string()]);
+        assert_eq!(args.query.as_deref(), Some("search"));
+        assert_eq!(args.paths, ["file1.rs", "file2.rs"]);
     }
 
     #[test]
-    fn test_reclassify_query_prepends_to_existing_paths_in_interactive_mode() {
-        let dir = TempDir::new().unwrap();
-        let file_a = dir.path().join("a.rs");
-        let file_b = dir.path().join("b.rs");
-        std::fs::write(&file_a, "fn a() {}").unwrap();
-        std::fs::write(&file_b, "fn b() {}").unwrap();
-
-        // Simulates: vecgrep -i a.rs b.rs  (xargs appended both files)
-        let mut args = Args::parse_from([
-            "vecgrep",
-            "-i",
-            &file_a.to_string_lossy(),
-            &file_b.to_string_lossy(),
-        ]);
-        assert_eq!(args.query.as_deref(), Some(file_a.to_str().unwrap()));
-        assert_eq!(args.paths, [file_b.to_string_lossy().to_string()]);
-
-        reclassify_query_as_path(&mut args);
-
+    fn test_query_flag_without_positional_query() {
+        // vecgrep --query "search" -i
+        let mut args = Args::parse_from(["vecgrep", "--query", "search", "-i"]);
         assert!(args.query.is_none());
-        assert_eq!(args.paths.len(), 2);
-        assert_eq!(args.paths[0], file_a.to_string_lossy().to_string());
-        assert_eq!(args.paths[1], file_b.to_string_lossy().to_string());
+        assert_eq!(args.query_flag.as_deref(), Some("search"));
+
+        resolve_query_flag(&mut args);
+
+        assert_eq!(args.query.as_deref(), Some("search"));
+        assert_eq!(args.paths, ["."]);
     }
 
     #[test]
-    fn test_reclassify_query_keeps_real_query_in_interactive_mode() {
-        // Simulates: vecgrep -i "search terms" path/
-        let mut args = Args::parse_from(["vecgrep", "-i", "search terms"]);
-        assert_eq!(args.query.as_deref(), Some("search terms"));
+    fn test_no_query_flag_preserves_positional() {
+        // vecgrep "search term" -i
+        let mut args = Args::parse_from(["vecgrep", "search term", "-i"]);
+        assert_eq!(args.query.as_deref(), Some("search term"));
+        assert!(args.query_flag.is_none());
 
-        reclassify_query_as_path(&mut args);
+        resolve_query_flag(&mut args);
 
-        assert_eq!(
-            args.query.as_deref(),
-            Some("search terms"),
-            "non-file query should remain as query"
-        );
-    }
-
-    #[test]
-    fn test_reclassify_query_noop_in_cli_mode() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("main.rs");
-        std::fs::write(&file, "fn main() {}").unwrap();
-
-        // CLI mode: query should stay as query even if it's a file path
-        let mut args = Args::parse_from(["vecgrep", &file.to_string_lossy()]);
-        assert!(!args.interactive);
-
-        reclassify_query_as_path(&mut args);
-
-        assert!(args.query.is_some(), "CLI mode should not reclassify query");
+        assert_eq!(args.query.as_deref(), Some("search term"));
     }
 }

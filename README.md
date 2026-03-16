@@ -31,6 +31,9 @@ vecgrep -l "error handling" ./src | xargs rg "unwrap"
 # Reverse — ripgrep to narrow files, vecgrep to rank by meaning
 rg -l "TODO" ./src | xargs vecgrep "technical debt that should be refactored"
 
+# Interactive TUI with xargs — files as paths, query typed in TUI or via --query
+rg -l "TODO" ./src | xargs vecgrep -i --query "technical debt"
+
 # JSON output for scripting
 vecgrep "retry logic" --json | jq '.score'
 
