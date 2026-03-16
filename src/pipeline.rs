@@ -185,9 +185,6 @@ impl StreamingIndexer {
 /// Worker batch size — small for responsiveness between search request checks.
 const WORKER_BATCH_SIZE: usize = 2;
 
-/// Embedding sub-batch size for chunked embed calls within process_batch.
-const EMBED_BATCH_SIZE: usize = 64;
-
 enum WorkerRequest {
     Search {
         request_id: u64,
@@ -423,94 +420,39 @@ pub fn process_batch(
     chunk_size: usize,
     chunk_overlap: usize,
 ) -> Result<usize> {
-    let mut all_chunks = Vec::new();
-    let mut chunk_file_info: Vec<(String, String)> = Vec::new();
+    let mut total_chunks = 0;
 
     for (file, content_hash) in files_with_hashes {
-        let file_chunks = chunker::chunk_file(
+        let chunks = chunker::chunk_file(
             &file.rel_path,
             &file.content,
             chunk_size,
             chunk_overlap,
             embedder.tokenizer(),
         );
-
-        for _ in &file_chunks {
-            chunk_file_info.push((file.rel_path.clone(), content_hash.clone()));
+        if chunks.is_empty() {
+            continue;
         }
-        all_chunks.extend(file_chunks);
-    }
 
-    if all_chunks.is_empty() {
-        return Ok(0);
-    }
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        let embeddings = embedder.embed_batch(&texts)?;
 
-    // Embed all chunks in sub-batches
-    let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
-    let embed_batch_size = EMBED_BATCH_SIZE;
-    let mut all_embeddings = Vec::new();
-    let mut embedding_failed = Vec::new();
-    for (batch_idx, text_batch) in texts.chunks(embed_batch_size).enumerate() {
-        let embeddings = embedder.embed_batch(text_batch)?;
-
-        // Log zero vectors (failed embeddings from remote fallback)
-        for (i, emb) in embeddings.iter().enumerate() {
-            let global_idx = batch_idx * embed_batch_size + i;
-            let failed = emb.iter().all(|&v| v == 0.0);
-            embedding_failed.push(failed);
-            if failed {
-                if let Some((ref path, _)) = chunk_file_info.get(global_idx) {
-                    tracing::warn!("Zero embedding for chunk in file: {}", path);
+        let failed: Vec<bool> = embeddings
+            .iter()
+            .map(|emb| {
+                let is_zero = emb.iter().all(|&v| v == 0.0);
+                if is_zero {
+                    tracing::warn!("Zero embedding for chunk in file: {}", file.rel_path);
                 }
-            }
-        }
+                is_zero
+            })
+            .collect();
 
-        all_embeddings.extend(embeddings);
+        idx.upsert_file(&file.rel_path, content_hash, &chunks, &embeddings, &failed)?;
+        total_chunks += chunks.len();
     }
 
-    // Group chunks by file and insert into index
-    let mut current_file: Option<String> = None;
-    let mut file_chunks = Vec::new();
-    let mut file_embeddings = Vec::new();
-    let mut file_hash = String::new();
-
-    for (i, chunk) in all_chunks.iter().enumerate() {
-        let (ref path, ref hash) = chunk_file_info[i];
-
-        if current_file.as_ref() != Some(path) {
-            if let Some(ref prev_path) = current_file {
-                let file_failed = embedding_failed[i - file_chunks.len()..i].to_vec();
-                idx.upsert_file(
-                    prev_path,
-                    &file_hash,
-                    &file_chunks,
-                    &file_embeddings,
-                    &file_failed,
-                )?;
-            }
-            current_file = Some(path.clone());
-            file_hash = hash.clone();
-            file_chunks = Vec::new();
-            file_embeddings = Vec::new();
-        }
-
-        file_chunks.push(chunk.clone());
-        file_embeddings.push(all_embeddings[i].clone());
-    }
-
-    if let Some(ref prev_path) = current_file {
-        let start = all_chunks.len() - file_chunks.len();
-        let file_failed = embedding_failed[start..].to_vec();
-        idx.upsert_file(
-            prev_path,
-            &file_hash,
-            &file_chunks,
-            &file_embeddings,
-            &file_failed,
-        )?;
-    }
-
-    Ok(all_chunks.len())
+    Ok(total_chunks)
 }
 
 #[cfg(test)]
