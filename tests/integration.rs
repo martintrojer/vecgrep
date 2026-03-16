@@ -961,6 +961,61 @@ fn test_explicit_file_survives_directory_walk_and_is_reusable() {
 }
 
 #[test]
+fn test_explicit_file_reindexed_when_content_changes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let file_path = dir.path().join("evolving.rs");
+
+    // 1. Index with original content
+    std::fs::write(&file_path, "fn original_function() { return 1; }").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "original function",
+            &file_path.to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("original_function"),
+        "expected original content in first search, got: {stdout}"
+    );
+
+    // 2. Change the file content (new hash)
+    std::fs::write(&file_path, "fn completely_rewritten() { return 42; }").unwrap();
+
+    // 3. Search again with the same explicit file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "rewritten",
+            &file_path.to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    // 4. Should have re-indexed (new hash) and return the new content
+    assert!(
+        stdout.contains("completely_rewritten"),
+        "expected updated content after re-index, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("original_function"),
+        "old content should be replaced, got: {stdout}"
+    );
+}
+
+#[test]
 fn test_explicit_file_returns_results() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
