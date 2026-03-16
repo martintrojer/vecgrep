@@ -1,7 +1,7 @@
 pub mod interactive {
     use crate::embedder::Embedder;
     use crate::index::Index;
-    use crate::output::{SCORE_HIGH_THRESHOLD, SCORE_MEDIUM_THRESHOLD};
+    use crate::output;
     use crate::paths;
     use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
     use crate::types::SearchResult;
@@ -334,12 +334,10 @@ pub mod interactive {
         let items: Vec<ListItem> = results
             .iter()
             .map(|r| {
-                let score_color = if r.score >= SCORE_HIGH_THRESHOLD {
-                    Color::Green
-                } else if r.score >= SCORE_MEDIUM_THRESHOLD {
-                    Color::Yellow
-                } else {
-                    Color::Red
+                let score_color = match output::score_to_color(r.score) {
+                    termcolor::Color::Green => Color::Green,
+                    termcolor::Color::Yellow => Color::Yellow,
+                    _ => Color::Red,
                 };
                 let line = Line::from(vec![
                     Span::styled(

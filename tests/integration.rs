@@ -533,8 +533,7 @@ fn test_search_with_non_default_embedding_dim() {
         chunk_size: 500,
         chunk_overlap: 100,
     };
-    index.clear().unwrap();
-    index.set_config(&config).unwrap();
+    index.rebuild_for_config(&config).unwrap();
 
     let chunks = vec![
         Chunk {

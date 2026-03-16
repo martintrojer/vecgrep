@@ -879,8 +879,7 @@ mod tests {
     fn test_worker_reports_search_errors() {
         let embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
-        idx.clear().unwrap();
-        idx.set_config(&crate::types::IndexConfig {
+        idx.rebuild_for_config(&crate::types::IndexConfig {
             model_name: "remote-like".to_string(),
             embedding_dim: 1024,
             chunk_size: 500,

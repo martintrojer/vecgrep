@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ndarray::{Array1, ArrayView2, Axis};
+use ndarray::{ArrayView2, Axis};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
@@ -218,7 +218,7 @@ impl LocalEmbedder {
             let mask_sum = mask.sum().max(1e-9);
             let mean_pooled = summed / mask_sum;
 
-            let norm = l2_norm(&mean_pooled);
+            let norm = l2_norm(mean_pooled.as_slice().unwrap());
             let normalized = mean_pooled / norm.max(1e-9);
 
             results.push(normalized.to_vec());
@@ -377,7 +377,7 @@ impl RemoteEmbedder {
             }
 
             // L2 normalize
-            let norm = l2_norm_vec(&embedding);
+            let norm = l2_norm(&embedding);
             let normalized = if norm > 1e-9 {
                 embedding.iter().map(|x| x / norm).collect()
             } else {
@@ -461,11 +461,7 @@ impl RemoteEmbedder {
     }
 }
 
-fn l2_norm(v: &Array1<f32>) -> f32 {
-    v.mapv(|x| x * x).sum().sqrt()
-}
-
-fn l2_norm_vec(v: &[f32]) -> f32 {
+fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
