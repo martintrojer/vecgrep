@@ -115,7 +115,6 @@ enum StaleRemovalScope {
 
 struct PathPlan {
     project_root: PathBuf,
-    project_root_canon: PathBuf,
     cwd_suffix: PathBuf,
     inside_paths: Vec<String>,
     outside_paths: Vec<String>,
@@ -169,16 +168,12 @@ struct ExecutionContext {
 }
 
 fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec<ResolvedPath> {
-    let project_root_canon = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-
     paths
         .iter()
         .map(|input| {
             let absolute = resolve_input_path(cwd, input);
             let is_dir = absolute.is_dir();
-            let inside_root = absolute.starts_with(&project_root_canon);
+            let inside_root = absolute.starts_with(project_root);
             ResolvedPath {
                 input: input.clone(),
                 absolute,
@@ -189,6 +184,7 @@ fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec
         .collect()
 }
 
+/// Returns a canonicalized project root path.
 fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
     let cwd_project_root = find_project_root(cwd);
 
@@ -199,17 +195,14 @@ fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
         if resolved.is_dir() {
             find_project_root(&resolved)
         } else {
-            cwd.to_path_buf()
+            cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
         }
     } else {
-        cwd.to_path_buf()
+        cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
     }
 }
 
 fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> PathPlan {
-    let project_root_canon = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let inside_paths = paths
         .iter()
@@ -223,7 +216,7 @@ fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> P
         .collect();
 
     let cwd_suffix = cwd_canon
-        .strip_prefix(&project_root_canon)
+        .strip_prefix(project_root)
         .unwrap_or(Path::new(""))
         .to_path_buf();
 
@@ -236,7 +229,7 @@ fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> P
         [path] if path.is_dir => {
             let walk_prefix = path
                 .absolute
-                .strip_prefix(&project_root_canon)
+                .strip_prefix(project_root)
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
             StaleRemovalScope::Prefix(walk_prefix)
@@ -246,7 +239,6 @@ fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> P
 
     PathPlan {
         project_root: project_root.to_path_buf(),
-        project_root_canon,
         cwd_suffix,
         inside_paths,
         outside_paths,
@@ -259,20 +251,20 @@ fn apply_path_plan(args: Args, plan: &PathPlan) -> Result<Args> {
         anyhow::bail!(
             "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
             plan.outside_paths[0],
-            plan.project_root_canon.display()
+            plan.project_root.display()
         );
     }
     if !plan.outside_paths.is_empty() && args.skip_outside_root && !args.quiet {
         eprintln!(
             "Skipping {} path(s) outside project root {}.",
             plan.outside_paths.len(),
-            plan.project_root_canon.display()
+            plan.project_root.display()
         );
     }
     if plan.inside_paths.is_empty() {
         anyhow::bail!(
             "All provided paths are outside the selected project root '{}'.",
-            plan.project_root_canon.display()
+            plan.project_root.display()
         );
     }
     Ok(Args {
@@ -458,7 +450,7 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
         walker_handle: Some(walker_handle),
         root: invocation
             .path_plan
-            .project_root_canon
+            .project_root
             .to_string_lossy()
             .to_string(),
     })
@@ -814,10 +806,7 @@ fn run() -> Result<bool> {
 
     // Handle --show-root (no model or index needed)
     if args.show_root {
-        let canon = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.clone());
-        println!("{}", canon.display());
+        println!("{}", project_root.display());
         return Ok(true);
     }
 
@@ -1217,7 +1206,6 @@ mod tests {
             args,
             PathPlan {
                 project_root: PathBuf::from("."),
-                project_root_canon: PathBuf::from("."),
                 cwd_suffix: PathBuf::new(),
                 inside_paths: vec![".".to_string()],
                 outside_paths: Vec::new(),
@@ -1277,8 +1265,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let path_plan = PathPlan {
-            project_root: dir.path().to_path_buf(),
-            project_root_canon: dir.path().canonicalize().unwrap(),
+            project_root: dir.path().canonicalize().unwrap(),
             cwd_suffix: PathBuf::new(),
             inside_paths: vec![".".to_string()],
             outside_paths: Vec::new(),
