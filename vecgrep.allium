@@ -70,7 +70,8 @@ entity Invocation {
     cwd: Path
     mode: Mode
     output_format: OutputFormat
-    query: String?
+    query: String?            -- from positional or --query flag
+    query_flag: String?       -- explicit --query flag; requires interactive or serve mode; when set, all positionals are paths
     show_stats: Boolean
     show_root: Boolean
     index_only: Boolean
