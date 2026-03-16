@@ -364,9 +364,11 @@ surface CommandLine {
 
     @guarantee ExplicitFilesAreCachedButFiltered
         -- Paths with kind = file are indexed with an explicit flag and
-        -- stay cached permanently for fast re-search. Searches include
-        -- explicit files only when any input path is a file; directory-only
-        -- searches exclude them. This rule is consistent across CLI, TUI,
+        -- stay cached permanently for fast re-search. Searches filter
+        -- explicit files by the specific paths passed in the invocation:
+        -- only those explicit files appear in results, not all explicit
+        -- files from prior invocations. Directory-only searches exclude
+        -- all explicit files. This rule is consistent across CLI, TUI,
         -- and serve. When a directory walk rediscovers an explicit file,
         -- its flag is cleared and it becomes a normal cached entry.
 

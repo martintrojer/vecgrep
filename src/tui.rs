@@ -30,7 +30,7 @@ pub mod interactive {
         initial_query: &str,
         args: &crate::cli::Args,
         cwd_suffix: &Path,
-        include_explicit: bool,
+        explicit_paths: Option<Vec<String>>,
     ) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -38,7 +38,7 @@ pub mod interactive {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let worker = EmbedWorker::spawn(embedder, idx, indexer, include_explicit);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, explicit_paths);
 
         let result = event_loop(
             &mut terminal,
