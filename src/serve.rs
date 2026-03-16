@@ -116,18 +116,21 @@ fn handle_request(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct ServeConfig<'a> {
+    pub port: Option<u16>,
+    pub default_top_k: usize,
+    pub default_threshold: f32,
+    pub quiet: bool,
+    pub root: &'a str,
+}
+
 pub fn run_streaming(
     embedder: Embedder,
     idx: Index,
     indexer: StreamingIndexer,
-    port: Option<u16>,
-    default_top_k: usize,
-    default_threshold: f32,
-    quiet: bool,
-    root: &str,
+    config: ServeConfig<'_>,
 ) -> Result<()> {
-    let port = port.unwrap_or(0);
+    let port = config.port.unwrap_or(0);
     let listener =
         TcpListener::bind(("127.0.0.1", port)).context("Failed to bind HTTP listener")?;
     let actual_port = listener.local_addr()?.port();
@@ -135,7 +138,7 @@ pub fn run_streaming(
     let server = Server::from_listener(listener, None)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP server: {e}"))?;
 
-    if !quiet {
+    if !config.quiet {
         eprintln!("Listening on http://127.0.0.1:{actual_port}");
     }
 
@@ -147,7 +150,7 @@ pub fn run_streaming(
         if let Some(progress) = worker.drain_progress() {
             if progress.indexing_done && !indexing_announced {
                 indexing_announced = true;
-                if !quiet {
+                if !config.quiet {
                     eprintln!(
                         "Indexing complete. {} files indexed, {} chunks ready.",
                         progress.indexed_count, progress.chunk_count
@@ -161,7 +164,13 @@ pub fn run_streaming(
             Ok(None) | Err(_) => continue,
         };
 
-        handle_request(request, &worker, default_top_k, default_threshold, root)?;
+        handle_request(
+            request,
+            &worker,
+            config.default_top_k,
+            config.default_threshold,
+            config.root,
+        )?;
     }
 }
 
@@ -231,11 +240,13 @@ mod tests {
                     embedder,
                     idx,
                     indexer,
-                    Some(port),
-                    10,
-                    0.3,
-                    true,
-                    "/test/root",
+                    ServeConfig {
+                        port: Some(port),
+                        default_top_k: 10,
+                        default_threshold: 0.3,
+                        quiet: true,
+                        root: "/test/root",
+                    },
                 )
                 .expect("run shared test HTTP server");
             });
