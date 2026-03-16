@@ -462,6 +462,26 @@ fn run_cli_search(
     Ok(found)
 }
 
+/// In interactive/serve mode, the query is typed in the TUI or sent via HTTP.
+/// If clap parsed a positional "query" that is actually an existing file path,
+/// move it into `paths` so `| xargs vecgrep -i` works naturally: all
+/// xargs-appended arguments become paths, and the user types the query in the
+/// TUI search box.
+fn reclassify_query_as_path(args: &mut Args) {
+    if (args.interactive || args.serve) && !args.index_only {
+        if let Some(ref q) = args.query {
+            if Path::new(q).exists() {
+                let q = args.query.take().unwrap();
+                if args.paths == ["."] {
+                    args.paths = vec![q];
+                } else {
+                    args.paths.insert(0, q);
+                }
+            }
+        }
+    }
+}
+
 /// Returns Ok(true) if matches were found, Ok(false) if no matches.
 fn run() -> Result<bool> {
     tracing_subscriber::fmt()
@@ -469,7 +489,9 @@ fn run() -> Result<bool> {
         .with_writer(std::io::stderr)
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    reclassify_query_as_path(&mut args);
 
     // Reopen /dev/tty early so crossterm can use it for the TUI,
     // even when stdin was redirected by a pipe or xargs.
@@ -839,5 +861,78 @@ mod tests {
             index.get_file_hash("tests/keep.rs").unwrap(),
             Some("hash-keep".to_string())
         );
+    }
+
+    #[test]
+    fn test_reclassify_query_moves_existing_file_to_paths_in_interactive_mode() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        // Simulates: vecgrep -i main.rs  (xargs appended main.rs as first positional)
+        let mut args = Args::parse_from(["vecgrep", "-i", &file.to_string_lossy()]);
+        assert!(args.query.is_some());
+        assert_eq!(args.paths, ["."]);
+
+        reclassify_query_as_path(&mut args);
+
+        assert!(args.query.is_none(), "query should be moved to paths");
+        assert_eq!(args.paths, [file.to_string_lossy().to_string()]);
+    }
+
+    #[test]
+    fn test_reclassify_query_prepends_to_existing_paths_in_interactive_mode() {
+        let dir = TempDir::new().unwrap();
+        let file_a = dir.path().join("a.rs");
+        let file_b = dir.path().join("b.rs");
+        std::fs::write(&file_a, "fn a() {}").unwrap();
+        std::fs::write(&file_b, "fn b() {}").unwrap();
+
+        // Simulates: vecgrep -i a.rs b.rs  (xargs appended both files)
+        let mut args = Args::parse_from([
+            "vecgrep",
+            "-i",
+            &file_a.to_string_lossy(),
+            &file_b.to_string_lossy(),
+        ]);
+        assert_eq!(args.query.as_deref(), Some(file_a.to_str().unwrap()));
+        assert_eq!(args.paths, [file_b.to_string_lossy().to_string()]);
+
+        reclassify_query_as_path(&mut args);
+
+        assert!(args.query.is_none());
+        assert_eq!(args.paths.len(), 2);
+        assert_eq!(args.paths[0], file_a.to_string_lossy().to_string());
+        assert_eq!(args.paths[1], file_b.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn test_reclassify_query_keeps_real_query_in_interactive_mode() {
+        // Simulates: vecgrep -i "search terms" path/
+        let mut args = Args::parse_from(["vecgrep", "-i", "search terms"]);
+        assert_eq!(args.query.as_deref(), Some("search terms"));
+
+        reclassify_query_as_path(&mut args);
+
+        assert_eq!(
+            args.query.as_deref(),
+            Some("search terms"),
+            "non-file query should remain as query"
+        );
+    }
+
+    #[test]
+    fn test_reclassify_query_noop_in_cli_mode() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        // CLI mode: query should stay as query even if it's a file path
+        let mut args = Args::parse_from(["vecgrep", &file.to_string_lossy()]);
+        assert!(!args.interactive);
+
+        reclassify_query_as_path(&mut args);
+
+        assert!(args.query.is_some(), "CLI mode should not reclassify query");
     }
 }
