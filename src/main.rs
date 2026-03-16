@@ -40,6 +40,7 @@ fn main() {
     });
 }
 
+const BATCH_SIZE: usize = 32;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn render_progress(frame_idx: usize, progress: CliIndexingProgress) {
@@ -170,9 +171,8 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
     // explicit file paths so the index can clean them up on subsequent walks.
     let walk_paths = invocation.args.paths.clone();
 
-    let batch_size = 32;
     let walk_opts = build_walk_options(&invocation.args);
-    let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(batch_size * 2);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(BATCH_SIZE * 2);
     let stream_progress = Arc::new(walker::StreamProgress::new());
     let walker_progress = Arc::clone(&stream_progress);
     let walker_handle = std::thread::spawn(move || {
@@ -183,7 +183,7 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
         rx,
         invocation.args.chunk_size.unwrap(),
         invocation.args.chunk_overlap.unwrap(),
-        batch_size,
+        BATCH_SIZE,
         &invocation.path_plan.cwd_suffix,
         Some(stream_progress),
     );
@@ -283,28 +283,6 @@ fn drain_initial_indexing(
     } else {
         Ok(IndexDrainOutcome::Completed)
     }
-}
-
-fn drain_remaining_indexing(
-    indexer: &mut pipeline::StreamingIndexer,
-    embedder: &mut Embedder,
-    idx: &Index,
-    show_spinner: bool,
-) -> Result<()> {
-    let mut frame_idx = 0;
-    indexer.drain_all(embedder, idx, |progress| {
-        if show_spinner {
-            render_progress(frame_idx, progress);
-            frame_idx += 1;
-        }
-        Ok(true)
-    })?;
-
-    if show_spinner {
-        clear_progress_line();
-    }
-
-    Ok(())
 }
 
 fn print_index_stats(idx: &Index) -> Result<()> {
@@ -609,7 +587,15 @@ fn run() -> Result<bool> {
     )?;
 
     if !indexer.indexing_done {
-        drain_remaining_indexing(&mut indexer, &mut embedder, &idx, show_spinner)?;
+        drain_initial_indexing(
+            &mut indexer,
+            &mut embedder,
+            &idx,
+            quiet,
+            0,
+            show_spinner,
+            prompt_to_continue,
+        )?;
         finish_indexing(
             &mut indexer,
             &idx,
