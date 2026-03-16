@@ -1194,7 +1194,12 @@ mod tests {
             walked_count: 2,
         });
         std::thread::sleep(Duration::from_millis(120));
+        let start = Instant::now();
         reporter.finish();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "finish() should return promptly"
+        );
     }
 
     #[test]

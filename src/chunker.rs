@@ -149,7 +149,6 @@ mod tests {
     #[test]
     fn test_large_file_multiple_chunks() {
         let tokenizer = make_tokenizer();
-        // Create content with many lines
         let lines: Vec<String> = (0..100)
             .map(|i| format!("This is line number {} with some content to fill tokens", i))
             .collect();
@@ -157,11 +156,24 @@ mod tests {
         let chunks = chunk_file("test.txt", &content, 50, 10, Some(&tokenizer));
         assert!(chunks.len() > 1);
 
-        // Verify all chunks have valid line ranges
+        // Each chunk's token count should not greatly exceed the budget
+        // (single oversized lines are allowed to exceed it)
         for chunk in &chunks {
-            assert!(chunk.start_line >= 1);
-            assert!(chunk.end_line >= chunk.start_line);
-            assert!(chunk.end_line <= 100);
+            let token_count = tokenizer
+                .encode(chunk.text.as_str(), false)
+                .unwrap()
+                .get_ids()
+                .len();
+            let line_count = chunk.text.lines().count();
+            if line_count > 1 {
+                assert!(
+                    token_count <= 60, // small slack for line-snapping
+                    "chunk lines {}-{} has {} tokens, exceeds budget of 50",
+                    chunk.start_line,
+                    chunk.end_line,
+                    token_count
+                );
+            }
         }
     }
 
@@ -172,12 +184,28 @@ mod tests {
             .map(|i| format!("Line {} with some words", i))
             .collect();
         let content = lines.join("\n");
-        // overlap >= chunk_size: should not panic, advances by chunk_size
-        let chunks = chunk_file("test.txt", &content, 10, 10, Some(&tokenizer));
-        assert!(!chunks.is_empty());
-        // overlap > chunk_size
-        let chunks = chunk_file("test.txt", &content, 10, 20, Some(&tokenizer));
-        assert!(!chunks.is_empty());
+
+        // overlap >= chunk_size: should not panic, must cover entire file
+        for overlap in [10, 20] {
+            let chunks = chunk_file("test.txt", &content, 10, overlap, Some(&tokenizer));
+            assert!(!chunks.is_empty());
+            assert_eq!(chunks[0].start_line, 1);
+            // Last chunk should reach near the end (trailing fragments
+            // smaller than overlap are trimmed, so may not reach line 20)
+            assert!(
+                chunks.last().unwrap().end_line >= 15,
+                "last chunk should cover most of the file, got end_line={}",
+                chunks.last().unwrap().end_line
+            );
+            // Must make forward progress (no infinite loop)
+            for pair in chunks.windows(2) {
+                assert!(
+                    pair[1].start_line > pair[0].start_line,
+                    "chunker did not advance: both start at line {}",
+                    pair[0].start_line
+                );
+            }
+        }
     }
 
     #[test]
@@ -186,9 +214,15 @@ mod tests {
         // A single line with many words that exceeds chunk_size tokens
         let long_line = "word ".repeat(500);
         let chunks = chunk_file("test.txt", &long_line, 10, 2, Some(&tokenizer));
-        // Should produce at least one chunk even though the line exceeds chunk_size
-        assert!(!chunks.is_empty());
+        // Single line can't be split at line boundaries, so it becomes one chunk
+        assert_eq!(
+            chunks.len(),
+            1,
+            "single line should produce exactly one chunk"
+        );
         assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[0].end_line, 1);
+        assert_eq!(chunks[0].text.trim(), long_line.trim());
     }
 
     #[test]

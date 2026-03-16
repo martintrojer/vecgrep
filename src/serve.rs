@@ -27,6 +27,13 @@ fn json_error_header() -> Header {
         .expect("valid header")
 }
 
+fn error_response(status: u16, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::json!({"error": message}).to_string();
+    Response::from_string(body)
+        .with_status_code(StatusCode(status))
+        .with_header(json_error_header())
+}
+
 /// Handle a single HTTP search request. Returns Ok(()) after responding.
 fn handle_request(
     request: Request,
@@ -35,15 +42,8 @@ fn handle_request(
     default_threshold: f32,
     root: &str,
 ) -> Result<()> {
-    let json_content_type = json_content_header();
-    let json_error_type = json_error_header();
-
     if request.method() != &Method::Get {
-        let body = r#"{"error":"method not allowed"}"#;
-        let resp = Response::from_string(body)
-            .with_status_code(StatusCode(405))
-            .with_header(json_error_type);
-        respond(request, resp);
+        respond(request, error_response(405, "method not allowed"));
         return Ok(());
     }
 
@@ -52,21 +52,13 @@ fn handle_request(
     let parsed = match Url::parse(&full_url) {
         Ok(u) => u,
         Err(_) => {
-            let body = r#"{"error":"invalid URL"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(400))
-                .with_header(json_error_type);
-            respond(request, resp);
+            respond(request, error_response(400, "invalid URL"));
             return Ok(());
         }
     };
 
     if parsed.path() != "/search" {
-        let body = r#"{"error":"not found"}"#;
-        let resp = Response::from_string(body)
-            .with_status_code(StatusCode(404))
-            .with_header(json_error_type);
-        respond(request, resp);
+        respond(request, error_response(404, "not found"));
         return Ok(());
     }
 
@@ -79,11 +71,10 @@ fn handle_request(
     let q = match q {
         Some(q) if !q.is_empty() => q,
         _ => {
-            let body = r#"{"error":"missing or empty 'q' parameter"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(400))
-                .with_header(json_error_type);
-            respond(request, resp);
+            respond(
+                request,
+                error_response(400, "missing or empty 'q' parameter"),
+            );
             return Ok(());
         }
     };
@@ -109,29 +100,17 @@ fn handle_request(
                 body.push_str(&json.to_string());
                 body.push('\n');
             }
-            let resp = Response::from_string(body).with_header(json_content_type);
+            let resp = Response::from_string(body).with_header(json_content_header());
             respond(request, resp);
         }
         Some(SearchOutcome::SearchError { message, .. }) => {
-            let body = serde_json::json!({"error": message}).to_string();
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(500))
-                .with_header(json_error_type);
-            respond(request, resp);
+            respond(request, error_response(500, &message));
         }
         Some(SearchOutcome::EmbedError { message, .. }) => {
-            let body = serde_json::json!({"error": message}).to_string();
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(500))
-                .with_header(json_error_type);
-            respond(request, resp);
+            respond(request, error_response(500, &message));
         }
         None => {
-            let body = r#"{"error":"worker unavailable"}"#;
-            let resp = Response::from_string(body)
-                .with_status_code(StatusCode(500))
-                .with_header(json_error_type);
-            respond(request, resp);
+            respond(request, error_response(500, "worker unavailable"));
         }
     }
     Ok(())

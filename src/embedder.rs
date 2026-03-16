@@ -503,7 +503,10 @@ mod tests {
         let sim_related: f32 = e1.iter().zip(e2.iter()).map(|(a, b)| a * b).sum();
         let sim_unrelated: f32 = e1.iter().zip(e3.iter()).map(|(a, b)| a * b).sum();
 
-        assert!(sim_related > sim_unrelated);
+        assert!(
+            sim_related - sim_unrelated > 0.1,
+            "semantic gap too small: related={sim_related:.3}, unrelated={sim_unrelated:.3}"
+        );
     }
 
     #[test]
