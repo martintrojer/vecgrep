@@ -8,7 +8,7 @@ use crate::embedder::EMBEDDING_DIM;
 use crate::types::{Chunk, IndexConfig, SearchResult};
 
 static SQLITE_VEC_INIT: Once = Once::new();
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 fn vec_table_ddl(dim: usize) -> String {
     format!(
