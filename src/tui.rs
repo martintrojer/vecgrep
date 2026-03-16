@@ -23,14 +23,12 @@ pub mod interactive {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    #[allow(clippy::too_many_arguments)]
     pub fn run_streaming(
         embedder: Embedder,
         idx: Index,
         indexer: StreamingIndexer,
         initial_query: &str,
-        top_k: usize,
-        threshold: f32,
+        args: &crate::cli::Args,
         cwd_suffix: &Path,
         include_explicit: bool,
     ) -> Result<()> {
@@ -46,8 +44,8 @@ pub mod interactive {
             &mut terminal,
             &worker,
             initial_query,
-            top_k,
-            threshold,
+            args.top_k.unwrap(),
+            args.threshold.unwrap(),
             cwd_suffix,
         );
 

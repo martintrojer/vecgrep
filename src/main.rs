@@ -371,8 +371,7 @@ fn run_interactive_mode(
         idx,
         indexer,
         &invocation.query,
-        invocation.args.top_k.unwrap(),
-        invocation.args.threshold.unwrap(),
+        &invocation.args,
         output.cwd_suffix,
         include_explicit,
     )?;
@@ -409,14 +408,11 @@ fn render_cli_results(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_cli_search(
     embedder: &mut Embedder,
     idx: &Index,
     args: &Args,
     query: &str,
-    top_k: usize,
-    threshold: f32,
     include_explicit: bool,
     output: CliOutputContext<'_>,
 ) -> Result<bool> {
@@ -424,7 +420,12 @@ fn run_cli_search(
     status!(output.quiet, "Index has {} chunks.", chunk_count);
 
     let query_embedding = embedder.embed(query)?;
-    let results = idx.search(&query_embedding, top_k, threshold, include_explicit)?;
+    let results = idx.search(
+        &query_embedding,
+        args.top_k.unwrap(),
+        args.threshold.unwrap(),
+        include_explicit,
+    )?;
 
     let found = render_cli_results(
         results,
@@ -577,8 +578,6 @@ fn run() -> Result<bool> {
         &idx,
         &invocation.args,
         &invocation.query,
-        invocation.args.top_k.unwrap(),
-        invocation.args.threshold.unwrap(),
         include_explicit,
         output,
     )?;
