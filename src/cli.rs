@@ -76,11 +76,11 @@ pub struct Args {
     pub json: bool,
 
     /// Tokens per chunk.
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = 256)]
     pub chunk_size: usize,
 
     /// Overlap tokens between chunks.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 64)]
     pub chunk_overlap: usize,
 
     // --- rg-compatible flags ---
@@ -171,5 +171,17 @@ mod tests {
     fn rejects_index_only_and_show_root_together() {
         let err = Args::try_parse_from(["vecgrep", "--index-only", "--show-root"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn chunk_size_defaults_to_local_model_context_window() {
+        let args = Args::parse_from(["vecgrep", "needle"]);
+        assert_eq!(args.chunk_size, 256);
+    }
+
+    #[test]
+    fn chunk_overlap_defaults_to_quarter_window() {
+        let args = Args::parse_from(["vecgrep", "needle"]);
+        assert_eq!(args.chunk_overlap, 64);
     }
 }

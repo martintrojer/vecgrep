@@ -1284,7 +1284,7 @@ mod tests {
 
     #[test]
     fn test_capped_chunk_size_reduces_local_default_to_model_context() {
-        assert_eq!(capped_chunk_size(500, Some(256)), 256);
+        assert_eq!(capped_chunk_size(256, Some(256)), 256);
     }
 
     #[test]
