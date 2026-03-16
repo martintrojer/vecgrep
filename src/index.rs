@@ -1212,4 +1212,156 @@ mod tests {
         assert!(index.check_config(&config2).unwrap());
         assert!(!index.check_config(&config1).unwrap());
     }
+
+    // --- Explicit flag tests ---
+
+    #[test]
+    fn test_search_excludes_explicit_files_when_flag_is_false() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        let emb_normal = make_test_embedding(dim, 1.0);
+        let emb_explicit = make_test_embedding(dim, 2.0);
+
+        index
+            .upsert_file(
+                "normal.rs",
+                "h1",
+                &[Chunk {
+                    file_path: "normal.rs".to_string(),
+                    text: "normal file".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb_normal.clone()],
+                &[false],
+            )
+            .unwrap();
+        index
+            .upsert_file_with_explicit(
+                "secret.log",
+                "h2",
+                &[Chunk {
+                    file_path: "secret.log".to_string(),
+                    text: "explicit file".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb_explicit.clone()],
+                &[false],
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(index.chunk_count().unwrap(), 2);
+
+        // include_explicit=true: both files appear
+        let results = index.search(&emb_explicit, 10, -1.0, true).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert!(
+            paths.contains(&"secret.log"),
+            "expected secret.log with include_explicit=true"
+        );
+        assert!(
+            paths.contains(&"normal.rs"),
+            "expected normal.rs with include_explicit=true"
+        );
+
+        // include_explicit=false: only normal file appears
+        let results = index.search(&emb_normal, 10, -1.0, false).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert!(
+            paths.contains(&"normal.rs"),
+            "expected normal.rs with include_explicit=false"
+        );
+        assert!(
+            !paths.contains(&"secret.log"),
+            "explicit file should be excluded with include_explicit=false"
+        );
+    }
+
+    #[test]
+    fn test_stale_removal_preserves_explicit_files() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let emb = make_test_embedding(dim, 1.0);
+
+        // Add a normal file and an explicit file
+        index
+            .upsert_file(
+                "stale.rs",
+                "h1",
+                &[Chunk {
+                    file_path: "stale.rs".to_string(),
+                    text: "stale".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb.clone()],
+                &[false],
+            )
+            .unwrap();
+        index
+            .upsert_file_with_explicit(
+                "cached.log",
+                "h2",
+                &[Chunk {
+                    file_path: "cached.log".to_string(),
+                    text: "cached explicit".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb.clone()],
+                &[false],
+                true,
+            )
+            .unwrap();
+
+        // Walk found neither file — stale.rs should be removed, cached.log should survive
+        let removed = index.remove_stale_files(&[], None).unwrap();
+        assert_eq!(removed, 1, "only non-explicit stale file should be removed");
+        assert_eq!(index.get_file_hash("stale.rs").unwrap(), None);
+        assert_eq!(
+            index.get_file_hash("cached.log").unwrap(),
+            Some("h2".to_string()),
+            "explicit file should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_stale_removal_clears_explicit_flag_on_walked_files() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        let emb = make_test_embedding(dim, 1.0);
+
+        // Add a file as explicit
+        index
+            .upsert_file_with_explicit(
+                "main.rs",
+                "h1",
+                &[Chunk {
+                    file_path: "main.rs".to_string(),
+                    text: "fn main".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb.clone()],
+                &[false],
+                true,
+            )
+            .unwrap();
+
+        // Verify it's excluded from non-explicit search
+        let results = index.search(&emb, 10, -1.0, false).unwrap();
+        assert!(results.is_empty(), "explicit file should be excluded");
+
+        // Simulate a directory walk that found main.rs (hash matched, not re-indexed)
+        let walked = vec!["main.rs".to_string()];
+        index.remove_stale_files(&walked, None).unwrap();
+
+        // Now main.rs should appear in non-explicit search (flag cleared)
+        let results = index.search(&emb, 10, -1.0, false).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.file_path, "main.rs");
+    }
 }
