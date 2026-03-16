@@ -150,12 +150,7 @@ impl Index {
     /// Rebuild all index data for a new configuration atomically.
     pub fn rebuild_for_config(&self, config: &IndexConfig) -> Result<()> {
         self.with_transaction(|| {
-            self.conn.execute_batch(
-                "DROP TABLE IF EXISTS vec_chunks;
-                 DELETE FROM chunks;
-                 DELETE FROM files;
-                 DELETE FROM meta;",
-            )?;
+            self.clear_all_data()?;
 
             let config_json = serde_json::to_string(config)?;
             self.set_meta("config", &config_json)?;
@@ -168,15 +163,17 @@ impl Index {
 
     /// Clear all data (for reindex or config change).
     pub fn clear(&self) -> Result<()> {
-        self.with_transaction(|| {
-            self.conn.execute_batch(
-                "DROP TABLE IF EXISTS vec_chunks;
-                 DELETE FROM chunks;
-                 DELETE FROM files;
-                 DELETE FROM meta;",
-            )?;
-            Ok(())
-        })
+        self.with_transaction(|| self.clear_all_data())
+    }
+
+    fn clear_all_data(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS vec_chunks;
+             DELETE FROM chunks;
+             DELETE FROM files;
+             DELETE FROM meta;",
+        )?;
+        Ok(())
     }
 
     /// Get the stored content hash for a file path.
@@ -306,31 +303,11 @@ impl Index {
     }
 
     /// Remove files that are no longer present on disk.
-    pub fn remove_stale_files(&self, current_paths: &[String]) -> Result<usize> {
-        self.with_transaction(|| {
-            let stored_paths = self.all_file_paths()?;
-            let current_set: std::collections::HashSet<&str> =
-                current_paths.iter().map(|s| s.as_str()).collect();
-
-            let mut removed = 0;
-            for path in &stored_paths {
-                if !current_set.contains(path.as_str()) {
-                    if let Ok(file_id) = self.get_file_id(path) {
-                        self.delete_file_by_id(file_id)?;
-                        removed += 1;
-                    }
-                }
-            }
-            Ok(removed)
-        })
-    }
-
-    /// Remove stale files, but only within the given path prefix.
-    /// Files outside the prefix are left untouched.
-    pub fn remove_stale_files_under(
+    /// If `prefix` is provided, only files under that prefix are considered stale.
+    pub fn remove_stale_files(
         &self,
         current_paths: &[String],
-        prefix: &str,
+        prefix: Option<&str>,
     ) -> Result<usize> {
         self.with_transaction(|| {
             let stored_paths = self.all_file_paths()?;
@@ -339,7 +316,8 @@ impl Index {
 
             let mut removed = 0;
             for path in &stored_paths {
-                if path.starts_with(prefix) && !current_set.contains(path.as_str()) {
+                let in_scope = prefix.is_none_or(|p| path.starts_with(p));
+                if in_scope && !current_set.contains(path.as_str()) {
                     if let Ok(file_id) = self.get_file_id(path) {
                         self.delete_file_by_id(file_id)?;
                         removed += 1;
@@ -662,7 +640,7 @@ mod tests {
         }
 
         let current = vec!["a.rs".to_string(), "c.rs".to_string()];
-        let removed = index.remove_stale_files(&current).unwrap();
+        let removed = index.remove_stale_files(&current, None).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(index.chunk_count().unwrap(), 2);
     }
@@ -686,7 +664,7 @@ mod tests {
         }
 
         let current = vec!["src/a.rs".to_string()];
-        let removed = index.remove_stale_files_under(&current, "src/").unwrap();
+        let removed = index.remove_stale_files(&current, Some("src/")).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(index.chunk_count().unwrap(), 3);
     }
@@ -1102,7 +1080,7 @@ mod tests {
 
         // Remove stale b.rs — should drop to 1
         let current = vec!["a.rs".to_string()];
-        index.remove_stale_files(&current).unwrap();
+        index.remove_stale_files(&current, None).unwrap();
         assert_eq!(index.chunk_count().unwrap(), 1);
         assert_eq!(vec_count(&index), 1);
 
