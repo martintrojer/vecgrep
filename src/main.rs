@@ -553,25 +553,6 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
     })
 }
 
-fn drain_initial_indexing(
-    indexer: &mut pipeline::StreamingIndexer,
-    embedder: &mut Embedder,
-    idx: &Index,
-    quiet: bool,
-    threshold: usize,
-    progress_reporter: &mut Option<CliProgressReporter>,
-) -> Result<IndexDrainOutcome> {
-    drain_initial_indexing_with_prompt(
-        indexer,
-        embedder,
-        idx,
-        quiet,
-        threshold,
-        progress_reporter,
-        prompt_to_continue,
-    )
-}
-
 fn prompt_to_continue() -> Result<bool> {
     if !std::io::stdin().is_terminal() {
         return Ok(true);
@@ -584,18 +565,15 @@ fn prompt_to_continue() -> Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
-fn drain_initial_indexing_with_prompt<F>(
+fn drain_initial_indexing(
     indexer: &mut pipeline::StreamingIndexer,
     embedder: &mut Embedder,
     idx: &Index,
     quiet: bool,
     threshold: usize,
     progress_reporter: &mut Option<CliProgressReporter>,
-    mut confirm_continue: F,
-) -> Result<IndexDrainOutcome>
-where
-    F: FnMut() -> Result<bool>,
-{
+    mut confirm_continue: impl FnMut() -> Result<bool>,
+) -> Result<IndexDrainOutcome> {
     let mut threshold_prompted = false;
     let mut aborted = false;
     indexer.drain_all(embedder, idx, |progress| {
@@ -977,6 +955,7 @@ fn run() -> Result<bool> {
             quiet,
             invocation.args.index_warn_threshold,
             &mut progress_reporter,
+            prompt_to_continue,
         )?;
         if matches!(drain_outcome, IndexDrainOutcome::Aborted) {
             return Ok(false);
@@ -1229,7 +1208,7 @@ mod tests {
         let mut indexer = pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), None);
         let mut progress_reporter = None;
 
-        let outcome = drain_initial_indexing_with_prompt(
+        let outcome = drain_initial_indexing(
             &mut indexer,
             &mut embedder,
             &idx,
