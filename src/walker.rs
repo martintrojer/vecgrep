@@ -48,6 +48,7 @@ impl Default for StreamProgress {
 }
 
 /// Options for file walking, mapped from CLI flags.
+#[derive(Default)]
 pub struct WalkOptions {
     pub file_types: Option<Vec<String>>,
     pub file_types_not: Option<Vec<String>>,
@@ -237,16 +238,7 @@ mod tests {
     }
 
     fn default_opts() -> WalkOptions {
-        WalkOptions {
-            file_types: None,
-            file_types_not: None,
-            globs: None,
-            ignore_files: None,
-            hidden: false,
-            follow: false,
-            no_ignore: false,
-            max_depth: None,
-        }
+        WalkOptions::default()
     }
 
     #[test]

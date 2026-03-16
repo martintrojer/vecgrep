@@ -522,16 +522,7 @@ mod tests {
         std::fs::write(dir.path().join("two.txt"), "second file content here").unwrap();
 
         let paths = vec![dir.path().to_string_lossy().to_string()];
-        let opts = walker::WalkOptions {
-            file_types: None,
-            file_types_not: None,
-            globs: None,
-            ignore_files: None,
-            hidden: false,
-            follow: false,
-            no_ignore: false,
-            max_depth: None,
-        };
+        let opts = walker::WalkOptions::default();
 
         let (tx, rx) = mpsc::sync_channel(32);
         let handle =
@@ -850,8 +841,10 @@ mod tests {
         match worker.recv_result_for(request_id) {
             Some(SearchOutcome::SearchError { message, .. }) => {
                 assert!(
-                    !message.is_empty(),
-                    "expected a non-empty search error message"
+                    message.contains("dimension")
+                        || message.contains("1024")
+                        || message.contains("384"),
+                    "expected dimension mismatch error, got: {message}"
                 );
             }
             other => panic!("expected SearchError, got: {other:?}"),

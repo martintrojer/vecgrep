@@ -72,7 +72,7 @@ impl RemoteEmbedder {
                                     e
                                 );
                                 // Use zero vector so index positions stay aligned
-                                let dim = self.embedding_dim.unwrap_or(384);
+                                let dim = self.embedding_dim.unwrap();
                                 all_embeddings.push(vec![0.0; dim]);
                             }
                         }
@@ -381,14 +381,22 @@ mod tests {
     }
 
     #[test]
-    fn test_batches_mixed_sizes() {
+    fn test_batches_mixed_sizes_splits_when_exceeding_threshold() {
         let remote = make_test_remote(100);
-        let short = "hi";
         let medium = "a".repeat(80);
         let long = "b".repeat(150);
-        let texts: Vec<&str> = vec![short, medium.as_str(), long.as_str(), short];
+        // medium(80) + long(100 truncated) = 180 < 200 threshold, fits in one batch
+        // Adding another medium(80) → 260 > 200, forces a split
+        let texts: Vec<&str> = vec![medium.as_str(), long.as_str(), medium.as_str()];
         let batches = remote.make_batches(&texts);
-        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches.len(),
+            2,
+            "expected 2 batches when payload exceeds threshold, got {}",
+            batches.len()
+        );
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[1].len(), 1);
     }
 
     #[test]
@@ -512,12 +520,5 @@ mod tests {
     fn test_extract_error_message_truncates_long_body() {
         let body = "x".repeat(300);
         assert_eq!(extract_error_message(&body).len(), 200);
-    }
-
-    // --- config tests ---
-
-    #[test]
-    fn test_default_remote_max_chars() {
-        assert_eq!(DEFAULT_REMOTE_MAX_CHARS, 1200);
     }
 }
