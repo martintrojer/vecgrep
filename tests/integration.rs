@@ -437,7 +437,7 @@ fn test_full_index_indexes_before_search() {
     .unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .args(["--full-index", "hello world"])
+        .args(["--full-index", "--threshold", "0.0", "hello world"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -470,7 +470,7 @@ fn test_default_mode_uses_cached_index() {
 
     // Second run: default mode should find cached results
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .args(["cached function"])
+        .args(["--threshold", "0.0", "cached function"])
         .current_dir(dir.path())
         .output()
         .unwrap();

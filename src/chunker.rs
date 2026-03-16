@@ -175,6 +175,18 @@ mod tests {
                 );
             }
         }
+
+        // Verify all original lines are covered by at least one chunk
+        let mut covered = vec![false; lines.len()];
+        for chunk in &chunks {
+            for line_idx in (chunk.start_line - 1)..chunk.end_line {
+                covered[line_idx] = true;
+            }
+        }
+        assert!(
+            covered.iter().all(|&c| c),
+            "not all lines are covered by chunks"
+        );
     }
 
     #[test]
@@ -277,22 +289,38 @@ mod tests {
     // --- estimate_tokens tests ---
 
     #[test]
-    fn test_estimate_tokens_short() {
-        // 5 chars → 2 tokens (5 * 2 / 5 = 2)
-        assert_eq!(estimate_tokens("hello"), 2);
-    }
-
-    #[test]
     fn test_estimate_tokens_empty() {
         assert_eq!(estimate_tokens(""), 0);
     }
 
     #[test]
-    fn test_estimate_tokens_conservative() {
-        // 1280 chars should estimate to 512 tokens (1280 * 2 / 5 = 512)
-        // This matches Ollama's 512-token context limit
-        let text = "x".repeat(1280);
-        assert_eq!(estimate_tokens(&text), 512);
+    fn test_estimate_tokens_conservative_for_prose_and_urls() {
+        // The property that matters: estimates should be >= actual token counts
+        // for the text types seen at chunk boundaries (prose, URLs, markdown).
+        // Short code with many special characters can underestimate, but that's
+        // caught by the model's own truncation and the retry-on-failure path.
+        let tokenizer = make_tokenizer();
+        let test_cases = vec![
+            "hello world this is some plain english text for testing",
+            "https://example.com/path/to/resource?param=value&other=123",
+            "The quick brown fox jumps over the lazy dog. Repeated text for length.",
+            "# Heading\n\nSome markdown paragraph with **bold** and *italic* text.",
+        ];
+        for text in &test_cases {
+            let estimated = estimate_tokens(text);
+            let actual = tokenizer.encode(*text, false).unwrap().get_ids().len();
+            assert!(
+                estimated >= actual,
+                "estimate_tokens({:?}) = {} but actual tokens = {} — underestimate risks context overflow",
+                text, estimated, actual
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_tokens_nonzero_for_nonempty() {
+        assert!(estimate_tokens("x") > 0);
+        assert!(estimate_tokens("hello") > 0);
     }
 
     #[test]
