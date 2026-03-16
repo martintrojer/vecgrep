@@ -355,6 +355,11 @@ surface CommandLine {
         ClearCache(operator, invocation)
             when invocation.clear_cache_requested
 
+    @guarantee ExplicitFilesAreTransient
+        -- Paths with kind = file are embedded and searched but not
+        -- persisted to the project root's index cache. They do not
+        -- appear in results of subsequent directory-scoped searches.
+
     @guarantee JsonOutputUsesRootRelativePaths
         -- When output_format = json, file paths are relative to the project
         -- root and each JSONL line includes a "root" field.
