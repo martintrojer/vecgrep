@@ -32,7 +32,7 @@ memmap2 = "0.9"
 num_cpus = "1.16"
 dirs = "6"
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["use-dev-tty"] }
 nucleo = "0.5"
 tiny_http = "0.12"
 url = "2"
