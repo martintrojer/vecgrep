@@ -237,7 +237,12 @@ pub struct EmbedWorker {
 
 impl EmbedWorker {
     /// Spawn a background worker that owns the embedder, index, and indexer.
-    pub fn spawn(embedder: Embedder, idx: Index, mut indexer: StreamingIndexer) -> Self {
+    pub fn spawn(
+        embedder: Embedder,
+        idx: Index,
+        mut indexer: StreamingIndexer,
+        include_explicit: bool,
+    ) -> Self {
         let (req_tx, req_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let (progress_tx, progress_rx) = mpsc::channel();
@@ -245,7 +250,15 @@ impl EmbedWorker {
         indexer.batch_size = WORKER_BATCH_SIZE;
 
         let handle = std::thread::spawn(move || {
-            worker_loop(embedder, idx, indexer, req_rx, result_tx, progress_tx);
+            worker_loop(
+                embedder,
+                idx,
+                indexer,
+                req_rx,
+                result_tx,
+                progress_tx,
+                include_explicit,
+            );
         });
 
         Self {
@@ -305,6 +318,7 @@ impl Drop for EmbedWorker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_search(
     embedder: &mut Embedder,
     idx: &Index,
@@ -312,10 +326,11 @@ fn handle_search(
     query: &str,
     top_k: usize,
     threshold: f32,
+    include_explicit: bool,
     result_tx: &mpsc::Sender<SearchOutcome>,
 ) {
     let outcome = match embedder.embed(query) {
-        Ok(emb) => match idx.search(&emb, top_k, threshold, true) {
+        Ok(emb) => match idx.search(&emb, top_k, threshold, include_explicit) {
             Ok(results) => SearchOutcome::Results {
                 request_id,
                 results,
@@ -340,6 +355,7 @@ fn worker_loop(
     req_rx: mpsc::Receiver<WorkerRequest>,
     result_tx: mpsc::Sender<SearchOutcome>,
     progress_tx: mpsc::Sender<IndexProgress>,
+    include_explicit: bool,
 ) {
     loop {
         // Priority 1: handle all pending search requests
@@ -357,6 +373,7 @@ fn worker_loop(
                     &query,
                     top_k,
                     threshold,
+                    include_explicit,
                     &result_tx,
                 ),
                 Ok(WorkerRequest::Shutdown) => return,
@@ -396,6 +413,7 @@ fn worker_loop(
                     &query,
                     top_k,
                     threshold,
+                    include_explicit,
                     &result_tx,
                 ),
                 Ok(WorkerRequest::Shutdown) => return,
@@ -694,7 +712,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx); // no files to index
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
-        EmbedWorker::spawn(embedder, idx, indexer)
+        EmbedWorker::spawn(embedder, idx, indexer, true)
     }
 
     #[test]
@@ -746,7 +764,7 @@ mod tests {
         // Don't drop tx yet — worker thinks indexing is still in progress
 
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
-        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, true);
 
         // Search should work even while indexing is happening
         let request_id = worker.search("existing content", 5, 0.0);
@@ -785,7 +803,7 @@ mod tests {
         drop(tx);
 
         let indexer = StreamingIndexer::new(rx, 500, 100, 2, std::path::Path::new(""), None);
-        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, true);
 
         // Wait for indexing to complete (50 × 50ms = 2.5s max)
         let mut final_progress = None;
@@ -835,7 +853,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx);
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
-        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, true);
 
         let request_id = worker.search("dimension mismatch", 5, 0.0);
         match worker.recv_result_for(request_id) {

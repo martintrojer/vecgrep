@@ -338,6 +338,7 @@ fn run_serve_mode(
     invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
+    include_explicit: bool,
 ) -> Result<bool> {
     serve::run_streaming(
         embedder,
@@ -349,6 +350,7 @@ fn run_serve_mode(
             default_threshold: invocation.args.threshold.unwrap(),
             quiet: output.quiet,
             root: output.root,
+            include_explicit,
         },
     )?;
     join_walker(walker_handle)?;
@@ -362,6 +364,7 @@ fn run_interactive_mode(
     invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
+    include_explicit: bool,
 ) -> Result<bool> {
     tui::interactive::run_streaming(
         embedder,
@@ -371,6 +374,7 @@ fn run_interactive_mode(
         invocation.args.top_k.unwrap(),
         invocation.args.threshold.unwrap(),
         output.cwd_suffix,
+        include_explicit,
     )?;
     join_walker(walker_handle)?;
     Ok(true)
@@ -541,6 +545,9 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
+    // Include explicit files in results when any path is a file
+    let include_explicit = invocation.args.paths.iter().any(|p| Path::new(p).is_file());
+
     if matches!(invocation.run_mode, RunMode::Serve) {
         return run_serve_mode(
             embedder,
@@ -549,6 +556,7 @@ fn run() -> Result<bool> {
             &invocation,
             output,
             &mut walker_handle,
+            include_explicit,
         );
     }
 
@@ -560,11 +568,10 @@ fn run() -> Result<bool> {
             &invocation,
             output,
             &mut walker_handle,
+            include_explicit,
         );
     }
 
-    // Include explicit files in results when any path is a file
-    let has_explicit_files = invocation.args.paths.iter().any(|p| Path::new(p).is_file());
     let found = run_cli_search(
         &mut embedder,
         &idx,
@@ -572,7 +579,7 @@ fn run() -> Result<bool> {
         &invocation.query,
         invocation.args.top_k.unwrap(),
         invocation.args.threshold.unwrap(),
-        has_explicit_files,
+        include_explicit,
         output,
     )?;
 
