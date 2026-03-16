@@ -236,13 +236,42 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_with_empty() {
+    fn test_merge_override_wins() {
         let config: Config = toml::from_str("top_k = 5").unwrap();
         let empty = Config::default();
 
         let merged = merge(empty, config);
         assert_eq!(merged.top_k, Some(5));
         assert!(merged.threshold.is_none());
+    }
+
+    #[test]
+    fn test_merge_base_preserved_when_override_empty() {
+        let base: Config = toml::from_str("top_k = 10\nthreshold = 0.3").unwrap();
+        let empty = Config::default();
+
+        let merged = merge(base, empty);
+        assert_eq!(merged.top_k, Some(10));
+        assert_eq!(merged.threshold, Some(0.3));
+    }
+
+    #[test]
+    fn test_merge_ignore_files_are_additive() {
+        let global: Config = toml::from_str(r#"ignore_files = ["global.ignore"]"#).unwrap();
+        let project: Config = toml::from_str(r#"ignore_files = ["project.ignore"]"#).unwrap();
+
+        let merged = merge(global, project);
+        let files = merged.ignore_files.unwrap();
+        assert_eq!(files, vec!["project.ignore", "global.ignore"]);
+    }
+
+    #[test]
+    fn test_merge_ignore_files_only_in_base() {
+        let global: Config = toml::from_str(r#"ignore_files = ["global.ignore"]"#).unwrap();
+        let project = Config::default();
+
+        let merged = merge(global, project);
+        assert_eq!(merged.ignore_files, Some(vec!["global.ignore".to_string()]));
     }
 
     #[test]

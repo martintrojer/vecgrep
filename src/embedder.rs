@@ -597,6 +597,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_embeddings_normalizes_and_reorders() {
+        let mut remote = make_test_remote(100);
+        // Response has indices out of order
+        let response = serde_json::json!({
+            "data": [
+                {"index": 1, "embedding": [0.0, 3.0, 4.0]},
+                {"index": 0, "embedding": [3.0, 4.0, 0.0]}
+            ]
+        });
+
+        let result = remote.parse_embeddings(&response, 2).unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Verify L2 normalization: each vector should have unit norm
+        for emb in &result {
+            let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-5, "expected unit norm, got {norm}");
+        }
+
+        // Verify correct reordering: index 0's embedding had [3,4,0]
+        assert!(
+            result[0][0] > 0.5,
+            "index 0 should start with a large value"
+        );
+        assert!(result[1][0].abs() < 1e-5, "index 1 should start near zero");
+
+        // Verify dimension was discovered
+        assert_eq!(remote.embedding_dim, Some(3));
+    }
+
+    #[test]
     fn test_parse_embeddings_rejects_missing_entries() {
         let mut remote = make_test_remote(100);
         let response = serde_json::json!({
