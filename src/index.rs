@@ -84,6 +84,9 @@ fn clear_all_data(conn: &Connection) -> Result<()> {
 
 pub struct Index {
     conn: Connection,
+    /// Optional in-memory index for explicit file paths.
+    /// When present, search queries both and merges results by score.
+    ephemeral: Option<Box<Index>>,
 }
 
 impl Index {
@@ -121,7 +124,10 @@ impl Index {
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
-        let index = Self { conn };
+        let index = Self {
+            conn,
+            ephemeral: None,
+        };
         index.create_tables()?;
         Ok(index)
     }
@@ -131,7 +137,10 @@ impl Index {
         init_sqlite_vec();
 
         let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
-        let index = Self { conn };
+        let index = Self {
+            conn,
+            ephemeral: None,
+        };
         index.create_tables()?;
         Ok(index)
     }
@@ -284,7 +293,14 @@ impl Index {
         })
     }
 
+    /// Attach an ephemeral in-memory index for explicit file paths.
+    /// Searches will query both indexes and merge results by score.
+    pub fn attach_ephemeral(&mut self, ephemeral: Index) {
+        self.ephemeral = Some(Box::new(ephemeral));
+    }
+
     /// Search for chunks most similar to the query embedding.
+    /// If an ephemeral index is attached, results from both are merged.
     pub fn search(
         &self,
         query_embedding: &[f32],
@@ -295,6 +311,28 @@ impl Index {
             return Ok(vec![]);
         }
 
+        let mut results = self.search_conn(query_embedding, top_k, threshold)?;
+
+        if let Some(ref ephemeral) = self.ephemeral {
+            let extra = ephemeral.search_conn(query_embedding, top_k, threshold)?;
+            results.extend(extra);
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(top_k);
+        }
+
+        Ok(results)
+    }
+
+    fn search_conn(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: f32,
+    ) -> Result<Vec<SearchResult>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
              FROM vec_chunks v \
