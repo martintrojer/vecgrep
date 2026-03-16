@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, ValueEnum)]
 pub enum ColorChoice {
     Auto,
     Always,
@@ -23,12 +23,12 @@ pub struct Args {
     pub paths: Vec<String>,
 
     /// Number of top results to return.
-    #[arg(short = 'k', long = "top-k", default_value_t = 10)]
-    pub top_k: usize,
+    #[arg(short = 'k', long = "top-k")]
+    pub top_k: Option<usize>,
 
     /// Minimum similarity threshold (0.0–1.0).
-    #[arg(long, default_value_t = 0.3)]
-    pub threshold: f32,
+    #[arg(long)]
+    pub threshold: Option<f32>,
 
     /// Interactive TUI mode.
     #[arg(short = 'i', long, conflicts_with_all = ["serve", "index_only", "type_list", "show_root"])]
@@ -47,8 +47,8 @@ pub struct Args {
     pub glob: Option<Vec<String>>,
 
     /// Context lines around match.
-    #[arg(short = 'C', long, default_value_t = 3)]
-    pub context: usize,
+    #[arg(short = 'C', long)]
+    pub context: Option<usize>,
 
     /// Force full re-index.
     #[arg(long)]
@@ -76,12 +76,12 @@ pub struct Args {
     pub json: bool,
 
     /// Tokens per chunk.
-    #[arg(long, default_value_t = 256)]
-    pub chunk_size: usize,
+    #[arg(long)]
+    pub chunk_size: Option<usize>,
 
     /// Overlap tokens between chunks.
-    #[arg(long, default_value_t = 64)]
-    pub chunk_overlap: usize,
+    #[arg(long)]
+    pub chunk_overlap: Option<usize>,
 
     // --- rg-compatible flags ---
     /// Suppress all status messages on stderr.
@@ -121,13 +121,13 @@ pub struct Args {
     pub type_list: bool,
 
     /// When to use colored output.
-    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
-    pub color: ColorChoice,
+    #[arg(long, value_enum)]
+    pub color: Option<ColorChoice>,
 
     /// Warn and ask for confirmation when more than this many files need indexing.
     /// Set to 0 to disable.
-    #[arg(long, default_value_t = 1000)]
-    pub index_warn_threshold: usize,
+    #[arg(long)]
+    pub index_warn_threshold: Option<usize>,
 
     /// Print the resolved project root and exit.
     #[arg(long, conflicts_with_all = ["interactive", "serve", "index_only", "type_list"])]
@@ -156,6 +156,15 @@ pub struct Args {
     pub skip_outside_root: bool,
 }
 
+/// Hardcoded defaults for config-overridable fields.
+/// These match the spec's `config {}` block defaults.
+pub const DEFAULT_TOP_K: usize = 10;
+pub const DEFAULT_THRESHOLD: f32 = 0.3;
+pub const DEFAULT_CONTEXT: usize = 3;
+pub const DEFAULT_CHUNK_SIZE: usize = 256;
+pub const DEFAULT_CHUNK_OVERLAP: usize = 64;
+pub const DEFAULT_INDEX_WARN_THRESHOLD: usize = 1000;
+
 #[cfg(test)]
 mod tests {
     use super::Args;
@@ -174,14 +183,21 @@ mod tests {
     }
 
     #[test]
-    fn chunk_size_defaults_to_local_model_context_window() {
+    fn configurable_fields_default_to_none() {
         let args = Args::parse_from(["vecgrep", "needle"]);
-        assert_eq!(args.chunk_size, 256);
+        assert_eq!(args.chunk_size, None);
+        assert_eq!(args.chunk_overlap, None);
+        assert_eq!(args.top_k, None);
+        assert_eq!(args.threshold, None);
+        assert_eq!(args.color, None);
+        assert_eq!(args.index_warn_threshold, None);
+        assert_eq!(args.context, None);
     }
 
     #[test]
-    fn chunk_overlap_defaults_to_quarter_window() {
-        let args = Args::parse_from(["vecgrep", "needle"]);
-        assert_eq!(args.chunk_overlap, 64);
+    fn explicit_cli_values_are_some() {
+        let args = Args::parse_from(["vecgrep", "--top-k", "5", "--chunk-size", "128", "needle"]);
+        assert_eq!(args.top_k, Some(5));
+        assert_eq!(args.chunk_size, Some(128));
     }
 }
