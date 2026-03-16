@@ -108,24 +108,17 @@ fn clear_progress_line() {
     std::io::stderr().flush().ok();
 }
 
+#[derive(Debug)]
 enum StaleRemovalScope {
     Prefix(PathBuf),
     None,
 }
 
+#[derive(Debug)]
 struct PathPlan {
     project_root: PathBuf,
     cwd_suffix: PathBuf,
-    inside_paths: Vec<String>,
-    outside_paths: Vec<String>,
     stale_removal_scope: StaleRemovalScope,
-}
-
-struct ResolvedPath {
-    input: String,
-    absolute: PathBuf,
-    inside_root: bool,
-    is_dir: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,23 +160,6 @@ struct ExecutionContext {
     root: String,
 }
 
-fn resolve_input_paths(cwd: &Path, paths: &[String], project_root: &Path) -> Vec<ResolvedPath> {
-    paths
-        .iter()
-        .map(|input| {
-            let absolute = resolve_input_path(cwd, input);
-            let is_dir = absolute.is_dir();
-            let inside_root = absolute.starts_with(project_root);
-            ResolvedPath {
-                input: input.clone(),
-                absolute,
-                inside_root,
-                is_dir,
-            }
-        })
-        .collect()
-}
-
 /// Returns a canonicalized project root path.
 fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
     let cwd_project_root = find_project_root(cwd);
@@ -202,75 +178,73 @@ fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
     }
 }
 
-fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> PathPlan {
+/// Classify input paths as admitted/skipped/rejected in one pass.
+/// Returns a PathPlan with admitted paths and an updated Args.
+fn admit_paths(args: Args, cwd: &Path, project_root: &Path) -> Result<(Args, PathPlan)> {
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let inside_paths = paths
-        .iter()
-        .filter(|path| path.inside_root)
-        .map(|path| path.input.clone())
-        .collect();
-    let outside_paths = paths
-        .iter()
-        .filter(|path| !path.inside_root)
-        .map(|path| path.input.clone())
-        .collect();
-
     let cwd_suffix = cwd_canon
         .strip_prefix(project_root)
         .unwrap_or(Path::new(""))
         .to_path_buf();
 
-    let stale_removal_scope = match paths
-        .iter()
-        .filter(|path| path.inside_root)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [path] if path.is_dir => {
-            let walk_prefix = path
-                .absolute
+    let mut admitted = Vec::new();
+    let mut outside = Vec::new();
+    let mut single_admitted_dir: Option<PathBuf> = None;
+
+    for input in &args.paths {
+        let absolute = resolve_input_path(cwd, input);
+        if absolute.starts_with(project_root) {
+            if args.paths.len() == 1 && absolute.is_dir() {
+                single_admitted_dir = Some(absolute);
+            }
+            admitted.push(input.clone());
+        } else {
+            outside.push(input.clone());
+        }
+    }
+
+    if !outside.is_empty() && !args.skip_outside_root {
+        anyhow::bail!(
+            "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
+            outside[0],
+            project_root.display()
+        );
+    }
+    if !outside.is_empty() && args.skip_outside_root && !args.quiet {
+        eprintln!(
+            "Skipping {} path(s) outside project root {}.",
+            outside.len(),
+            project_root.display()
+        );
+    }
+    if admitted.is_empty() {
+        anyhow::bail!(
+            "All provided paths are outside the selected project root '{}'.",
+            project_root.display()
+        );
+    }
+
+    let stale_removal_scope = match single_admitted_dir {
+        Some(dir) => {
+            let walk_prefix = dir
                 .strip_prefix(project_root)
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
             StaleRemovalScope::Prefix(walk_prefix)
         }
-        _ => StaleRemovalScope::None,
+        None => StaleRemovalScope::None,
     };
 
-    PathPlan {
+    let args = Args {
+        paths: admitted.clone(),
+        ..args
+    };
+    let plan = PathPlan {
         project_root: project_root.to_path_buf(),
         cwd_suffix,
-        inside_paths,
-        outside_paths,
         stale_removal_scope,
-    }
-}
-
-fn apply_path_plan(args: Args, plan: &PathPlan) -> Result<Args> {
-    if !plan.outside_paths.is_empty() && !args.skip_outside_root {
-        anyhow::bail!(
-            "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
-            plan.outside_paths[0],
-            plan.project_root.display()
-        );
-    }
-    if !plan.outside_paths.is_empty() && args.skip_outside_root && !args.quiet {
-        eprintln!(
-            "Skipping {} path(s) outside project root {}.",
-            plan.outside_paths.len(),
-            plan.project_root.display()
-        );
-    }
-    if plan.inside_paths.is_empty() {
-        anyhow::bail!(
-            "All provided paths are outside the selected project root '{}'.",
-            plan.project_root.display()
-        );
-    }
-    Ok(Args {
-        paths: plan.inside_paths.clone(),
-        ..args
-    })
+    };
+    Ok((args, plan))
 }
 
 fn resolve_query(args: &Args) -> String {
@@ -316,9 +290,7 @@ fn resolve_invocation(
 ) -> Result<Invocation> {
     let config = vecgrep::config::load_config(project_root);
     let args = with_config(args, &config, matches);
-    let resolved_paths = resolve_input_paths(cwd, &args.paths, project_root);
-    let path_plan = build_path_plan(cwd, project_root, &resolved_paths);
-    let args = apply_path_plan(args, &path_plan)?;
+    let (args, path_plan) = admit_paths(args, cwd, project_root)?;
     let query = resolve_query(&args);
     let run_mode = determine_run_mode(&args);
     let color_choice = output::resolve_color_choice(&args.color);
@@ -1115,18 +1087,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_path_plan_sets_prefix_scope_for_single_directory() {
+    fn test_admit_paths_sets_prefix_scope_for_single_directory() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         let src = dir.path().join("src").display().to_string();
 
-        let resolved = resolve_input_paths(&cwd, std::slice::from_ref(&src), &cwd);
-        let plan = build_path_plan(&cwd, &cwd, &resolved);
+        let (args, _) = parse_args(&["vecgrep", "needle", &src]);
+        let (result_args, plan) = admit_paths(args, &cwd, &cwd).unwrap();
 
-        assert_eq!(plan.inside_paths, vec![src]);
-        assert!(plan.outside_paths.is_empty());
+        assert_eq!(result_args.paths, vec![src]);
         match plan.stale_removal_scope {
             StaleRemovalScope::Prefix(ref prefix) => assert_eq!(prefix, Path::new("src")),
             _ => panic!("expected prefix stale removal scope"),
@@ -1134,31 +1105,29 @@ mod tests {
     }
 
     #[test]
-    fn test_build_path_plan_sets_no_scope_for_single_file() {
+    fn test_admit_paths_sets_no_scope_for_single_file() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
         let cwd = dir.path().canonicalize().unwrap();
 
-        let resolved = resolve_input_paths(&cwd, &["lib.rs".to_string()], &cwd);
-        let plan = build_path_plan(&cwd, &cwd, &resolved);
+        let (args, _) = parse_args(&["vecgrep", "needle", "lib.rs"]);
+        let (_, plan) = admit_paths(args, &cwd, &cwd).unwrap();
 
         assert!(matches!(plan.stale_removal_scope, StaleRemovalScope::None));
     }
 
     #[test]
-    fn test_apply_path_plan_rejects_all_outside_paths() {
+    fn test_admit_paths_rejects_all_outside_paths() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         let outside = TempDir::new().unwrap();
 
         let outside_path = outside.path().join("elsewhere.rs").display().to_string();
-        let resolved = resolve_input_paths(&cwd, std::slice::from_ref(&outside_path), &cwd);
-        let plan = build_path_plan(&cwd, &cwd, &resolved);
-        let (args, _) = parse_args(&["vecgrep", "needle"]);
+        let (args, _) = parse_args(&["vecgrep", "needle", &outside_path]);
 
-        let err = apply_path_plan(args, &plan).unwrap_err();
+        let err = admit_paths(args, &cwd, &cwd).unwrap_err();
         assert!(err
             .to_string()
             .contains("outside the selected project root"));
@@ -1207,8 +1176,6 @@ mod tests {
             PathPlan {
                 project_root: PathBuf::from("."),
                 cwd_suffix: PathBuf::new(),
-                inside_paths: vec![".".to_string()],
-                outside_paths: Vec::new(),
                 stale_removal_scope: StaleRemovalScope::None,
             },
             "needle".to_string(),
@@ -1267,8 +1234,6 @@ mod tests {
         let path_plan = PathPlan {
             project_root: dir.path().canonicalize().unwrap(),
             cwd_suffix: PathBuf::new(),
-            inside_paths: vec![".".to_string()],
-            outside_paths: Vec::new(),
             stale_removal_scope: StaleRemovalScope::Prefix(PathBuf::new()),
         };
         let (args, _) = parse_args(&["vecgrep", "--stats"]);
