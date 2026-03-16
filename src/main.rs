@@ -1,15 +1,19 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::Index;
+use vecgrep::invocation::{
+    capped_chunk_size, CliOutputContext, Invocation, RunMode, StaleRemovalScope,
+};
 use vecgrep::pipeline::CliIndexingProgress;
+use vecgrep::root::resolve_project_root;
 use vecgrep::types::IndexConfig;
-use vecgrep::{output, paths, pipeline, serve, tui, walker};
+use vecgrep::{invocation, output, paths, pipeline, serve, tui, walker};
 
 /// Print a status message to stderr unless --quiet is set.
 macro_rules! status {
@@ -18,64 +22,6 @@ macro_rules! status {
             eprintln!($($arg)*);
         }
     };
-}
-
-/// Walk up from `start` to find the project root.
-const PROJECT_MARKERS: &[&str] = &[".git", ".hg", ".jj", ".vecgrep"];
-
-/// Walk up from `start` to find the project root.
-/// Stops at: .git/, .hg/, .jj/, or existing .vecgrep/.
-/// Never walks above $HOME. Falls back to `start` if nothing found.
-fn find_project_root(start: &Path) -> PathBuf {
-    let start_canon = match start.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return start.to_path_buf(),
-    };
-
-    let home = dirs::home_dir();
-    let mut current = start_canon.as_path();
-    loop {
-        for marker in PROJECT_MARKERS {
-            if current.join(marker).exists() {
-                return current.to_path_buf();
-            }
-        }
-
-        // Stop at $HOME (never go above it)
-        if let Some(ref h) = home {
-            if current == h.as_path() {
-                return start_canon;
-            }
-        }
-
-        match current.parent() {
-            Some(parent) if parent != current => current = parent,
-            _ => return start_canon,
-        }
-    }
-}
-
-fn has_project_marker(path: &Path) -> bool {
-    PROJECT_MARKERS
-        .iter()
-        .any(|marker| path.join(marker).exists())
-}
-
-fn resolve_input_path(cwd: &Path, input: &str) -> PathBuf {
-    let path = Path::new(input);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    absolute.canonicalize().unwrap_or(absolute)
-}
-
-fn capped_chunk_size(chunk_size: usize, context_tokens: Option<usize>) -> usize {
-    match context_tokens {
-        Some(ctx) => chunk_size.min(ctx),
-        None => chunk_size,
-    }
 }
 
 fn main() {
@@ -110,43 +56,7 @@ fn clear_progress_line() {
     std::io::stderr().flush().ok();
 }
 
-#[derive(Debug)]
-enum StaleRemovalScope {
-    Prefix(PathBuf),
-    None,
-}
-
-#[derive(Debug)]
-struct PathPlan {
-    project_root: PathBuf,
-    cwd_suffix: PathBuf,
-    stale_removal_scope: StaleRemovalScope,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RunMode {
-    Cli,
-    Interactive,
-    Serve,
-}
-
 type WalkerHandle = std::thread::JoinHandle<anyhow::Result<usize>>;
-
-struct Invocation {
-    args: Args,
-    path_plan: PathPlan,
-    query: String,
-    run_mode: RunMode,
-    color_choice: termcolor::ColorChoice,
-}
-
-#[derive(Clone, Copy)]
-struct CliOutputContext<'a> {
-    color_choice: termcolor::ColorChoice,
-    cwd_suffix: &'a Path,
-    quiet: bool,
-    root: &'a str,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexDrainOutcome {
@@ -160,120 +70,6 @@ struct ExecutionContext {
     indexer: pipeline::StreamingIndexer,
     walker_handle: Option<WalkerHandle>,
     root: String,
-}
-
-/// Returns a canonicalized project root path.
-fn resolve_project_root(cwd: &Path, paths: &[String]) -> PathBuf {
-    let cwd_project_root = find_project_root(cwd);
-
-    if has_project_marker(&cwd_project_root) {
-        cwd_project_root
-    } else if paths.len() == 1 {
-        let resolved = resolve_input_path(cwd, &paths[0]);
-        if resolved.is_dir() {
-            find_project_root(&resolved)
-        } else {
-            cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
-        }
-    } else {
-        cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
-    }
-}
-
-/// Classify input paths as admitted/skipped/rejected in one pass.
-/// Returns a PathPlan with admitted paths and an updated Args.
-fn admit_paths(args: Args, cwd: &Path, project_root: &Path) -> Result<(Args, PathPlan)> {
-    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let cwd_suffix = cwd_canon
-        .strip_prefix(project_root)
-        .unwrap_or(Path::new(""))
-        .to_path_buf();
-
-    let mut admitted = Vec::new();
-    let mut outside = Vec::new();
-    let mut single_admitted_dir: Option<PathBuf> = None;
-
-    for input in &args.paths {
-        let absolute = resolve_input_path(cwd, input);
-        if absolute.starts_with(project_root) {
-            if args.paths.len() == 1 && absolute.is_dir() {
-                single_admitted_dir = Some(absolute);
-            }
-            admitted.push(input.clone());
-        } else {
-            outside.push(input.clone());
-        }
-    }
-
-    if !outside.is_empty() && !args.skip_outside_root {
-        anyhow::bail!(
-            "Path '{}' is outside the selected project root '{}'. Run vecgrep from that project, invoke it separately per root, or pass --skip-outside-root to ignore such paths.",
-            outside[0],
-            project_root.display()
-        );
-    }
-    if !outside.is_empty() && args.skip_outside_root && !args.quiet {
-        eprintln!(
-            "Skipping {} path(s) outside project root {}.",
-            outside.len(),
-            project_root.display()
-        );
-    }
-    if admitted.is_empty() {
-        anyhow::bail!(
-            "All provided paths are outside the selected project root '{}'.",
-            project_root.display()
-        );
-    }
-
-    let stale_removal_scope = match single_admitted_dir {
-        Some(dir) => {
-            let walk_prefix = dir
-                .strip_prefix(project_root)
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default();
-            StaleRemovalScope::Prefix(walk_prefix)
-        }
-        None => StaleRemovalScope::None,
-    };
-
-    let args = Args {
-        paths: admitted.clone(),
-        ..args
-    };
-    let plan = PathPlan {
-        project_root: project_root.to_path_buf(),
-        cwd_suffix,
-        stale_removal_scope,
-    };
-    Ok((args, plan))
-}
-
-fn determine_run_mode(args: &Args) -> RunMode {
-    if args.serve {
-        RunMode::Serve
-    } else if args.interactive {
-        RunMode::Interactive
-    } else {
-        RunMode::Cli
-    }
-}
-
-fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
-    let config = vecgrep::config::load_config(project_root);
-    resolve_config(&mut args, &config);
-    let (args, path_plan) = admit_paths(args, cwd, project_root)?;
-    let query = args.query.clone().unwrap_or_default();
-    let run_mode = determine_run_mode(&args);
-    let color_choice = output::resolve_color_choice(args.color.as_ref().unwrap());
-
-    Ok(Invocation {
-        args,
-        path_plan,
-        query,
-        run_mode,
-        color_choice,
-    })
 }
 
 fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
@@ -362,15 +158,13 @@ fn build_walk_options(args: &Args) -> walker::WalkOptions {
 }
 
 /// Build an ephemeral in-memory index for explicit file paths.
-/// Files are read, chunked, and embedded immediately. Returns None if
-/// there are no file paths or --index-only is set (files should persist).
 fn build_ephemeral_index(
     file_paths: &[String],
     embedder: &mut Embedder,
     cwd_suffix: &Path,
     chunk_size: usize,
     chunk_overlap: usize,
-    config: &vecgrep::types::IndexConfig,
+    config: &IndexConfig,
 ) -> Result<Option<Index>> {
     if file_paths.is_empty() {
         return Ok(None);
@@ -423,7 +217,6 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
     )?;
 
     // Split paths: explicit files go to ephemeral index, directories to walker.
-    // --index-only always persists to the main index.
     let (file_paths, dir_paths): (Vec<_>, Vec<_>) = invocation
         .args
         .paths
@@ -585,7 +378,7 @@ fn print_index_stats(idx: &Index) -> Result<()> {
 /// Returns `Some(exit_status)` if the invocation should stop early, `None` to continue.
 fn handle_pre_execution_actions(
     args: &Args,
-    path_plan: &PathPlan,
+    path_plan: &invocation::PathPlan,
     quiet: bool,
 ) -> Result<Option<bool>> {
     if args.clear_cache {
@@ -746,76 +539,8 @@ fn run_cli_search(
     Ok(found)
 }
 
-/// Merge CLI args with config file values: cli > config > hardcoded defaults.
-/// Bool flags use ||: CLI flag present wins, else config value, else false.
-/// Option fields use .or(): CLI value if present, else config value, else default.
-fn resolve_config(args: &mut Args, config: &vecgrep::config::Config) {
-    use vecgrep::cli::*;
-
-    // Value fields: cli.or(config).or(default)
-    args.top_k = args.top_k.or(config.top_k).or(Some(DEFAULT_TOP_K));
-    args.threshold = args
-        .threshold
-        .or(config.threshold)
-        .or(Some(DEFAULT_THRESHOLD));
-    args.context = args.context.or(config.context).or(Some(DEFAULT_CONTEXT));
-    args.chunk_size = args
-        .chunk_size
-        .or(config.chunk_size)
-        .or(Some(DEFAULT_CHUNK_SIZE));
-    args.chunk_overlap = args
-        .chunk_overlap
-        .or(config.chunk_overlap)
-        .or(Some(DEFAULT_CHUNK_OVERLAP));
-    args.index_warn_threshold = args
-        .index_warn_threshold
-        .or(config.index_warn_threshold)
-        .or(Some(DEFAULT_INDEX_WARN_THRESHOLD));
-
-    // Option fields: cli.or(config)
-    args.embedder_url = args
-        .embedder_url
-        .take()
-        .or_else(|| config.embedder_url.clone());
-    args.embedder_model = args
-        .embedder_model
-        .take()
-        .or_else(|| config.embedder_model.clone());
-    args.max_depth = args.max_depth.or(config.max_depth);
-
-    // Bool flags: CLI flag || config value
-    args.full_index = args.full_index || config.full_index.unwrap_or(false);
-    args.hidden = args.hidden || config.hidden.unwrap_or(false);
-    args.follow = args.follow || config.follow.unwrap_or(false);
-    args.no_ignore = args.no_ignore || config.no_ignore.unwrap_or(false);
-    args.quiet = args.quiet || config.quiet.unwrap_or(false);
-
-    // Ignore files: additive merge
-    if let Some(ref config_files) = config.ignore_files {
-        let cli_files = args.ignore_file.get_or_insert_with(Vec::new);
-        for f in config_files {
-            if !cli_files.contains(f) {
-                cli_files.push(f.clone());
-            }
-        }
-    }
-
-    // Color: cli.or(config parsed).or(Auto)
-    if args.color.is_none() {
-        args.color = config.color.as_deref().and_then(|c| match c {
-            "always" => Some(ColorChoice::Always),
-            "never" => Some(ColorChoice::Never),
-            _ => None,
-        });
-    }
-    if args.color.is_none() {
-        args.color = Some(ColorChoice::Auto);
-    }
-}
-
 /// Returns Ok(true) if matches were found, Ok(false) if no matches.
 fn run() -> Result<bool> {
-    // Initialize tracing from VECGREP_LOG env var
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_env("VECGREP_LOG"))
         .with_writer(std::io::stderr)
@@ -823,7 +548,6 @@ fn run() -> Result<bool> {
 
     let args = Args::parse();
 
-    // Handle --type-list (no model or index needed)
     if args.type_list {
         walker::print_type_list();
         return Ok(true);
@@ -832,13 +556,12 @@ fn run() -> Result<bool> {
     let cwd = std::env::current_dir()?;
     let project_root = resolve_project_root(&cwd, &args.paths);
 
-    // Handle --show-root (no model or index needed)
     if args.show_root {
         println!("{}", project_root.display());
         return Ok(true);
     }
 
-    let mut invocation = resolve_invocation(args, &cwd, &project_root)?;
+    let mut invocation = invocation::resolve_invocation(args, &cwd, &project_root)?;
     let quiet = invocation.args.quiet;
 
     if let Some(result) =
@@ -871,9 +594,6 @@ fn run() -> Result<bool> {
 
     let show_spinner = !quiet && std::io::stderr().is_terminal();
 
-    // CLI and --index-only always drain before proceeding so first-run searches
-    // don't miss freshly discovered files. TUI/serve stay progressive unless
-    // --full-index was requested explicitly.
     let must_drain_before_search =
         matches!(invocation.run_mode, RunMode::Cli) || invocation.args.index_only;
     if invocation.args.full_index || must_drain_before_search {
@@ -902,8 +622,6 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
-    // TUI and serve: pass the indexer for progressive indexing.
-    // If --full-index was used, the indexer is already drained.
     if matches!(invocation.run_mode, RunMode::Serve) {
         return run_serve_mode(
             embedder,
@@ -936,8 +654,6 @@ fn run() -> Result<bool> {
         output,
     )?;
 
-    // TUI/serve may return here with indexing still in progress, but CLI has
-    // already drained above.
     if !indexer.indexing_done {
         drain_remaining_indexing(&mut indexer, &mut embedder, &idx, show_spinner)?;
         finish_indexing(
@@ -998,14 +714,10 @@ fn finish_indexing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use vecgrep::embedder::EMBEDDING_DIM;
     use vecgrep::types::{Chunk, IndexConfig};
-
-    fn parse_args(argv: &[&str]) -> Args {
-        Args::parse_from(argv)
-    }
 
     fn make_chunk(file_path: &str, text: &str) -> Chunk {
         Chunk {
@@ -1019,67 +731,6 @@ mod tests {
     fn make_embedding() -> Vec<f32> {
         let value = 1.0 / (EMBEDDING_DIM as f32).sqrt();
         vec![value; EMBEDDING_DIM]
-    }
-
-    // --- find_project_root tests ---
-
-    #[test]
-    fn test_find_root_with_git() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir_all(dir.path().join("src/deep")).unwrap();
-
-        let root = find_project_root(&dir.path().join("src/deep"));
-        assert_eq!(root, dir.path().canonicalize().unwrap());
-    }
-
-    #[test]
-    fn test_find_root_with_hg() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".hg")).unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-
-        let root = find_project_root(&dir.path().join("sub"));
-        assert_eq!(root, dir.path().canonicalize().unwrap());
-    }
-
-    #[test]
-    fn test_find_root_with_jj() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".jj")).unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-
-        let root = find_project_root(&dir.path().join("sub"));
-        assert_eq!(root, dir.path().canonicalize().unwrap());
-    }
-
-    #[test]
-    fn test_find_root_with_vecgrep() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".vecgrep")).unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-
-        let root = find_project_root(&dir.path().join("sub"));
-        assert_eq!(root, dir.path().canonicalize().unwrap());
-    }
-
-    #[test]
-    fn test_find_root_at_project_root() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-
-        let root = find_project_root(dir.path());
-        assert_eq!(root, dir.path().canonicalize().unwrap());
-    }
-
-    #[test]
-    fn test_find_root_no_markers_falls_back() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-
-        let root = find_project_root(&dir.path().join("sub"));
-        // Falls back to canonicalized start
-        assert_eq!(root, dir.path().join("sub").canonicalize().unwrap());
     }
 
     #[test]
@@ -1107,192 +758,15 @@ mod tests {
     }
 
     #[test]
-    fn test_find_root_vecgrep_at_lower_level_wins() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir_all(dir.path().join("sub/.vecgrep")).unwrap();
-
-        // Starting from sub/, .vecgrep/ is found at sub/ before .git/ at parent
-        let root = find_project_root(&dir.path().join("sub"));
-        assert_eq!(root, dir.path().join("sub").canonicalize().unwrap());
-    }
-
-    #[test]
-    fn test_find_root_nonexistent_path_falls_back() {
-        let result = find_project_root(Path::new("/nonexistent/path/that/doesnt/exist"));
-        // canonicalize fails, falls back to the input path
-        assert_eq!(result, PathBuf::from("/nonexistent/path/that/doesnt/exist"));
-    }
-
-    #[test]
-    fn test_capped_chunk_size_reduces_local_default_to_model_context() {
-        assert_eq!(capped_chunk_size(256, Some(256)), 256);
-    }
-
-    #[test]
-    fn test_capped_chunk_size_keeps_smaller_values() {
-        assert_eq!(capped_chunk_size(200, Some(256)), 200);
-    }
-
-    #[test]
-    fn test_capped_chunk_size_without_context_is_unchanged() {
-        assert_eq!(capped_chunk_size(500, None), 500);
-    }
-
-    #[test]
-    fn test_admit_paths_sets_prefix_scope_for_single_directory() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-        let src = dir.path().join("src").display().to_string();
-
-        let args = parse_args(&["vecgrep", "needle", &src]);
-        let (result_args, plan) = admit_paths(args, &cwd, &cwd).unwrap();
-
-        assert_eq!(result_args.paths, vec![src]);
-        match plan.stale_removal_scope {
-            StaleRemovalScope::Prefix(ref prefix) => assert_eq!(prefix, Path::new("src")),
-            _ => panic!("expected prefix stale removal scope"),
-        }
-    }
-
-    #[test]
-    fn test_admit_paths_sets_no_scope_for_single_file() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-
-        let args = parse_args(&["vecgrep", "needle", "lib.rs"]);
-        let (_, plan) = admit_paths(args, &cwd, &cwd).unwrap();
-
-        assert!(matches!(plan.stale_removal_scope, StaleRemovalScope::None));
-    }
-
-    #[test]
-    fn test_admit_paths_rejects_all_outside_paths() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-        let outside = TempDir::new().unwrap();
-
-        let outside_path = outside.path().join("elsewhere.rs").display().to_string();
-        let args = parse_args(&["vecgrep", "needle", &outside_path]);
-
-        let err = admit_paths(args, &cwd, &cwd).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("outside the selected project root"));
-    }
-
-    #[test]
-    fn test_determine_run_mode_prefers_expected_mode() {
-        let serve_args = parse_args(&["vecgrep", "--serve"]);
-        assert_eq!(determine_run_mode(&serve_args), RunMode::Serve);
-
-        let interactive_args = parse_args(&["vecgrep", "--interactive"]);
-        assert_eq!(determine_run_mode(&interactive_args), RunMode::Interactive);
-
-        let index_only_args = parse_args(&["vecgrep", "--index-only"]);
-        assert_eq!(determine_run_mode(&index_only_args), RunMode::Cli);
-    }
-
-    #[test]
-    fn test_cli_args_carry_explicit_values() {
-        let args = parse_args(&[
-            "vecgrep",
-            "--top-k",
-            "7",
-            "--threshold",
-            "0.45",
-            "--chunk-size",
-            "123",
-            "--chunk-overlap",
-            "17",
-            "--full-index",
-            "--quiet",
-            "needle",
-        ]);
-
-        assert_eq!(args.chunk_size, Some(123));
-        assert_eq!(args.chunk_overlap, Some(17));
-        assert!(args.full_index);
-        assert!(args.quiet);
-        assert_eq!(args.top_k, Some(7));
-        assert_eq!(args.threshold, Some(0.45));
-    }
-
-    #[test]
-    fn test_resolve_config_sets_bool_and_color_when_cli_omits_them() {
-        let mut args = parse_args(&["vecgrep", "needle"]);
-        let config = vecgrep::config::Config {
-            hidden: Some(true),
-            follow: Some(true),
-            no_ignore: Some(true),
-            quiet: Some(true),
-            full_index: Some(true),
-            color: Some("always".to_string()),
-            ..Default::default()
-        };
-
-        resolve_config(&mut args, &config);
-
-        assert!(args.hidden);
-        assert!(args.follow);
-        assert!(args.no_ignore);
-        assert!(args.quiet);
-        assert!(args.full_index);
-        assert_eq!(args.color, Some(vecgrep::cli::ColorChoice::Always));
-    }
-
-    #[test]
-    fn test_resolve_config_does_not_override_explicit_cli_color() {
-        let mut args = parse_args(&["vecgrep", "--color", "never", "needle"]);
-        let config = vecgrep::config::Config {
-            color: Some("always".to_string()),
-            ..Default::default()
-        };
-
-        resolve_config(&mut args, &config);
-
-        assert_eq!(args.color, Some(vecgrep::cli::ColorChoice::Never));
-    }
-
-    #[test]
-    fn test_resolve_config_applies_hardcoded_defaults() {
-        let mut args = parse_args(&["vecgrep", "needle"]);
-        let config = vecgrep::config::Config::default();
-
-        resolve_config(&mut args, &config);
-
-        assert_eq!(args.top_k, Some(vecgrep::cli::DEFAULT_TOP_K));
-        assert_eq!(args.threshold, Some(vecgrep::cli::DEFAULT_THRESHOLD));
-        assert_eq!(args.chunk_size, Some(vecgrep::cli::DEFAULT_CHUNK_SIZE));
-        assert_eq!(
-            args.chunk_overlap,
-            Some(vecgrep::cli::DEFAULT_CHUNK_OVERLAP)
-        );
-        assert_eq!(args.context, Some(vecgrep::cli::DEFAULT_CONTEXT));
-        assert_eq!(
-            args.index_warn_threshold,
-            Some(vecgrep::cli::DEFAULT_INDEX_WARN_THRESHOLD)
-        );
-        assert_eq!(args.color, Some(vecgrep::cli::ColorChoice::Auto));
-        assert!(!args.quiet);
-        assert!(!args.hidden);
-    }
-
-    #[test]
     fn test_handle_pre_execution_actions_returns_after_stats_without_query() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let path_plan = PathPlan {
+        let path_plan = invocation::PathPlan {
             project_root: dir.path().canonicalize().unwrap(),
             cwd_suffix: PathBuf::new(),
             stale_removal_scope: StaleRemovalScope::Prefix(PathBuf::new()),
         };
-        let args = parse_args(&["vecgrep", "--stats"]);
+        let args = Args::parse_from(["vecgrep", "--stats"]);
 
         let outcome = handle_pre_execution_actions(&args, &path_plan, true).unwrap();
 
@@ -1302,7 +776,7 @@ mod tests {
     #[test]
     fn test_handle_post_index_actions_returns_after_index_only() {
         let index = Index::open_in_memory().unwrap();
-        let args = parse_args(&["vecgrep", "--index-only"]);
+        let args = Args::parse_from(["vecgrep", "--index-only"]);
 
         let outcome = handle_post_index_actions(&args, &index).unwrap();
 
@@ -1310,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_indexing_removes_stale_files_for_all_scope() {
+    fn test_finish_indexing_removes_stale_files_for_prefix_scope() {
         let index = Index::open_in_memory().unwrap();
         let config = IndexConfig {
             model_name: "test-model".to_string(),
@@ -1363,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_indexing_removes_stale_files_only_under_prefix_scope() {
+    fn test_finish_indexing_prefix_scope_preserves_other_dirs() {
         let index = Index::open_in_memory().unwrap();
         let config = IndexConfig {
             model_name: "test-model".to_string(),
@@ -1424,90 +898,5 @@ mod tests {
             index.get_file_hash("tests/keep.rs").unwrap(),
             Some("hash-keep".to_string())
         );
-    }
-
-    #[test]
-    fn test_resolve_invocation_applies_project_config_when_cli_omits_flag() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir_all(dir.path().join(".vecgrep")).unwrap();
-        std::fs::write(
-            dir.path().join(".vecgrep/config.toml"),
-            "top_k = 42\nthreshold = 0.15\nquiet = true\n",
-        )
-        .unwrap();
-
-        let cwd = dir.path().canonicalize().unwrap();
-        let args = parse_args(&["vecgrep", "needle"]);
-        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
-
-        assert_eq!(invocation.args.top_k, Some(42));
-        assert_eq!(invocation.args.threshold, Some(0.15));
-        assert!(invocation.args.quiet);
-    }
-
-    #[test]
-    fn test_resolve_invocation_keeps_cli_values_over_project_config() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir_all(dir.path().join(".vecgrep")).unwrap();
-        std::fs::write(
-            dir.path().join(".vecgrep/config.toml"),
-            "top_k = 42\nthreshold = 0.15\nquiet = true\n",
-        )
-        .unwrap();
-
-        let cwd = dir.path().canonicalize().unwrap();
-        let args = parse_args(&["vecgrep", "--top-k", "7", "--threshold", "0.6", "needle"]);
-        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
-
-        assert_eq!(invocation.args.top_k, Some(7));
-        assert_eq!(invocation.args.threshold, Some(0.6));
-        assert!(invocation.args.quiet);
-    }
-
-    #[test]
-    fn test_resolve_invocation_merges_ignore_files_additively() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir_all(dir.path().join(".vecgrep")).unwrap();
-        std::fs::write(
-            dir.path().join(".vecgrep/config.toml"),
-            "ignore_files = [\"from-config.ignore\", \"shared.ignore\"]\n",
-        )
-        .unwrap();
-
-        let cwd = dir.path().canonicalize().unwrap();
-        let args = parse_args(&[
-            "vecgrep",
-            "--ignore-file",
-            "from-cli.ignore",
-            "--ignore-file",
-            "shared.ignore",
-            "needle",
-        ]);
-        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
-
-        assert_eq!(
-            invocation.args.ignore_file,
-            Some(vec![
-                "from-cli.ignore".to_string(),
-                "shared.ignore".to_string(),
-                "from-config.ignore".to_string(),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_resolve_invocation_uses_empty_query_for_serve_mode() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-
-        let args = parse_args(&["vecgrep", "--serve"]);
-        let invocation = resolve_invocation(args, &cwd, &cwd).unwrap();
-
-        assert_eq!(invocation.run_mode, RunMode::Serve);
-        assert!(invocation.query.is_empty());
     }
 }
