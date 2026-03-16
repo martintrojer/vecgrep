@@ -95,36 +95,35 @@ pub mod interactive {
         loop {
             // 1. Check for search results (non-blocking)
             if let Some(outcome) = worker.try_recv_results() {
-                if active_request_id != Some(outcome.request_id()) {
-                    continue;
-                }
-                searching = false;
-                match outcome {
-                    SearchOutcome::Results {
-                        results: new_results,
-                        ..
-                    } => {
-                        search_error = None;
-                        results = new_results;
-                        if !results.is_empty() {
-                            list_state.select(Some(0));
-                        } else {
+                if active_request_id == Some(outcome.request_id()) {
+                    searching = false;
+                    match outcome {
+                        SearchOutcome::Results {
+                            results: new_results,
+                            ..
+                        } => {
+                            search_error = None;
+                            results = new_results;
+                            if !results.is_empty() {
+                                list_state.select(Some(0));
+                            } else {
+                                list_state.select(None);
+                            }
+                            paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
+                        }
+                        SearchOutcome::SearchError { message, .. } => {
+                            search_error = Some(format!("Search error: {message}"));
+                            results.clear();
                             list_state.select(None);
                         }
-                        paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
+                        SearchOutcome::EmbedError { message, .. } => {
+                            search_error = Some(format!("Embed error: {message}"));
+                            results.clear();
+                            list_state.select(None);
+                        }
                     }
-                    SearchOutcome::SearchError { message, .. } => {
-                        search_error = Some(format!("Search error: {message}"));
-                        results.clear();
-                        list_state.select(None);
-                    }
-                    SearchOutcome::EmbedError { message, .. } => {
-                        search_error = Some(format!("Embed error: {message}"));
-                        results.clear();
-                        list_state.select(None);
-                    }
+                    last_selected = None;
                 }
-                last_selected = None;
             }
 
             // 2. Check for index progress (non-blocking)

@@ -566,11 +566,13 @@ fn run_serve_mode(
         embedder,
         idx,
         indexer,
-        invocation.args.port,
-        invocation.args.top_k.unwrap(),
-        invocation.args.threshold.unwrap(),
-        output.quiet,
-        output.root,
+        serve::ServeConfig {
+            port: invocation.args.port,
+            default_top_k: invocation.args.top_k.unwrap(),
+            default_threshold: invocation.args.threshold.unwrap(),
+            quiet: output.quiet,
+            root: output.root,
+        },
     )?;
     join_walker(walker_handle)?;
     Ok(true)
