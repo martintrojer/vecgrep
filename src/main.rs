@@ -246,6 +246,13 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
                 invocation.args.chunk_overlap.unwrap(),
                 &config,
             )? {
+                let n = file_paths.len();
+                status!(
+                    invocation.args.quiet,
+                    "Embedded {} explicit file{}.",
+                    n,
+                    if n == 1 { "" } else { "s" }
+                );
                 idx.attach_ephemeral(ephemeral);
             }
         }

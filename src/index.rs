@@ -380,9 +380,14 @@ impl Index {
 
     /// Get the number of chunks in the index.
     pub fn chunk_count(&self) -> Result<usize> {
-        let count: i64 = self
+        let mut count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        if let Some(ref ephemeral) = self.ephemeral {
+            count += ephemeral
+                .conn
+                .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get::<_, i64>(0))?;
+        }
         Ok(count as usize)
     }
 
