@@ -73,7 +73,7 @@ The worker prioritizes search requests over indexing: it checks for pending sear
 
 **Key design decisions:**
 
-- **Config file hierarchy**: `.vecgrep/config.toml` (project root) > `~/.config/vecgrep/config.toml` (global) > CLI defaults. Loaded via `config::load_config(project_root)` after project root discovery in `main.rs`. All fields are `Option<T>`, merged with `or()` precedence.
+- **Config resolution**: CLI > project (`.vecgrep/config.toml`) > global (`~/.config/vecgrep/config.toml`) > hardcoded defaults. Configurable CLI fields are `Option<T>` (no clap defaults) so `None` means "user didn't provide." Single `resolve_config()` in `invocation.rs` merges via `cli.or(config).unwrap_or(DEFAULT)` for values, `cli || config` for bools.
 - **Local vs remote embedding — avoiding index holes**:
   - **Local** (`Embedder::Local`): `build.rs` downloads model + tokenizer at build time, compiled into the binary via `include_bytes!`. The chunker uses the real tokenizer for exact token counts. The ONNX model silently truncates at `MAX_SEQ_LEN` (256 tokens). No errors possible — every chunk gets an embedding.
   - **Remote** (`Embedder::Remote`): Uses `--embedder-url` with any OpenAI-compatible API (Ollama, LM Studio, etc.). No tokenizer available, so the chunker uses a character heuristic (~2.5 chars/token — URLs, markdown, and code tokenize densely). At startup, probes Ollama's `/api/show` for the model's context length to set accurate truncation limits. Falls back to 1200-char default for non-Ollama servers. Unlike the local model, Ollama **rejects** (HTTP 400) texts exceeding context length instead of truncating. The `chunk_size` is automatically capped to the model's context in `main.rs`. If a chunk still fails, the batch is retried one-at-a-time, and any remaining failures get a zero-vector embedding with a warning logged (including the filename via `pipeline.rs`). Zero vectors are index holes — they exist but never match queries. The goal is zero holes: correct chunking avoids them, the fallback chain catches edge cases.
@@ -86,22 +86,25 @@ The worker prioritizes search requests over indexing: it checks for pending sear
 - **`--stats` includes holes**: Stats now report failed chunks (`Holes`) in addition to files/chunks/DB size. Holes are chunks whose embedding failed and were stored as zero vectors, so they exist in the cache but never match a query.
 - **JSON output includes `root`**: All JSONL output (`--json` and `--serve`) includes a `"root"` field with the canonical project root path, so clients can resolve the project-root-relative `"file"` paths.
 - **Embeddings stored in vec0 virtual table**: `sqlite-vec` handles vector storage and KNN search via the `vec_chunks` virtual table. Embeddings are passed as little-endian `f32` bytes using `zerocopy::IntoBytes` for zero-copy conversion. The `chunks` table stores text/metadata, `vec_chunks` stores vectors, joined by `chunk_id`. The `vec_chunks` dimension is baked into the virtual table at creation time — `create_tables()` uses `EMBEDDING_DIM` (384) as default. When switching models (e.g. local→Ollama with 1024-dim), `check_config()` detects the `IndexConfig` change and `rebuild_for_config()` atomically recreates the cache with the correct dimension.
-- **Write-path atomicity**: Index writes are intentionally wrapped in `BEGIN IMMEDIATE` transactions via a shared helper in `index.rs`. Keep multi-statement mutations atomic because the CLI can be interrupted at any time.
+- **Explicit file paths are transient**: When file paths (not directories) are passed, they are embedded into a throwaway in-memory SQLite index (`Index.ephemeral`), not the persistent cache. This prevents ignored/hidden files from polluting subsequent directory searches. `Index::search()` transparently merges results from both the persistent and ephemeral indexes. `--index-only` with file paths warns and skips them.
+- **Write-path atomicity**: Index writes are wrapped in `BEGIN IMMEDIATE` transactions. The `with_transaction` closure receives `&Connection` so callers can only use the connection within the transaction scope. A `debug_assert` guards against nested transactions.
 - **CLI flags follow ripgrep conventions**: `-t` for type, `-g` for glob, `-C` for context, `-l` for files-with-matches, `-c` for count, `-.` for hidden, `-L` for follow, `--ignore-file` for additional ignore files, etc. Any new CLI flag must be checked against `rg --help` for compatibility — do not reuse a short flag that means something different in rg.
 
 **Module responsibilities:**
 
 | Module | Role |
 |---|---|
-| `config.rs` | Load `~/.config/vecgrep/config.toml`, all fields `Option<T>`, merged with CLI args in `main.rs` |
-| `embedder.rs` | `Embedder` enum: `Local` (ONNX + tokenizer) or `Remote` (OpenAI-compatible HTTP API). Single queries use CPU, batches use the configured backend |
+| `root.rs` | Project root discovery: `find_project_root()`, `resolve_project_root()`, `PROJECT_MARKERS` |
+| `invocation.rs` | Invocation setup: `resolve_invocation()`, `resolve_config()`, `admit_paths()`, `PathPlan`, `RunMode`, `Invocation` |
+| `config.rs` | Load and merge `~/.config/vecgrep/config.toml` + `.vecgrep/config.toml`, all fields `Option<T>` |
+| `embedder/` | `mod.rs`: `Embedder` enum and shared API. `local.rs`: ONNX model. `remote.rs`: OpenAI-compatible HTTP API, batching, error extraction |
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries. Uses tokenizer when available, char-based heuristic otherwise |
-| `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `EmbedWorker` (background thread for non-blocking TUI/serve), `process_batch()` for chunk → embed → upsert |
+| `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `EmbedWorker` (background thread for non-blocking TUI/serve), `process_batch()` for chunk → embed → upsert per file |
 | `paths.rs` | Path conversions: `to_project_relative()`, `to_cwd_relative()` |
-| `index.rs` | SQLite schema (`meta`/`files`/`chunks`/`vec_chunks`), upsert, stale removal, vector search via sqlite-vec |
+| `index.rs` | SQLite schema (`meta`/`files`/`chunks`/`vec_chunks`), upsert, stale removal, vector search via sqlite-vec. Optional ephemeral in-memory index for explicit file paths |
 | `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_with()` helper, `walk_paths_streaming()` for channel-based walking |
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
-| `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` interleaves indexing with request handling |
+| `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` with `ServeConfig` interleaves indexing with request handling |
 | `tui.rs` | `ratatui` interactive mode; `run_streaming()` interleaves indexing with the event loop |
 
 ## Reviewed Decisions
