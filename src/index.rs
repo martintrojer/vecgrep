@@ -1122,6 +1122,41 @@ mod tests {
     }
 
     #[test]
+    fn test_rebuild_for_config_with_different_dimension() {
+        // Regression: open_in_memory creates vec_chunks at EMBEDDING_DIM (384).
+        // rebuild_for_config must drop and recreate with the new dimension,
+        // otherwise inserts fail with "Expected 384 dimensions but received N".
+        let index = Index::open_in_memory().unwrap();
+        let new_dim = 1024;
+        let config = IndexConfig {
+            model_name: "remote-model".to_string(),
+            embedding_dim: new_dim,
+            chunk_size: 500,
+            chunk_overlap: 100,
+        };
+        index.rebuild_for_config(&config).unwrap();
+
+        let chunks = vec![Chunk {
+            file_path: "test.rs".to_string(),
+            text: "test content".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb = vec![make_test_embedding(new_dim, 1.0)];
+        // This would fail with dimension mismatch if rebuild_for_config
+        // didn't recreate vec_chunks with the correct dimension.
+        index
+            .upsert_file("test.rs", "hash", &chunks, &emb, &[false])
+            .unwrap();
+
+        assert_eq!(index.chunk_count().unwrap(), 1);
+
+        let results = index.search(&emb[0], 1, -1.0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.text, "test content");
+    }
+
+    #[test]
     fn test_rebuild_for_config_clears_old_data() {
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;

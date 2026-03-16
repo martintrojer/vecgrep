@@ -171,7 +171,7 @@ fn build_ephemeral_index(
     }
 
     let eidx = Index::open_in_memory()?;
-    eidx.set_config(config)?;
+    eidx.rebuild_for_config(config)?;
 
     let mut files_with_hashes = Vec::new();
     for path_str in file_paths {
