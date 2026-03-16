@@ -21,6 +21,9 @@ macro_rules! status {
 }
 
 /// Walk up from `start` to find the project root.
+const PROJECT_MARKERS: &[&str] = &[".git", ".hg", ".jj", ".vecgrep"];
+
+/// Walk up from `start` to find the project root.
 /// Stops at: .git/, .hg/, .jj/, or existing .vecgrep/.
 /// Never walks above $HOME. Falls back to `start` if nothing found.
 fn find_project_root(start: &Path) -> PathBuf {
@@ -32,7 +35,7 @@ fn find_project_root(start: &Path) -> PathBuf {
     let home = dirs::home_dir();
     let mut current = start_canon.as_path();
     loop {
-        for marker in &[".git", ".hg", ".jj", ".vecgrep"] {
+        for marker in PROJECT_MARKERS {
             if current.join(marker).exists() {
                 return current.to_path_buf();
             }
@@ -53,7 +56,7 @@ fn find_project_root(start: &Path) -> PathBuf {
 }
 
 fn has_project_marker(path: &Path) -> bool {
-    [".git", ".hg", ".jj", ".vecgrep"]
+    PROJECT_MARKERS
         .iter()
         .any(|marker| path.join(marker).exists())
 }
@@ -246,10 +249,6 @@ fn admit_paths(args: Args, cwd: &Path, project_root: &Path) -> Result<(Args, Pat
     Ok((args, plan))
 }
 
-fn resolve_query(args: &Args) -> String {
-    args.query.clone().unwrap_or_default()
-}
-
 fn determine_run_mode(args: &Args) -> RunMode {
     if args.serve {
         RunMode::Serve
@@ -260,37 +259,21 @@ fn determine_run_mode(args: &Args) -> RunMode {
     }
 }
 
-fn build_invocation(
-    args: Args,
-    path_plan: PathPlan,
-    query: String,
-    run_mode: RunMode,
-    color_choice: termcolor::ColorChoice,
-) -> Invocation {
-    Invocation {
-        args,
-        path_plan,
-        query,
-        run_mode,
-        color_choice,
-    }
-}
-
 fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
     let config = vecgrep::config::load_config(project_root);
     resolve_config(&mut args, &config);
     let (args, path_plan) = admit_paths(args, cwd, project_root)?;
-    let query = resolve_query(&args);
+    let query = args.query.clone().unwrap_or_default();
     let run_mode = determine_run_mode(&args);
     let color_choice = output::resolve_color_choice(args.color.as_ref().unwrap());
 
-    Ok(build_invocation(
+    Ok(Invocation {
         args,
         path_plan,
         query,
         run_mode,
         color_choice,
-    ))
+    })
 }
 
 fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
@@ -924,7 +907,6 @@ fn finish_indexing(
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::time::Instant;
     use tempfile::TempDir;
     use vecgrep::embedder::EMBEDDING_DIM;
     use vecgrep::types::{Chunk, IndexConfig};
@@ -1113,15 +1095,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_query_for_cli_and_serve_modes() {
-        let cli_args = parse_args(&["vecgrep", "needle"]);
-        assert_eq!(resolve_query(&cli_args), "needle");
-
-        let serve_args = parse_args(&["vecgrep", "--serve"]);
-        assert_eq!(resolve_query(&serve_args), "");
-    }
-
-    #[test]
     fn test_determine_run_mode_prefers_expected_mode() {
         let serve_args = parse_args(&["vecgrep", "--serve"]);
         assert_eq!(determine_run_mode(&serve_args), RunMode::Serve);
@@ -1134,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_invocation_carries_runtime_fields() {
+    fn test_cli_args_carry_explicit_values() {
         let args = parse_args(&[
             "vecgrep",
             "--top-k",
@@ -1150,24 +1123,12 @@ mod tests {
             "needle",
         ]);
 
-        let invocation = build_invocation(
-            args,
-            PathPlan {
-                project_root: PathBuf::from("."),
-                cwd_suffix: PathBuf::new(),
-                stale_removal_scope: StaleRemovalScope::None,
-            },
-            "needle".to_string(),
-            RunMode::Cli,
-            termcolor::ColorChoice::Never,
-        );
-
-        assert_eq!(invocation.args.chunk_size, Some(123));
-        assert_eq!(invocation.args.chunk_overlap, Some(17));
-        assert!(invocation.args.full_index);
-        assert!(invocation.args.quiet);
-        assert_eq!(invocation.args.top_k, Some(7));
-        assert_eq!(invocation.args.threshold, Some(0.45));
+        assert_eq!(args.chunk_size, Some(123));
+        assert_eq!(args.chunk_overlap, Some(17));
+        assert!(args.full_index);
+        assert!(args.quiet);
+        assert_eq!(args.top_k, Some(7));
+        assert_eq!(args.threshold, Some(0.45));
     }
 
     #[test]

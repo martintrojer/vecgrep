@@ -274,7 +274,11 @@ fn benchmark_large_scale() {
 
     let mut corpus_embeddings: Vec<Vec<f32>> = Vec::new();
     let mut total_failed = 0;
-    let batch_size = if embedder.is_remote() { 4 } else { 64 };
+    let batch_size = if embedder.embedding_dim() != vecgrep::embedder::EMBEDDING_DIM {
+        4
+    } else {
+        64
+    };
 
     for (i, batch) in corpus_truncated.chunks(batch_size).enumerate() {
         let (embeddings, failed) = embed_batch_resilient(&mut embedder, batch, dim);

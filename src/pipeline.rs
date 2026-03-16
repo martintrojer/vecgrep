@@ -277,11 +277,6 @@ impl EmbedWorker {
         self.result_rx.try_recv().ok()
     }
 
-    /// Blocking wait for search results.
-    pub fn recv_results(&self) -> Option<SearchOutcome> {
-        self.result_rx.recv().ok()
-    }
-
     /// Blocking wait for the result matching `request_id`, discarding older ones.
     pub fn recv_result_for(&self, request_id: u64) -> Option<SearchOutcome> {
         loop {

@@ -33,6 +33,10 @@ pub struct Index {
 
 impl Index {
     fn with_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        debug_assert!(
+            self.conn.is_autocommit(),
+            "with_transaction called inside an existing transaction"
+        );
         self.conn.execute("BEGIN IMMEDIATE", [])?;
         match f() {
             Ok(value) => {
