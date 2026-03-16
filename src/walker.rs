@@ -10,6 +10,8 @@ pub struct WalkedFile {
     pub rel_path: String,
     /// File content (UTF-8).
     pub content: String,
+    /// True if this file was passed as an explicit path (not discovered by directory walk).
+    pub explicit: bool,
 }
 
 pub struct StreamProgress {
@@ -190,7 +192,7 @@ pub fn print_type_list() {
     }
 }
 
-fn read_file(path: &Path, warn_binary: bool) -> Result<Option<WalkedFile>> {
+fn read_file(path: &Path, explicit: bool) -> Result<Option<WalkedFile>> {
     let rel_path = path.to_string_lossy().to_string();
 
     match std::fs::read_to_string(path) {
@@ -198,11 +200,15 @@ fn read_file(path: &Path, warn_binary: bool) -> Result<Option<WalkedFile>> {
             if content.is_empty() {
                 return Ok(None);
             }
-            Ok(Some(WalkedFile { rel_path, content }))
+            Ok(Some(WalkedFile {
+                rel_path,
+                content,
+                explicit,
+            }))
         }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::InvalidData {
-                if warn_binary {
+                if explicit {
                     eprintln!("Warning: skipping binary file: {}", rel_path);
                 } else {
                     tracing::debug!("Skipping binary file: {}", rel_path);

@@ -442,7 +442,14 @@ pub fn process_batch(
             })
             .collect();
 
-        idx.upsert_file(&file.rel_path, content_hash, &chunks, &embeddings, &failed)?;
+        idx.upsert_file_with_explicit(
+            &file.rel_path,
+            content_hash,
+            &chunks,
+            &embeddings,
+            &failed,
+            file.explicit,
+        )?;
         total_chunks += chunks.len();
     }
 
@@ -465,6 +472,7 @@ mod tests {
                 WalkedFile {
                     rel_path: "a.rs".to_string(),
                     content: "fn main() {}".to_string(),
+                    explicit: false,
                 },
                 "hash_a".to_string(),
             ),
@@ -472,6 +480,7 @@ mod tests {
                 WalkedFile {
                     rel_path: "b.rs".to_string(),
                     content: "fn helper() {}".to_string(),
+                    explicit: false,
                 },
                 "hash_b".to_string(),
             ),
@@ -554,6 +563,7 @@ mod tests {
             WalkedFile {
                 rel_path: "a.rs".to_string(),
                 content: "fn alpha() {}".to_string(),
+                explicit: false,
             },
             "hash_a1".to_string(),
         )];
@@ -565,6 +575,7 @@ mod tests {
             WalkedFile {
                 rel_path: "b.rs".to_string(),
                 content: "fn beta() {}".to_string(),
+                explicit: false,
             },
             "hash_b1".to_string(),
         )];
@@ -576,6 +587,7 @@ mod tests {
             WalkedFile {
                 rel_path: "a.rs".to_string(),
                 content: "fn alpha_v2() { updated }".to_string(),
+                explicit: false,
             },
             "hash_a2".to_string(),
         )];
@@ -606,6 +618,7 @@ mod tests {
             WalkedFile {
                 rel_path: "big.rs".to_string(),
                 content,
+                explicit: false,
             },
             "hash_big".to_string(),
         )];
@@ -629,6 +642,7 @@ mod tests {
             WalkedFile {
                 rel_path: "cached.rs".to_string(),
                 content: content.to_string(),
+                explicit: false,
             },
             hash.clone(),
         )];
@@ -638,6 +652,7 @@ mod tests {
         tx.send(WalkedFile {
             rel_path: "cached.rs".to_string(),
             content: content.to_string(),
+            explicit: false,
         })
         .unwrap();
         drop(tx);
@@ -733,6 +748,7 @@ mod tests {
             tx.send(WalkedFile {
                 rel_path: format!("new{i}.rs"),
                 content: format!("fn new_function_{i}() {{ }}"),
+                explicit: false,
             })
             .unwrap();
         }
@@ -771,6 +787,7 @@ mod tests {
             tx.send(WalkedFile {
                 rel_path: format!("f{i}.rs"),
                 content: format!("fn func_{i}() {{ }}"),
+                explicit: false,
             })
             .unwrap();
         }
