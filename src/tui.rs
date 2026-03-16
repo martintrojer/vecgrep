@@ -23,6 +23,7 @@ pub mod interactive {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_streaming(
         embedder: Embedder,
         idx: Index,
@@ -31,6 +32,7 @@ pub mod interactive {
         top_k: usize,
         threshold: f32,
         cwd_suffix: &Path,
+        include_explicit: bool,
     ) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -38,7 +40,7 @@ pub mod interactive {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let worker = EmbedWorker::spawn(embedder, idx, indexer);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, include_explicit);
 
         let result = event_loop(
             &mut terminal,
