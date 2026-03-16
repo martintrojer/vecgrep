@@ -71,7 +71,9 @@ entity Invocation {
     mode: Mode
     output_format: OutputFormat
     query: String?            -- from positional or --query flag
-    query_flag: String?       -- explicit --query flag; requires interactive or serve mode; when set, all positionals are paths
+    query_flag: String?       -- explicit --query flag; requires interactive or serve mode
+                              -- when set, all positionals become paths (no filesystem checks)
+                              -- if clap assigned a positional to query, it is moved to paths
     show_stats: Boolean
     show_root: Boolean
     index_only: Boolean

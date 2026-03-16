@@ -447,8 +447,8 @@ fn run_cli_search(
 /// xargs-appended files become paths, the query is explicit.
 fn resolve_query_flag(args: &mut Args) {
     if let Some(q) = args.query_flag.take() {
+        use clap::error::ErrorKind;
         if !args.interactive && !args.serve {
-            use clap::error::ErrorKind;
             Args::command()
                 .error(
                     ErrorKind::MissingRequiredArgument,
@@ -456,12 +456,15 @@ fn resolve_query_flag(args: &mut Args) {
                 )
                 .exit();
         }
-        // Move positional "query" (if any) into paths
-        if let Some(positional_query) = args.query.take() {
+        // Move positional "query" (if any) into paths — with --query,
+        // all positionals are paths. This handles the xargs case:
+        // `| xargs vecgrep -i --query "search" file1.rs file2.rs`
+        // where clap assigns file1.rs to the query positional.
+        if let Some(positional) = args.query.take() {
             if args.paths == ["."] {
-                args.paths = vec![positional_query];
+                args.paths = vec![positional];
             } else {
-                args.paths.insert(0, positional_query);
+                args.paths.insert(0, positional);
             }
         }
         args.query = Some(q);
@@ -860,8 +863,8 @@ mod tests {
 
     #[test]
     fn test_query_flag_moves_positional_to_paths() {
-        // vecgrep --query "search" -i file1.rs file2.rs
-        // clap: query=file1.rs, paths=[file2.rs], query_flag="search"
+        // Simulates: | xargs vecgrep -i --query "search" file1.rs file2.rs
+        // clap assigns file1.rs to query positional, file2.rs to paths
         let mut args =
             Args::parse_from(["vecgrep", "--query", "search", "-i", "file1.rs", "file2.rs"]);
         assert_eq!(args.query.as_deref(), Some("file1.rs"));
@@ -875,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_flag_without_positional_query() {
+    fn test_query_flag_without_positional() {
         // vecgrep --query "search" -i
         let mut args = Args::parse_from(["vecgrep", "--query", "search", "-i"]);
         assert!(args.query.is_none());
