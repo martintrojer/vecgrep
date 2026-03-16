@@ -198,7 +198,6 @@ impl Drop for CliProgressReporter {
 }
 
 enum StaleRemovalScope {
-    All,
     Prefix(PathBuf),
     None,
 }
@@ -329,11 +328,7 @@ fn build_path_plan(cwd: &Path, project_root: &Path, paths: &[ResolvedPath]) -> P
                 .strip_prefix(&project_root_canon)
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
-            if walk_prefix.as_os_str().is_empty() {
-                StaleRemovalScope::All
-            } else {
-                StaleRemovalScope::Prefix(walk_prefix)
-            }
+            StaleRemovalScope::Prefix(walk_prefix)
         }
         _ => StaleRemovalScope::None,
     };
@@ -1059,10 +1054,13 @@ fn finish_indexing(
     join_walker(walker_handle)?;
 
     let removed = match stale_removal_scope {
-        StaleRemovalScope::All => idx.remove_stale_files(&indexer.all_paths, None)?,
         StaleRemovalScope::Prefix(walk_prefix) => {
-            let prefix = format!("{}/", walk_prefix.display());
-            idx.remove_stale_files(&indexer.all_paths, Some(&prefix))?
+            if walk_prefix.as_os_str().is_empty() {
+                idx.remove_stale_files(&indexer.all_paths, None)?
+            } else {
+                let prefix = format!("{}/", walk_prefix.display());
+                idx.remove_stale_files(&indexer.all_paths, Some(&prefix))?
+            }
         }
         StaleRemovalScope::None => 0,
     };
@@ -1436,7 +1434,7 @@ mod tests {
             cwd_suffix: PathBuf::new(),
             inside_paths: vec![".".to_string()],
             outside_paths: Vec::new(),
-            stale_removal_scope: StaleRemovalScope::All,
+            stale_removal_scope: StaleRemovalScope::Prefix(PathBuf::new()),
         };
         let (args, _) = parse_args(&["vecgrep", "--stats"]);
 
@@ -1495,7 +1493,7 @@ mod tests {
         finish_indexing(
             &mut indexer,
             &index,
-            &StaleRemovalScope::All,
+            &StaleRemovalScope::Prefix(PathBuf::new()),
             true,
             &mut None,
         )
