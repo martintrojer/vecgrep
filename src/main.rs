@@ -338,7 +338,7 @@ fn run_serve_mode(
     invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
-    include_explicit: bool,
+    explicit_paths: Option<Vec<String>>,
 ) -> Result<bool> {
     serve::run_streaming(
         embedder,
@@ -350,7 +350,7 @@ fn run_serve_mode(
             default_threshold: invocation.args.threshold.unwrap(),
             quiet: output.quiet,
             root: output.root,
-            include_explicit,
+            explicit_paths,
         },
     )?;
     join_walker(walker_handle)?;
@@ -364,7 +364,7 @@ fn run_interactive_mode(
     invocation: &Invocation,
     output: CliOutputContext<'_>,
     walker_handle: &mut Option<WalkerHandle>,
-    include_explicit: bool,
+    explicit_paths: Option<Vec<String>>,
 ) -> Result<bool> {
     tui::interactive::run_streaming(
         embedder,
@@ -373,7 +373,7 @@ fn run_interactive_mode(
         &invocation.query,
         &invocation.args,
         output.cwd_suffix,
-        include_explicit,
+        explicit_paths,
     )?;
     join_walker(walker_handle)?;
     Ok(true)
@@ -413,7 +413,7 @@ fn run_cli_search(
     idx: &Index,
     args: &Args,
     query: &str,
-    include_explicit: bool,
+    explicit_paths: Option<&[String]>,
     output: CliOutputContext<'_>,
 ) -> Result<bool> {
     let chunk_count = idx.chunk_count()?;
@@ -424,7 +424,7 @@ fn run_cli_search(
         &query_embedding,
         args.top_k.unwrap(),
         args.threshold.unwrap(),
-        include_explicit,
+        explicit_paths,
     )?;
 
     let found = render_cli_results(
@@ -546,8 +546,22 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
-    // Include explicit files in results when any path is a file
-    let include_explicit = invocation.args.paths.iter().any(|p| Path::new(p).is_file());
+    // Collect explicit file paths for filtering: only these specific files
+    // (not all prior explicit files) will appear in search results.
+    let explicit_paths: Option<Vec<String>> = {
+        let files: Vec<String> = invocation
+            .args
+            .paths
+            .iter()
+            .filter(|p| Path::new(p).is_file())
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            None
+        } else {
+            Some(files)
+        }
+    };
 
     if matches!(invocation.run_mode, RunMode::Serve) {
         return run_serve_mode(
@@ -557,7 +571,7 @@ fn run() -> Result<bool> {
             &invocation,
             output,
             &mut walker_handle,
-            include_explicit,
+            explicit_paths,
         );
     }
 
@@ -569,7 +583,7 @@ fn run() -> Result<bool> {
             &invocation,
             output,
             &mut walker_handle,
-            include_explicit,
+            explicit_paths,
         );
     }
 
@@ -578,7 +592,7 @@ fn run() -> Result<bool> {
         &idx,
         &invocation.args,
         &invocation.query,
-        include_explicit,
+        explicit_paths.as_deref(),
         output,
     )?;
 

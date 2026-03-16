@@ -69,7 +69,7 @@ fn test_index_and_search_roundtrip() {
     assert_eq!(index.chunk_count().unwrap(), 3);
 
     // Search with the first embedding as query — should find itself as top match
-    let results = index.search(&embeddings[0], 3, 0.0, true).unwrap();
+    let results = index.search(&embeddings[0], 3, 0.0, None).unwrap();
     assert!(!results.is_empty());
     // The top result should have a very high similarity (close to 1.0)
     assert!(results[0].score > 0.99);
@@ -137,11 +137,11 @@ fn test_incremental_indexing() {
     assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Verify a.rs has the updated content
-    let results = index.search(&emb_a_v2[0], 1, -1.0, true).unwrap();
+    let results = index.search(&emb_a_v2[0], 1, -1.0, None).unwrap();
     assert_eq!(results[0].chunk.text, "fn a_modified() {}");
 
     // Verify b.rs is still intact
-    let results = index.search(&emb_b[0], 1, -1.0, true).unwrap();
+    let results = index.search(&emb_b[0], 1, -1.0, None).unwrap();
     assert_eq!(results[0].chunk.text, "fn b() {}");
 
     // Verify updated hash
@@ -627,7 +627,7 @@ fn test_search_with_non_default_embedding_dim() {
     assert_eq!(index.chunk_count().unwrap(), 2);
 
     // Search should work with the correct dimension
-    let results = index.search(&embeddings[0], 2, 0.0, true).unwrap();
+    let results = index.search(&embeddings[0], 2, 0.0, None).unwrap();
     assert!(!results.is_empty());
     assert!(results[0].score > 0.99); // should find itself
 }
@@ -1245,5 +1245,55 @@ fn test_multiple_explicit_files_all_searched() {
     assert!(
         stdout.contains("beta.rs"),
         "expected beta.rs in results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_explicit_file_search_does_not_leak_prior_explicit_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("first.rs"), "fn first_explicit() {}").unwrap();
+    std::fs::write(dir.path().join("second.rs"), "fn second_explicit() {}").unwrap();
+
+    // 1. Search with first.rs as explicit file — caches it
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "explicit function",
+            &dir.path().join("first.rs").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("first.rs"),
+        "expected first.rs in first search, got: {stdout}"
+    );
+
+    // 2. Search with only second.rs as explicit file
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "explicit function",
+            &dir.path().join("second.rs").to_string_lossy(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("second.rs"),
+        "expected second.rs in second search, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("first.rs"),
+        "first.rs should not leak into search for second.rs only, got: {stdout}"
     );
 }

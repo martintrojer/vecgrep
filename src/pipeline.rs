@@ -237,11 +237,13 @@ pub struct EmbedWorker {
 
 impl EmbedWorker {
     /// Spawn a background worker that owns the embedder, index, and indexer.
+    /// `explicit_paths`: when `Some`, only these explicit files appear in results
+    /// alongside normal files. When `None`, all explicit files are excluded.
     pub fn spawn(
         embedder: Embedder,
         idx: Index,
         mut indexer: StreamingIndexer,
-        include_explicit: bool,
+        explicit_paths: Option<Vec<String>>,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
@@ -257,7 +259,7 @@ impl EmbedWorker {
                 req_rx,
                 result_tx,
                 progress_tx,
-                include_explicit,
+                explicit_paths,
             );
         });
 
@@ -326,11 +328,11 @@ fn handle_search(
     query: &str,
     top_k: usize,
     threshold: f32,
-    include_explicit: bool,
+    explicit_paths: Option<&[String]>,
     result_tx: &mpsc::Sender<SearchOutcome>,
 ) {
     let outcome = match embedder.embed(query) {
-        Ok(emb) => match idx.search(&emb, top_k, threshold, include_explicit) {
+        Ok(emb) => match idx.search(&emb, top_k, threshold, explicit_paths) {
             Ok(results) => SearchOutcome::Results {
                 request_id,
                 results,
@@ -355,8 +357,9 @@ fn worker_loop(
     req_rx: mpsc::Receiver<WorkerRequest>,
     result_tx: mpsc::Sender<SearchOutcome>,
     progress_tx: mpsc::Sender<IndexProgress>,
-    include_explicit: bool,
+    explicit_paths: Option<Vec<String>>,
 ) {
+    let explicit_ref = explicit_paths.as_deref();
     loop {
         // Priority 1: handle all pending search requests
         loop {
@@ -373,7 +376,7 @@ fn worker_loop(
                     &query,
                     top_k,
                     threshold,
-                    include_explicit,
+                    explicit_ref,
                     &result_tx,
                 ),
                 Ok(WorkerRequest::Shutdown) => return,
@@ -413,7 +416,7 @@ fn worker_loop(
                     &query,
                     top_k,
                     threshold,
-                    include_explicit,
+                    explicit_ref,
                     &result_tx,
                 ),
                 Ok(WorkerRequest::Shutdown) => return,
@@ -511,7 +514,7 @@ mod tests {
 
         // Verify both files are searchable
         let query_emb = embedder.embed("fn main").unwrap();
-        let results = idx.search(&query_emb, 10, 0.0, true).unwrap();
+        let results = idx.search(&query_emb, 10, 0.0, None).unwrap();
         let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
         assert!(
             paths.contains(&"a.rs"),
@@ -605,7 +608,7 @@ mod tests {
 
         // Verify a.rs has the updated content
         let query_emb = embedder.embed("alpha_v2 updated").unwrap();
-        let results = idx.search(&query_emb, 1, 0.0, true).unwrap();
+        let results = idx.search(&query_emb, 1, 0.0, None).unwrap();
         assert_eq!(results[0].chunk.file_path, "a.rs");
         assert!(
             results[0].chunk.text.contains("alpha_v2"),
@@ -712,7 +715,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx); // no files to index
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
-        EmbedWorker::spawn(embedder, idx, indexer, true)
+        EmbedWorker::spawn(embedder, idx, indexer, None)
     }
 
     #[test]
@@ -764,7 +767,7 @@ mod tests {
         // Don't drop tx yet — worker thinks indexing is still in progress
 
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
-        let worker = EmbedWorker::spawn(embedder, idx, indexer, true);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, None);
 
         // Search should work even while indexing is happening
         let request_id = worker.search("existing content", 5, 0.0);
@@ -803,7 +806,7 @@ mod tests {
         drop(tx);
 
         let indexer = StreamingIndexer::new(rx, 500, 100, 2, std::path::Path::new(""), None);
-        let worker = EmbedWorker::spawn(embedder, idx, indexer, true);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, None);
 
         // Wait for indexing to complete (50 × 50ms = 2.5s max)
         let mut final_progress = None;
@@ -853,7 +856,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx);
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
-        let worker = EmbedWorker::spawn(embedder, idx, indexer, true);
+        let worker = EmbedWorker::spawn(embedder, idx, indexer, None);
 
         let request_id = worker.search("dimension mismatch", 5, 0.0);
         match worker.recv_result_for(request_id) {
