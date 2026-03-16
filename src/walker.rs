@@ -67,7 +67,7 @@ where
         let search_path = Path::new(search_path);
 
         if search_path.is_file() {
-            if let Some(f) = read_file(search_path)? {
+            if let Some(f) = read_file(search_path, true)? {
                 if !on_file(f) {
                     return Ok(());
                 }
@@ -137,7 +137,7 @@ where
             }
 
             let path = entry.path();
-            if let Some(f) = read_file(path)? {
+            if let Some(f) = read_file(path, false)? {
                 if !on_file(f) {
                     stopped = true;
                     break;
@@ -190,7 +190,7 @@ pub fn print_type_list() {
     }
 }
 
-fn read_file(path: &Path) -> Result<Option<WalkedFile>> {
+fn read_file(path: &Path, warn_binary: bool) -> Result<Option<WalkedFile>> {
     let rel_path = path.to_string_lossy().to_string();
 
     match std::fs::read_to_string(path) {
@@ -202,7 +202,11 @@ fn read_file(path: &Path) -> Result<Option<WalkedFile>> {
         }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::InvalidData {
-                tracing::debug!("Skipping binary file: {}", rel_path);
+                if warn_binary {
+                    eprintln!("Warning: skipping binary file: {}", rel_path);
+                } else {
+                    tracing::debug!("Skipping binary file: {}", rel_path);
+                }
             } else {
                 tracing::warn!("Failed to read {}: {}", rel_path, e);
             }
