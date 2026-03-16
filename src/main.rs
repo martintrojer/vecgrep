@@ -3,10 +3,7 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::Arc;
 
 use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
@@ -95,106 +92,20 @@ fn main() {
     });
 }
 
-struct CliProgressRenderer {
-    frames: &'static [&'static str],
-    frame_idx: usize,
-    rendered_once: bool,
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn render_progress(frame_idx: usize, progress: CliIndexingProgress) {
+    let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
+    eprint!(
+        "\r{} {} files | {} chunks | {} walked",
+        frame, progress.indexed_count, progress.indexed_chunks, progress.walked_count
+    );
+    std::io::stderr().flush().ok();
 }
 
-impl CliProgressRenderer {
-    fn new() -> Self {
-        Self {
-            frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
-            frame_idx: 0,
-            rendered_once: false,
-        }
-    }
-
-    fn render(&mut self, progress: CliIndexingProgress) {
-        let frame = self.frames[self.frame_idx % self.frames.len()];
-        self.frame_idx += 1;
-        self.rendered_once = true;
-        eprint!(
-            "\r{} {} files | {} chunks | {} walked",
-            frame, progress.indexed_count, progress.indexed_chunks, progress.walked_count
-        );
-        std::io::stderr().flush().ok();
-    }
-
-    fn finish(&mut self) {
-        if self.rendered_once {
-            eprint!("\r\x1b[2K");
-            std::io::stderr().flush().ok();
-            self.rendered_once = false;
-        }
-    }
-}
-
-struct CliProgressReporter {
-    progress: Arc<Mutex<Option<CliIndexingProgress>>>,
-    running: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl CliProgressReporter {
-    fn new() -> Self {
-        let progress = Arc::new(Mutex::new(None));
-        let running = Arc::new(AtomicBool::new(true));
-        let paused = Arc::new(AtomicBool::new(false));
-        let thread_progress = Arc::clone(&progress);
-        let thread_running = Arc::clone(&running);
-        let thread_paused = Arc::clone(&paused);
-
-        let handle = std::thread::spawn(move || {
-            let mut renderer = CliProgressRenderer::new();
-            while thread_running.load(Ordering::Relaxed) {
-                if !thread_paused.load(Ordering::Relaxed) {
-                    let latest = *thread_progress.lock().unwrap();
-                    if let Some(progress) = latest {
-                        renderer.render(progress);
-                    }
-                }
-                thread::sleep(Duration::from_millis(80));
-            }
-            renderer.finish();
-        });
-
-        Self {
-            progress,
-            running,
-            paused,
-            handle: Some(handle),
-        }
-    }
-
-    fn update(&self, progress: CliIndexingProgress) {
-        *self.progress.lock().unwrap() = Some(progress);
-    }
-
-    fn pause(&self) {
-        self.paused.store(true, Ordering::Relaxed);
-    }
-
-    fn resume(&self) {
-        self.paused.store(false, Ordering::Relaxed);
-    }
-
-    fn finish(mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for CliProgressReporter {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
+fn clear_progress_line() {
+    eprint!("\r\x1b[2K");
+    std::io::stderr().flush().ok();
 }
 
 enum StaleRemovalScope {
@@ -571,16 +482,17 @@ fn drain_initial_indexing(
     idx: &Index,
     quiet: bool,
     threshold: usize,
-    progress_reporter: &mut Option<CliProgressReporter>,
+    show_spinner: bool,
     mut confirm_continue: impl FnMut() -> Result<bool>,
 ) -> Result<IndexDrainOutcome> {
     let mut threshold_prompted = false;
     let mut aborted = false;
+    let mut frame_idx = 0;
     indexer.drain_all(embedder, idx, |progress| {
         if !quiet && !threshold_prompted && threshold > 0 && progress.indexed_count >= threshold {
             threshold_prompted = true;
-            if let Some(reporter) = progress_reporter.as_ref() {
-                reporter.pause();
+            if show_spinner {
+                clear_progress_line();
             }
             eprintln!(
                 "Warning: {} files need indexing so far (still scanning).",
@@ -591,18 +503,16 @@ fn drain_initial_indexing(
                 aborted = true;
                 return Ok(false);
             }
-            if let Some(reporter) = progress_reporter.as_ref() {
-                reporter.resume();
-            }
         }
-        if let Some(reporter) = progress_reporter.as_ref() {
-            reporter.update(progress);
+        if show_spinner {
+            render_progress(frame_idx, progress);
+            frame_idx += 1;
         }
         Ok(true)
     })?;
 
-    if let Some(reporter) = progress_reporter.take() {
-        reporter.finish();
+    if show_spinner {
+        clear_progress_line();
     }
 
     if aborted {
@@ -616,17 +526,19 @@ fn drain_remaining_indexing(
     indexer: &mut pipeline::StreamingIndexer,
     embedder: &mut Embedder,
     idx: &Index,
-    progress_reporter: &mut Option<CliProgressReporter>,
+    show_spinner: bool,
 ) -> Result<()> {
+    let mut frame_idx = 0;
     indexer.drain_all(embedder, idx, |progress| {
-        if let Some(reporter) = progress_reporter.as_ref() {
-            reporter.update(progress);
+        if show_spinner {
+            render_progress(frame_idx, progress);
+            frame_idx += 1;
         }
         Ok(true)
     })?;
 
-    if let Some(reporter) = progress_reporter.take() {
-        reporter.finish();
+    if show_spinner {
+        clear_progress_line();
     }
 
     Ok(())
@@ -939,8 +851,7 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
 
-    let mut progress_reporter =
-        (!quiet && std::io::stderr().is_terminal()).then(CliProgressReporter::new);
+    let show_spinner = !quiet && std::io::stderr().is_terminal();
 
     // CLI and --index-only always drain before proceeding so first-run searches
     // don't miss freshly discovered files. TUI/serve stay progressive unless
@@ -954,7 +865,7 @@ fn run() -> Result<bool> {
             &idx,
             quiet,
             invocation.args.index_warn_threshold,
-            &mut progress_reporter,
+            show_spinner,
             prompt_to_continue,
         )?;
         if matches!(drain_outcome, IndexDrainOutcome::Aborted) {
@@ -1010,7 +921,7 @@ fn run() -> Result<bool> {
     // TUI/serve may return here with indexing still in progress, but CLI has
     // already drained above.
     if !indexer.indexing_done {
-        drain_remaining_indexing(&mut indexer, &mut embedder, &idx, &mut progress_reporter)?;
+        drain_remaining_indexing(&mut indexer, &mut embedder, &idx, show_spinner)?;
         finish_indexing(
             &mut indexer,
             &idx,
@@ -1158,42 +1069,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_progress_reporter_finish_stops_thread() {
-        let reporter = CliProgressReporter::new();
-        reporter.update(CliIndexingProgress {
-            indexed_count: 1,
-            indexed_chunks: 4,
-            walked_count: 2,
-        });
-        std::thread::sleep(Duration::from_millis(120));
-        let start = Instant::now();
-        reporter.finish();
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "finish() should return promptly"
-        );
-    }
-
-    #[test]
-    fn test_cli_progress_reporter_drop_stops_thread() {
-        let reporter = CliProgressReporter::new();
-        reporter.update(CliIndexingProgress {
-            indexed_count: 3,
-            indexed_chunks: 9,
-            walked_count: 5,
-        });
-        reporter.pause();
-        reporter.resume();
-
-        let start = Instant::now();
-        drop(reporter);
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "dropping reporter should not block for long"
-        );
-    }
-
-    #[test]
     fn test_drain_initial_indexing_aborts_cleanly() {
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
@@ -1206,18 +1081,12 @@ mod tests {
         drop(tx);
 
         let mut indexer = pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), None);
-        let mut progress_reporter = None;
 
-        let outcome = drain_initial_indexing(
-            &mut indexer,
-            &mut embedder,
-            &idx,
-            false,
-            1,
-            &mut progress_reporter,
-            || Ok(false),
-        )
-        .unwrap();
+        let outcome =
+            drain_initial_indexing(&mut indexer, &mut embedder, &idx, false, 1, false, || {
+                Ok(false)
+            })
+            .unwrap();
 
         assert_eq!(outcome, IndexDrainOutcome::Aborted);
         assert_eq!(idx.chunk_count().unwrap(), 1);
