@@ -316,6 +316,7 @@ rule IndexOnlyStopsAfterIndexing {
 rule ShowStats {
     when: invocation: Invocation.show_stats becomes true
     requires: invocation.selected_root != null
+              invocation.query = null  -- standalone action, no query allowed
     ensures: StatsRendered(
         invocation: invocation,
         stats: IndexStats(
