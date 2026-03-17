@@ -159,6 +159,10 @@ pub struct Args {
     /// Skip paths outside the selected project root instead of failing.
     #[arg(long)]
     pub skip_outside_root: bool,
+
+    /// Search the entire project index, ignoring path scoping from cwd or arguments.
+    #[arg(long)]
+    pub no_scope: bool,
 }
 
 /// Hardcoded defaults for config-overridable fields.
