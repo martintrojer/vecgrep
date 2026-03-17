@@ -233,6 +233,16 @@ threshold = 0.25
 # File discovery
 hidden = true
 ignore_files = [".vecgrepignore"]
+file_type = ["rust", "python"]
+# file_type_not = ["markdown"]
+# glob = ["!*.generated.*"]
+# max_depth = 5
+
+# Server
+# port = 8080
+
+# Behavior
+# skip_outside_root = true
 ```
 
 Project-level config is useful for per-repo settings (e.g., a different model or chunk size). Global config sets your personal defaults.

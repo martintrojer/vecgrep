@@ -154,12 +154,25 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
         .or_else(|| config.embedder_model.clone());
     args.max_depth = args.max_depth.or(config.max_depth);
 
+    // Option fields: cli.or(config) — list types
+    if args.file_type.is_none() {
+        args.file_type = config.file_type.clone();
+    }
+    if args.file_type_not.is_none() {
+        args.file_type_not = config.file_type_not.clone();
+    }
+    if args.glob.is_none() {
+        args.glob = config.glob.clone();
+    }
+    args.port = args.port.or(config.port);
+
     // Bool flags: CLI flag || config value
     args.full_index = args.full_index || config.full_index.unwrap_or(false);
     args.hidden = args.hidden || config.hidden.unwrap_or(false);
     args.follow = args.follow || config.follow.unwrap_or(false);
     args.no_ignore = args.no_ignore || config.no_ignore.unwrap_or(false);
     args.quiet = args.quiet || config.quiet.unwrap_or(false);
+    args.skip_outside_root = args.skip_outside_root || config.skip_outside_root.unwrap_or(false);
 
     // Ignore files: additive merge
     if let Some(ref config_files) = config.ignore_files {

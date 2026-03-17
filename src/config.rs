@@ -21,6 +21,11 @@ pub struct Config {
     pub color: Option<String>,
     pub quiet: Option<bool>,
     pub index_warn_threshold: Option<usize>,
+    pub file_type: Option<Vec<String>>,
+    pub file_type_not: Option<Vec<String>>,
+    pub glob: Option<Vec<String>>,
+    pub port: Option<u16>,
+    pub skip_outside_root: Option<bool>,
 }
 
 /// Return the global config path (`$XDG_CONFIG_HOME/vecgrep/config.toml`,
@@ -74,6 +79,11 @@ fn merge(base: Config, override_config: Config) -> Config {
         index_warn_threshold: override_config
             .index_warn_threshold
             .or(base.index_warn_threshold),
+        file_type: override_config.file_type.or(base.file_type),
+        file_type_not: override_config.file_type_not.or(base.file_type_not),
+        glob: override_config.glob.or(base.glob),
+        port: override_config.port.or(base.port),
+        skip_outside_root: override_config.skip_outside_root.or(base.skip_outside_root),
     }
 }
 
