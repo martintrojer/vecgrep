@@ -10,7 +10,7 @@ use vecgrep::index::Index;
 use vecgrep::invocation::{
     capped_chunk_size, CliOutputContext, Invocation, RunMode, StaleRemovalScope,
 };
-use vecgrep::pipeline::CliIndexingProgress;
+use vecgrep::pipeline::PipelineStatus;
 use vecgrep::root::resolve_project_root;
 use vecgrep::types::IndexConfig;
 use vecgrep::types::SearchScope;
@@ -44,18 +44,25 @@ fn main() {
 const BATCH_SIZE: usize = 32;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn render_progress(frame_idx: usize, progress: CliIndexingProgress) {
+fn render_progress(frame_idx: usize, status: &PipelineStatus) {
     let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-    if progress.walk_done && progress.walked_count > 0 {
-        eprint!(
-            "\r{} {}/{} files | {} chunks",
-            frame, progress.indexed_count, progress.walked_count, progress.indexed_chunks
-        );
-    } else {
-        eprint!(
-            "\r{} {}/?? files | {} chunks",
-            frame, progress.indexed_count, progress.indexed_chunks
-        );
+    match status {
+        PipelineStatus::Scanning { indexed, chunks } => {
+            eprint!("\r{} {}/?? files | {} chunks", frame, indexed, chunks);
+        }
+        PipelineStatus::Indexing {
+            indexed,
+            total,
+            chunks,
+        } => {
+            eprint!(
+                "\r{} {}/{} files | {} chunks",
+                frame, indexed, total, chunks
+            );
+        }
+        PipelineStatus::Ready { files, chunks } => {
+            eprint!("\r{} {}/{} files | {} chunks", frame, files, files, chunks);
+        }
     }
     std::io::stderr().flush().ok();
 }
@@ -233,22 +240,26 @@ fn drain_initial_indexing(
     let mut threshold_prompted = false;
     let mut aborted = false;
     let mut frame_idx = 0;
-    indexer.drain_all(embedder, idx, |progress| {
-        if !quiet && !threshold_prompted && threshold > 0 && progress.indexed_count >= threshold {
+    indexer.drain_all(embedder, idx, |status| {
+        let indexed = status.indexed();
+        if !quiet && !threshold_prompted && threshold > 0 && indexed >= threshold {
             threshold_prompted = true;
             if show_spinner {
                 clear_progress_line();
             }
-            if progress.walk_done {
-                eprintln!(
-                    "Warning: {} files need indexing ({} files found).",
-                    progress.indexed_count, progress.walked_count
-                );
-            } else {
-                eprintln!(
-                    "Warning: {} files need indexing so far (still scanning).",
-                    progress.indexed_count
-                );
+            match status {
+                PipelineStatus::Indexing { indexed, total, .. } => {
+                    eprintln!(
+                        "Warning: {} files need indexing ({} files found).",
+                        indexed, total
+                    );
+                }
+                _ => {
+                    eprintln!(
+                        "Warning: {} files need indexing so far (still scanning).",
+                        indexed
+                    );
+                }
             }
             if !confirm_continue()? {
                 eprintln!("Aborted.");
@@ -257,7 +268,7 @@ fn drain_initial_indexing(
             }
         }
         if show_spinner {
-            render_progress(frame_idx, progress);
+            render_progress(frame_idx, &status);
             frame_idx += 1;
         }
         Ok(true)
