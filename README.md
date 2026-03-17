@@ -56,6 +56,11 @@ vecgrep --serve --port 8080 ./src
 # => Listening on http://127.0.0.1:8080
 curl -s "http://localhost:8080/search?q=error+handling&k=5"
 
+# Check indexing status (useful for IDE plugins)
+curl -s "http://localhost:8080/status"
+# => {"status":"indexing","indexed":42,"total":380,"chunks":85}
+# => {"status":"ready","files":380,"chunks":850}
+
 # Use with fzf for interactive fuzzy semantic search
 vecgrep --serve --port 8080 ./src &
 fzf --bind "change:reload:curl -s 'http://localhost:8080/search?q={q}'" --preview 'echo {}'
@@ -295,6 +300,23 @@ Options:
       --chunk-size <N>          Tokens per chunk [default: 256]
       --chunk-overlap <N>       Overlap tokens [default: 64]
 ```
+
+## Server endpoints
+
+When running with `--serve`, the HTTP server exposes:
+
+| Endpoint | Description |
+|---|---|
+| `GET /search?q=<query>&k=<N>&threshold=<F>` | Semantic search, returns JSONL |
+| `GET /status` | Pipeline status as JSON |
+
+The `/status` endpoint returns:
+```json
+{"status":"indexing","indexed":42,"total":380,"chunks":85}
+{"status":"ready","files":380,"chunks":850}
+```
+
+`total` is `null` while the file walker is still scanning. IDE plugins can poll this to show indexing progress or wait for readiness.
 
 ## Integrations
 

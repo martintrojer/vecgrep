@@ -69,7 +69,13 @@ walker (thread) → file channel → EmbedWorker (thread, owns Embedder + Index 
                                    ↓ index progress
                                    ↓ (mpsc channel)
 ```
-The worker prioritizes search requests over indexing: it checks for pending searches between every small batch (`WORKER_BATCH_SIZE` files). Search results are returned as `SearchOutcome` — either `Results(Vec<SearchResult>)` or `EmbedError(String)` — so the UI can distinguish "no matches" from "embedder failed." Index progress is sent on a separate channel. The worker shuts down cleanly via `Drop`.
+The worker prioritizes search requests over indexing: it checks for pending searches between every small batch (`WORKER_BATCH_SIZE` files). Search results are returned as `SearchOutcome` — either `Results(Vec<SearchResult>)` or `EmbedError(String)` — so the UI can distinguish "no matches" from "embedder failed." Pipeline progress is sent as `PipelineStatus` on a separate channel. The worker shuts down cleanly via `Drop`.
+
+**`PipelineStatus`** (in `pipeline.rs`): Single source of truth for pipeline state, used by CLI spinner, TUI status bar, serve endpoint, and the `/status` API. Two variants:
+- `Indexing { indexed, total: Option<usize>, chunks }` — walker and indexer running. `total` is `None` until the walker finishes, then `Some(n)` with the true file count.
+- `Ready { files, chunks }` — all done. `files` and `chunks` come from the index database, not the indexing pass, so they reflect the full index state even on cached runs.
+
+Derives `serde::Serialize` with `#[serde(tag = "status")]` for direct use in HTTP responses.
 
 **Key design decisions:**
 
@@ -90,7 +96,8 @@ The worker prioritizes search requests over indexing: it checks for pending sear
 - **Explicit file paths are cached but filtered**: When file paths (not directories) are passed, they go through the same walker/indexer pipeline but are marked with `explicit = 1` in the `files` table. They stay cached permanently for fast re-search (the hash check skips re-embedding unchanged files). `SearchScope.explicit_paths` lists the specific explicit files to include — empty means exclude all. The SQL uses `AND (f.explicit = 0 OR f.path IN (...))`. When a directory walk rediscovers an explicit file, the flag is cleared and it becomes a normal cached entry. Stale removal never deletes explicit files.
 - **Write-path atomicity**: Index writes are wrapped in `BEGIN IMMEDIATE` transactions. The `with_transaction` closure receives `&Connection` so callers can only use the connection within the transaction scope. A `debug_assert` guards against nested transactions.
 - **`--query` flag for TUI/serve with xargs**: `--query "text"` provides the initial search query and treats all positional arguments as paths — no filesystem checks, purely structural. If clap assigned a positional to `query`, it is moved to `paths`. Requires `-i` or `--serve` — rejected in CLI mode with a clap-style error. Without `--query`, the first positional is the query (standard clap behavior). Usage: `rg TODO -l | xargs vecgrep -i --query "search"`.
-- **CLI flags follow ripgrep conventions**: `-t` for type, `-g` for glob, `-l` for files-with-matches, `-c` for count, `-.` for hidden, `-L` for follow, `--ignore-file` for additional ignore files, etc. Any new CLI flag must be checked against `rg --help` for compatibility — do not reuse a short flag that means something different in rg.
+- **CLI flags follow ripgrep conventions**: `-t` for type, `-g` for glob, `-l` for files-with-matches, `-c` for count, `-.` for hidden, `-L` for follow, `-p` for pretty (alias for `--color=always`), `--ignore-file` for additional ignore files, etc. Any new CLI flag must be checked against `rg --help` for compatibility — do not reuse a short flag that means something different in rg.
+- **`--serve` exposes `/search` and `/status` endpoints**: `/search` handles semantic queries with JSONL responses. `/status` returns `PipelineStatus` as JSON — IDE plugins poll this to show indexing progress or wait for readiness. The server tracks `PipelineStatus` in its event loop and passes it to request handlers.
 
 **Module responsibilities:**
 
@@ -101,12 +108,12 @@ The worker prioritizes search requests over indexing: it checks for pending sear
 | `config.rs` | Load and merge `~/.config/vecgrep/config.toml` + `.vecgrep/config.toml`, all fields `Option<T>` |
 | `embedder/` | `mod.rs`: `Embedder` enum and shared API. `local.rs`: ONNX model. `remote.rs`: OpenAI-compatible HTTP API, batching, error extraction |
 | `chunker.rs` | Split file content into overlapping token-window chunks, snapped to line boundaries. Uses tokenizer when available, char-based heuristic otherwise |
-| `pipeline.rs` | `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `EmbedWorker` (background thread for non-blocking TUI/serve), `process_batch()` for chunk → embed → upsert per file |
+| `pipeline.rs` | `PipelineStatus` enum, `StreamingIndexer` (channel consumer with `poll()`/`drain_all()`), `EmbedWorker` (background thread for non-blocking TUI/serve), `process_batch()` for chunk → embed → upsert per file |
 | `paths.rs` | Path conversions: `to_project_relative()`, `to_cwd_relative()` |
 | `index.rs` | SQLite schema (`meta`/`files`/`chunks`/`vec_chunks`), upsert with explicit flag, stale removal, vector search via sqlite-vec with optional explicit filtering |
 | `walker.rs` | `ignore` crate for .gitignore-aware file discovery; `walk_with()` helper, `walk_paths_streaming()` for channel-based walking |
 | `output.rs` | `termcolor` for ripgrep-style colored output, JSONL mode, TTY detection |
-| `serve.rs` | `tiny_http` server for `--serve` mode; `run_streaming()` with `ServeConfig` interleaves indexing with request handling |
+| `serve.rs` | `tiny_http` server for `--serve` mode; `/search` and `/status` endpoints; `run_streaming()` with `ServeConfig` interleaves indexing with request handling |
 | `tui.rs` | `ratatui` interactive mode; `run_streaming()` interleaves indexing with the event loop |
 
 ## Reviewed Decisions
