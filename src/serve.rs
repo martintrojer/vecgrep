@@ -43,6 +43,7 @@ fn handle_request(
     default_threshold: f32,
     root: &str,
     pipeline_status: &PipelineStatus,
+    path_scopes: &[String],
 ) -> Result<()> {
     if request.method() != &Method::Get {
         respond(request, error_response(405, "method not allowed"));
@@ -71,6 +72,10 @@ fn handle_request(
         "/status" => {
             let mut status = serde_json::to_value(pipeline_status).unwrap();
             status["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
+            status["root"] = serde_json::Value::String(root.to_string());
+            if !path_scopes.is_empty() {
+                status["scope"] = serde_json::json!(path_scopes);
+            }
             let body = serde_json::to_string(&status).unwrap();
             let resp = Response::from_string(body).with_header(json_response_header());
             respond(request, resp);
@@ -172,6 +177,7 @@ pub fn run_streaming(
         eprintln!("Listening on http://127.0.0.1:{actual_port}");
     }
 
+    let path_scopes = config.scope.path_scopes.clone();
     let worker = EmbedWorker::spawn(embedder, idx, indexer, config.scope);
     let mut indexing_announced = false;
     let mut pipeline_status = PipelineStatus::Indexing {
@@ -206,6 +212,7 @@ pub fn run_streaming(
             config.default_threshold,
             config.root,
             &pipeline_status,
+            &path_scopes,
         )?;
     }
 }
@@ -439,6 +446,15 @@ mod tests {
         assert!(
             json["version"].as_str().is_some(),
             "expected version field, got: {json}"
+        );
+        assert_eq!(
+            json["root"], "/test/root",
+            "expected root field, got: {json}"
+        );
+        // No scope when SearchScope is default (project root)
+        assert!(
+            json.get("scope").is_none(),
+            "expected no scope field for default scope, got: {json}"
         );
     }
 
