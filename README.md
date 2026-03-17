@@ -269,6 +269,7 @@ Options:
       --no-ignore               Don't respect .gitignore
       --type-list               Show all supported file types
       --color <WHEN>            When to use color (auto, always, never)
+  -p, --pretty                  Alias for --color=always (force colors when piping)
       --embedder-url <URL>      OpenAI-compatible embeddings API URL
       --embedder-model <NAME>   Model name for --embedder-url
       --reindex                 Force full re-index

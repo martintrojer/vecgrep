@@ -171,6 +171,11 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
         }
     }
 
+    // --pretty/-p is an alias for --color=always
+    if args.pretty && args.color.is_none() {
+        args.color = Some(ColorChoice::Always);
+    }
+
     // Color: cli.or(config parsed).or(Auto)
     if args.color.is_none() {
         args.color = config.color.as_deref().and_then(|c| match c {

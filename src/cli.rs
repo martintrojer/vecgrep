@@ -125,6 +125,10 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub color: Option<ColorChoice>,
 
+    /// Alias for --color=always (force colors when piping).
+    #[arg(short = 'p', long)]
+    pub pretty: bool,
+
     /// Warn and ask for confirmation when more than this many files need indexing.
     /// Set to 0 to disable.
     #[arg(long)]
