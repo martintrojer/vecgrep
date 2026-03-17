@@ -182,6 +182,14 @@ mod tests {
         assert!(is_under("src/main.rs", Path::new("src/")));
     }
 
+    #[test]
+    fn test_is_under_rejects_prefix_substring() {
+        // "src-old/main.rs" should NOT match scope "src" — Path::starts_with
+        // is component-aware, unlike string prefix matching.
+        assert!(!is_under("src-old/main.rs", Path::new("src")));
+        assert!(!is_under("srclib/foo.rs", Path::new("src")));
+    }
+
     // --- rewrite ---
 
     #[test]

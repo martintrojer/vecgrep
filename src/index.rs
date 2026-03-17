@@ -807,6 +807,10 @@ mod tests {
 
     #[test]
     fn test_search_threshold() {
+        // Note: uses synthetic sin-based embeddings. The cosine distance between
+        // seed=1.0 and seed=100.0 happens to be large, but this isn't guaranteed
+        // by construction. For real semantic gap assertions, see
+        // embedder::tests::test_semantic_similarity.
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
 

@@ -133,9 +133,9 @@ pub fn print_json(results: &[SearchResult], root: &str) -> std::io::Result<()> {
 
 /// Format a byte size into a human-readable string.
 pub(crate) fn format_size(bytes: u64) -> String {
-    if bytes > 1_000_000 {
+    if bytes >= 1_000_000 {
         format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-    } else if bytes > 1_000 {
+    } else if bytes >= 1_000 {
         format!("{:.1} KB", bytes as f64 / 1_000.0)
     } else {
         format!("{} B", bytes)
@@ -225,18 +225,17 @@ mod tests {
     fn test_format_size_bytes() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(999), "999 B");
-        assert_eq!(format_size(1000), "1000 B");
     }
 
     #[test]
     fn test_format_size_kb() {
-        assert_eq!(format_size(1_001), "1.0 KB");
+        assert_eq!(format_size(1_000), "1.0 KB");
         assert_eq!(format_size(50_000), "50.0 KB");
     }
 
     #[test]
     fn test_format_size_mb() {
-        assert_eq!(format_size(1_000_001), "1.0 MB");
+        assert_eq!(format_size(1_000_000), "1.0 MB");
         assert_eq!(format_size(5_500_000), "5.5 MB");
     }
 

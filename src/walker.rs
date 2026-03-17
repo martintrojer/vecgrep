@@ -214,6 +214,8 @@ fn read_file(path: &Path, explicit: bool) -> Result<Option<WalkedFile>> {
                 } else {
                     tracing::debug!("Skipping binary file: {}", rel_path);
                 }
+            } else if explicit {
+                eprintln!("Warning: failed to read {}: {}", rel_path, e);
             } else {
                 tracing::warn!("Failed to read {}: {}", rel_path, e);
             }
@@ -637,7 +639,7 @@ mod tests {
     #[test]
     fn test_walk_streaming_receiver_drop() {
         let dir = TempDir::new().unwrap();
-        for i in 0..100 {
+        for i in 0..1000 {
             std::fs::write(
                 dir.path().join(format!("{}.txt", i)),
                 format!("content {}", i),
@@ -648,16 +650,20 @@ mod tests {
         let paths = vec![dir.path().to_string_lossy().to_string()];
         let opts = default_opts();
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        // Channel capacity of 1 ensures the walker blocks quickly, making
+        // early exit reliable regardless of system speed.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let handle = std::thread::spawn(move || walk_paths_streaming(&paths, &opts, tx));
 
-        // Receive a few then drop the receiver
+        // Receive one then drop the receiver
         let _first = rx.recv();
         drop(rx);
 
-        // Walker thread should exit gracefully (not panic) and report partial count
+        // Walker thread should exit gracefully (not panic) and report partial count.
+        // With a channel capacity of 1 and 1000 files, the walker can send at most
+        // a handful before the receiver is dropped.
         let count = handle.join().unwrap().unwrap();
-        assert!(count < 100, "expected early exit, got {count} files");
+        assert!(count < 1000, "expected early exit, got {count} files");
     }
 
     #[test]
