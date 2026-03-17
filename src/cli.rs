@@ -164,7 +164,7 @@ pub struct Args {
 /// Hardcoded defaults for config-overridable fields.
 /// These match the spec's `config {}` block defaults.
 pub const DEFAULT_TOP_K: usize = 10;
-pub const DEFAULT_THRESHOLD: f32 = 0.3;
+pub const DEFAULT_THRESHOLD: f32 = 0.2;
 pub const DEFAULT_CHUNK_SIZE: usize = 256;
 pub const DEFAULT_CHUNK_OVERLAP: usize = 64;
 pub const DEFAULT_INDEX_WARN_THRESHOLD: usize = 1000;
