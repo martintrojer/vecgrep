@@ -380,6 +380,30 @@ fn handle_search(
     result_tx.send(outcome).ok();
 }
 
+/// Dispatch a worker request. Returns `true` to continue, `false` to shut down.
+fn dispatch_request(
+    request: WorkerRequest,
+    embedder: &mut Embedder,
+    idx: &Index,
+    scope: &SearchScope,
+    result_tx: &mpsc::Sender<SearchOutcome>,
+) -> bool {
+    match request {
+        WorkerRequest::Search {
+            request_id,
+            query,
+            top_k,
+            threshold,
+        } => {
+            handle_search(
+                embedder, idx, request_id, &query, top_k, threshold, scope, result_tx,
+            );
+            true
+        }
+        WorkerRequest::Shutdown => false,
+    }
+}
+
 fn worker_loop(
     mut embedder: Embedder,
     idx: Index,
@@ -393,22 +417,11 @@ fn worker_loop(
         // Priority 1: handle all pending search requests
         loop {
             match req_rx.try_recv() {
-                Ok(WorkerRequest::Search {
-                    request_id,
-                    query,
-                    top_k,
-                    threshold,
-                }) => handle_search(
-                    &mut embedder,
-                    &idx,
-                    request_id,
-                    &query,
-                    top_k,
-                    threshold,
-                    &scope,
-                    &result_tx,
-                ),
-                Ok(WorkerRequest::Shutdown) => return,
+                Ok(req) => {
+                    if !dispatch_request(req, &mut embedder, &idx, &scope, &result_tx) {
+                        return;
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -430,24 +443,10 @@ fn worker_loop(
             }
         } else {
             // No more indexing, wait for requests
-            match req_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(WorkerRequest::Search {
-                    request_id,
-                    query,
-                    top_k,
-                    threshold,
-                }) => handle_search(
-                    &mut embedder,
-                    &idx,
-                    request_id,
-                    &query,
-                    top_k,
-                    threshold,
-                    &scope,
-                    &result_tx,
-                ),
-                Ok(WorkerRequest::Shutdown) => return,
-                Err(_) => {}
+            if let Ok(req) = req_rx.recv_timeout(Duration::from_millis(50)) {
+                if !dispatch_request(req, &mut embedder, &idx, &scope, &result_tx) {
+                    return;
+                }
             }
         }
     }

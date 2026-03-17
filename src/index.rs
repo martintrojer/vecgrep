@@ -309,6 +309,20 @@ impl Index {
         })
     }
 
+    const SEARCH_QUERY_NO_EXPLICIT: &'static str = "\
+        SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
+        FROM vec_chunks v \
+        JOIN chunks c ON c.id = v.chunk_id \
+        JOIN files f ON f.id = c.file_id \
+        WHERE v.embedding MATCH ?1 \
+          AND k = ?2 \
+          AND f.explicit = 0 \
+        ORDER BY v.distance";
+
+    /// Over-fetch multiplier when path scopes are active, so post-filtering
+    /// doesn't return fewer results than requested.
+    const SCOPE_OVERFETCH: usize = 3;
+
     /// Search for chunks most similar to the query embedding.
     /// See `SearchScope` for how explicit files and path scoping work.
     pub fn search(
@@ -323,6 +337,13 @@ impl Index {
         if top_k == 0 {
             return Ok(vec![]);
         }
+
+        // Over-fetch when path scopes will post-filter results
+        let fetch_k = if path_scopes.is_empty() {
+            top_k
+        } else {
+            top_k * Self::SCOPE_OVERFETCH
+        };
 
         let query = if !explicit_paths.is_empty() {
             let placeholders: Vec<String> = (0..explicit_paths.len())
@@ -340,21 +361,13 @@ impl Index {
                 placeholders.join(", ")
             )
         } else {
-            "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
-                 FROM vec_chunks v \
-                 JOIN chunks c ON c.id = v.chunk_id \
-                 JOIN files f ON f.id = c.file_id \
-                 WHERE v.embedding MATCH ?1 \
-                   AND k = ?2 \
-                   AND f.explicit = 0 \
-                 ORDER BY v.distance"
-                .to_string()
+            Self::SEARCH_QUERY_NO_EXPLICIT.to_string()
         };
         let mut stmt = self.conn.prepare(&query)?;
 
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
             Box::new(query_embedding.as_bytes().to_vec()),
-            Box::new(top_k as i64),
+            Box::new(fetch_k as i64),
         ];
         for p in explicit_paths {
             param_values.push(Box::new(p.clone()));
@@ -394,7 +407,7 @@ impl Index {
             })
             .collect();
 
-        // Scope results to the requested paths (unless searching the project root)
+        // Scope results to the requested paths, truncate to top_k
         if !path_scopes.is_empty() {
             let scoped: Vec<SearchResult> = search_results
                 .into_iter()
@@ -403,6 +416,7 @@ impl Index {
                         .iter()
                         .any(|scope| crate::paths::is_under(&r.chunk.file_path, Path::new(scope)))
                 })
+                .take(top_k)
                 .collect();
             Ok(scoped)
         } else {
