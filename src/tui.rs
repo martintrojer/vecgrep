@@ -3,7 +3,7 @@ pub mod interactive {
     use crate::index::Index;
     use crate::output;
     use crate::paths;
-    use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
+    use crate::pipeline::{EmbedWorker, PipelineStatus, SearchOutcome, StreamingIndexer};
     use crate::types::SearchResult;
     use crate::types::SearchScope;
     use anyhow::Result;
@@ -78,11 +78,10 @@ pub mod interactive {
         let debounce = Duration::from_millis(300);
 
         // Index progress state
-        let mut indexed_count: usize = 0;
-        let mut chunk_count: usize = 0;
-        let mut walked_count: usize = 0;
-        let mut walk_done = false;
-        let mut indexing_done = false;
+        let mut pipeline_status = PipelineStatus::Scanning {
+            indexed: 0,
+            chunks: 0,
+        };
 
         // Preview state
         let mut preview_file_cache: Option<(String, String)> = None;
@@ -131,14 +130,11 @@ pub mod interactive {
             }
 
             // 2. Check for index progress (non-blocking)
-            if let Some(progress) = worker.drain_progress() {
-                indexed_count = progress.indexed_count;
-                chunk_count = progress.chunk_count;
-                walked_count = progress.walked_count;
-                walk_done = progress.walk_done;
-                indexing_done = progress.indexing_done;
+            if let Some(status) = worker.drain_progress() {
+                let was_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
+                pipeline_status = status;
                 // Re-search when new data is indexed
-                if !query.is_empty() && !searching {
+                if !was_ready && !query.is_empty() && !searching {
                     needs_search = true;
                 }
             }
@@ -169,19 +165,25 @@ pub mod interactive {
             // 4. Render
             let preview_scroll_val = preview_scroll;
             let preview_cache_ref = &preview_file_cache;
-            let index_status = if indexing_done {
-                format!("{} chunks", chunk_count)
-            } else if walk_done && walked_count > 0 {
-                format!("{}/{} files", indexed_count, walked_count)
-            } else {
-                format!("{}/?? files", indexed_count)
+            let index_status = match pipeline_status {
+                PipelineStatus::Scanning { indexed, chunks } => {
+                    format!("{indexed}/?? files | {chunks} chunks")
+                }
+                PipelineStatus::Indexing {
+                    indexed,
+                    total,
+                    chunks,
+                } => format!("{indexed}/{total} files | {chunks} chunks"),
+                PipelineStatus::Ready { files, chunks } => {
+                    format!("{files} files | {chunks} chunks")
+                }
             };
 
             let status_text = if let Some(ref err) = search_error {
                 err.clone()
             } else if searching {
                 format!("Searching... | {index_status}")
-            } else if !indexing_done {
+            } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
                 format!("{} results | Indexing: {index_status}", results.len())
             } else {
                 format!("{} results | {index_status}", results.len())

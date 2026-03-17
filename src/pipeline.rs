@@ -12,12 +12,30 @@ use crate::paths;
 use crate::types::{SearchResult, SearchScope};
 use crate::walker::{StreamProgress, WalkedFile};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CliIndexingProgress {
-    pub indexed_count: usize,
-    pub indexed_chunks: usize,
-    pub walked_count: usize,
-    pub walk_done: bool,
+/// Pipeline state — single source of truth for indexing progress.
+/// Used by CLI spinner, TUI status bar, serve endpoint, and future `/status` API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PipelineStatus {
+    /// Walker still discovering files, indexer working.
+    Scanning { indexed: usize, chunks: usize },
+    /// Walker done, indexer still processing.
+    Indexing {
+        indexed: usize,
+        total: usize,
+        chunks: usize,
+    },
+    /// All done.
+    Ready { files: usize, chunks: usize },
+}
+
+impl PipelineStatus {
+    pub fn indexed(&self) -> usize {
+        match self {
+            Self::Scanning { indexed, .. } | Self::Indexing { indexed, .. } => *indexed,
+            Self::Ready { .. } => 0,
+        }
+    }
 }
 
 /// Manages incremental indexing from a streaming channel.
@@ -58,18 +76,33 @@ impl StreamingIndexer {
         }
     }
 
-    pub fn cli_progress(&self) -> CliIndexingProgress {
+    pub fn status(&self) -> PipelineStatus {
+        if self.indexing_done {
+            return PipelineStatus::Ready {
+                files: self.all_paths.len(),
+                chunks: self.indexed_chunks,
+            };
+        }
+
         let snapshot = self
             .stream_progress
             .as_ref()
             .map(|progress| progress.snapshot())
             .unwrap_or_default();
 
-        CliIndexingProgress {
-            indexed_count: self.indexed_count,
-            indexed_chunks: self.indexed_chunks,
-            walked_count: snapshot.walked_files.max(self.all_paths.len()),
-            walk_done: snapshot.walk_done,
+        let walked = snapshot.walked_files.max(self.all_paths.len());
+
+        if snapshot.walk_done && walked > 0 {
+            PipelineStatus::Indexing {
+                indexed: self.indexed_count,
+                total: walked,
+                chunks: self.indexed_chunks,
+            }
+        } else {
+            PipelineStatus::Scanning {
+                indexed: self.indexed_count,
+                chunks: self.indexed_chunks,
+            }
         }
     }
 
@@ -145,7 +178,7 @@ impl StreamingIndexer {
         mut on_batch: F,
     ) -> Result<usize>
     where
-        F: FnMut(CliIndexingProgress) -> Result<bool>,
+        F: FnMut(PipelineStatus) -> Result<bool>,
     {
         while !self.indexing_done {
             let mut batch: Vec<(WalkedFile, String)> = Vec::new();
@@ -172,7 +205,7 @@ impl StreamingIndexer {
                     process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
                 self.indexed_chunks += chunk_count;
 
-                if !on_batch(self.cli_progress())? {
+                if !on_batch(self.status())? {
                     return Ok(self.indexed_count);
                 }
             }
@@ -222,19 +255,11 @@ impl SearchOutcome {
     }
 }
 
-pub struct IndexProgress {
-    pub indexed_count: usize,
-    pub chunk_count: usize,
-    pub walked_count: usize,
-    pub walk_done: bool,
-    pub indexing_done: bool,
-}
-
 /// Runs embedding and indexing on a background thread so the UI stays responsive.
 pub struct EmbedWorker {
     req_tx: mpsc::Sender<WorkerRequest>,
     result_rx: mpsc::Receiver<SearchOutcome>,
-    progress_rx: mpsc::Receiver<IndexProgress>,
+    progress_rx: mpsc::Receiver<PipelineStatus>,
     next_request_id: AtomicU64,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -306,7 +331,7 @@ impl EmbedWorker {
     }
 
     /// Drain all pending progress messages, returning the latest.
-    pub fn drain_progress(&self) -> Option<IndexProgress> {
+    pub fn drain_progress(&self) -> Option<PipelineStatus> {
         let mut last = None;
         while let Ok(p) = self.progress_rx.try_recv() {
             last = Some(p);
@@ -360,7 +385,7 @@ fn worker_loop(
     mut indexer: StreamingIndexer,
     req_rx: mpsc::Receiver<WorkerRequest>,
     result_tx: mpsc::Sender<SearchOutcome>,
-    progress_tx: mpsc::Sender<IndexProgress>,
+    progress_tx: mpsc::Sender<PipelineStatus>,
     scope: SearchScope,
 ) {
     loop {
@@ -392,16 +417,7 @@ fn worker_loop(
         if !indexer.indexing_done {
             match indexer.poll(&mut embedder, &idx) {
                 Ok(_) => {
-                    let cli = indexer.cli_progress();
-                    progress_tx
-                        .send(IndexProgress {
-                            indexed_count: indexer.indexed_count,
-                            chunk_count: idx.chunk_count().unwrap_or(0),
-                            walked_count: cli.walked_count,
-                            walk_done: cli.walk_done,
-                            indexing_done: indexer.indexing_done,
-                        })
-                        .ok();
+                    progress_tx.send(indexer.status()).ok();
                 }
                 Err(e) => {
                     tracing::error!("Indexing error: {e:#}");
@@ -819,21 +835,25 @@ mod tests {
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
         // Wait for indexing to complete (50 × 50ms = 2.5s max)
-        let mut final_progress = None;
+        let mut final_status = None;
         for _ in 0..50 {
-            if let Some(p) = worker.drain_progress() {
-                if p.indexing_done {
-                    final_progress = Some(p);
+            if let Some(s) = worker.drain_progress() {
+                if matches!(s, PipelineStatus::Ready { .. }) {
+                    final_status = Some(s);
                     break;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        let progress = final_progress.expect("should have received progress with indexing_done");
-        assert_eq!(progress.indexed_count, 3);
-        assert_eq!(progress.chunk_count, 3);
-        assert!(progress.indexing_done);
+        let status = final_status.expect("should have received Ready status");
+        assert_eq!(
+            status,
+            PipelineStatus::Ready {
+                files: 3,
+                chunks: 3
+            }
+        );
     }
 
     #[test]

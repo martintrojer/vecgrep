@@ -7,7 +7,7 @@ use url::Url;
 use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::output::format_json_result;
-use crate::pipeline::{EmbedWorker, SearchOutcome, StreamingIndexer};
+use crate::pipeline::{EmbedWorker, PipelineStatus, SearchOutcome, StreamingIndexer};
 use crate::types::SearchScope;
 
 fn respond(request: Request, response: Response<std::io::Cursor<Vec<u8>>>) {
@@ -149,14 +149,11 @@ pub fn run_streaming(
 
     loop {
         // Check index progress (non-blocking)
-        if let Some(progress) = worker.drain_progress() {
-            if progress.indexing_done && !indexing_announced {
+        if let Some(PipelineStatus::Ready { files, chunks }) = worker.drain_progress() {
+            if !indexing_announced {
                 indexing_announced = true;
                 if !config.quiet {
-                    eprintln!(
-                        "Indexed {}/{} files, {} chunks ready.",
-                        progress.indexed_count, progress.walked_count, progress.chunk_count
-                    );
+                    eprintln!("Indexed {files} files, {chunks} chunks ready.");
                 }
             }
         }
