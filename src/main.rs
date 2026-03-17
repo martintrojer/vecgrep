@@ -516,14 +516,24 @@ fn run() -> Result<bool> {
 
     resolve_query_flag(&mut args);
 
-    if args.stats && args.query.is_some() {
+    {
         use clap::error::ErrorKind;
-        Args::command()
-            .error(
-                ErrorKind::ArgumentConflict,
-                "--stats cannot be combined with a query",
-            )
-            .exit();
+        if args.stats && args.query.is_some() {
+            Args::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--stats cannot be combined with a query",
+                )
+                .exit();
+        }
+        if args.no_scope && args.paths != ["."] {
+            Args::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--no-scope cannot be combined with explicit paths",
+                )
+                .exit();
+        }
     }
 
     if args.type_list {
@@ -599,7 +609,11 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
-    let search_scope = build_search_scope(&invocation.args.paths, &invocation.path_plan.cwd_suffix);
+    let search_scope = if invocation.args.no_scope {
+        SearchScope::default()
+    } else {
+        build_search_scope(&invocation.args.paths, &invocation.path_plan.cwd_suffix)
+    };
 
     match invocation.run_mode {
         RunMode::Serve => {

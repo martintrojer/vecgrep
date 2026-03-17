@@ -294,6 +294,7 @@ Options:
       --clear-cache             Delete cached index
       --show-root               Print resolved project root and exit
       --skip-outside-root       Ignore paths outside the selected project root
+      --no-scope                Search entire project index (ignore cwd scoping)
       --json                    JSONL output (includes "root" field)
       --serve                   Start HTTP server mode
       --port <PORT>             Port for HTTP server [default: auto]
@@ -312,11 +313,11 @@ When running with `--serve`, the HTTP server exposes:
 
 The `/status` endpoint returns:
 ```json
-{"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.0"}
-{"status":"ready","files":380,"chunks":850,"version":"0.9.0"}
+{"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.0","root":"/path/to/project"}
+{"status":"ready","files":380,"chunks":850,"version":"0.9.0","root":"/path/to/project","scope":["src"]}
 ```
 
-`total` is `null` while the file walker is still scanning. `version` is the vecgrep binary version. IDE plugins can poll this to show indexing progress or wait for readiness.
+`total` is `null` while the file walker is still scanning. `version` is the vecgrep binary version. `root` is the project root path. `scope` lists active path scopes (omitted when searching the full project). IDE plugins can poll this to show indexing progress or wait for readiness.
 
 ## Integrations
 

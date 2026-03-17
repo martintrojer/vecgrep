@@ -1536,3 +1536,125 @@ fn test_json_output_structure() {
     );
     assert!(json["text"].is_string(), "expected text field, got: {json}");
 }
+
+// --- --no-scope tests ---
+
+#[test]
+fn test_no_scope_returns_results_from_entire_project() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main_function() { startup(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\nHow to start up the main application",
+    )
+    .unwrap();
+
+    // Index everything
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // From src/, without --no-scope: only src/ results
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "startup"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("guide.md"),
+        "without --no-scope, docs should be excluded, got: {stdout}"
+    );
+
+    // From src/, with --no-scope: full project results
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--no-scope", "--threshold", "0.0", "startup"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("main.rs"),
+        "expected main.rs with --no-scope, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("guide.md"),
+        "expected guide.md with --no-scope, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_no_scope_conflicts_with_explicit_paths() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--no-scope", "query", "a.rs"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("--no-scope cannot be combined with explicit paths"),
+        "expected conflict error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_no_scope_at_project_root_is_same_as_default() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("test.rs"), "fn test_function() {}").unwrap();
+
+    // Index
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Without --no-scope from root
+    let output1 = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "test function"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // With --no-scope from root
+    let output2 = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--no-scope",
+            "--threshold",
+            "0.0",
+            "test function",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output1.status.success());
+    assert!(output2.status.success());
+    let stdout1 = String::from_utf8(output1.stdout).unwrap();
+    let stdout2 = String::from_utf8(output2.stdout).unwrap();
+    assert_eq!(
+        stdout1, stdout2,
+        "--no-scope at project root should produce same results"
+    );
+}
