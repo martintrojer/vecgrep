@@ -17,12 +17,10 @@ use crate::walker::{StreamProgress, WalkedFile};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PipelineStatus {
-    /// Walker still discovering files, indexer working.
-    Scanning { indexed: usize, chunks: usize },
-    /// Walker done, indexer still processing.
+    /// Walker and indexer running. `total` is `None` until the walker finishes.
     Indexing {
         indexed: usize,
-        total: usize,
+        total: Option<usize>,
         chunks: usize,
     },
     /// All done.
@@ -32,7 +30,7 @@ pub enum PipelineStatus {
 impl PipelineStatus {
     pub fn indexed(&self) -> usize {
         match self {
-            Self::Scanning { indexed, .. } | Self::Indexing { indexed, .. } => *indexed,
+            Self::Indexing { indexed, .. } => *indexed,
             Self::Ready { .. } => 0,
         }
     }
@@ -90,19 +88,16 @@ impl StreamingIndexer {
             .map(|progress| progress.snapshot())
             .unwrap_or_default();
 
-        let walked = snapshot.walked_files.max(self.all_paths.len());
-
-        if snapshot.walk_done && walked > 0 {
-            PipelineStatus::Indexing {
-                indexed: self.indexed_count,
-                total: walked,
-                chunks: self.indexed_chunks,
-            }
+        let total = if snapshot.walk_done {
+            Some(snapshot.walked_files.max(self.all_paths.len()))
         } else {
-            PipelineStatus::Scanning {
-                indexed: self.indexed_count,
-                chunks: self.indexed_chunks,
-            }
+            None
+        };
+
+        PipelineStatus::Indexing {
+            indexed: self.indexed_count,
+            total,
+            chunks: self.indexed_chunks,
         }
     }
 
@@ -711,6 +706,119 @@ mod tests {
             "file should have been skipped (hash match)"
         );
         assert_eq!(idx.chunk_count().unwrap(), 1);
+    }
+
+    // --- PipelineStatus tests ---
+
+    #[test]
+    fn test_status_indexing_without_total_when_walker_active() {
+        let (tx, rx) = mpsc::sync_channel(32);
+        tx.send(WalkedFile {
+            rel_path: "a.rs".to_string(),
+            content: "fn a() {}".to_string(),
+            explicit: false,
+        })
+        .unwrap();
+        // Don't drop tx — walker appears still running
+
+        let progress = Arc::new(walker::StreamProgress::new());
+        // Simulate walker having sent 1 file
+        progress.snapshot(); // just to confirm it works
+
+        let mut indexer =
+            StreamingIndexer::new(rx, 500, 100, 32, std::path::Path::new(""), Some(progress));
+
+        let status = indexer.status();
+        assert_eq!(
+            status,
+            PipelineStatus::Indexing {
+                indexed: 0,
+                total: None,
+                chunks: 0,
+            }
+        );
+
+        drop(tx);
+        // Drain to mark indexing_done
+        let mut embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+        indexer
+            .drain_all(&mut embedder, &idx, |_| Ok(true))
+            .unwrap();
+
+        match indexer.status() {
+            PipelineStatus::Ready { files, chunks } => {
+                assert_eq!(files, 1);
+                assert_eq!(chunks, 1);
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_status_indexing_with_total_when_walker_done() {
+        let (tx, rx) = mpsc::sync_channel(32);
+        let progress = Arc::new(walker::StreamProgress::new());
+
+        // Send files through the progress tracker
+        for i in 0..3 {
+            tx.send(WalkedFile {
+                rel_path: format!("f{i}.rs"),
+                content: format!("fn f{i}() {{}}"),
+                explicit: false,
+            })
+            .unwrap();
+        }
+        // Manually update progress to simulate walker sending
+        for _ in 0..3 {
+            progress.snapshot(); // read
+        }
+        progress.mark_done();
+        drop(tx);
+
+        let indexer =
+            StreamingIndexer::new(rx, 500, 100, 32, std::path::Path::new(""), Some(progress));
+
+        match indexer.status() {
+            PipelineStatus::Indexing { total, .. } => {
+                // Walker is done but indexer hasn't consumed files yet.
+                // total should be Some because walk_done is true.
+                assert!(total.is_some(), "expected total when walker is done");
+            }
+            other => panic!("expected Indexing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pipeline_status_serializes_as_tagged_json() {
+        let indexing = PipelineStatus::Indexing {
+            indexed: 42,
+            total: Some(380),
+            chunks: 85,
+        };
+        let json = serde_json::to_value(&indexing).unwrap();
+        assert_eq!(json["status"], "indexing");
+        assert_eq!(json["indexed"], 42);
+        assert_eq!(json["total"], 380);
+        assert_eq!(json["chunks"], 85);
+
+        let scanning = PipelineStatus::Indexing {
+            indexed: 10,
+            total: None,
+            chunks: 20,
+        };
+        let json = serde_json::to_value(&scanning).unwrap();
+        assert_eq!(json["status"], "indexing");
+        assert_eq!(json["total"], serde_json::Value::Null);
+
+        let ready = PipelineStatus::Ready {
+            files: 100,
+            chunks: 200,
+        };
+        let json = serde_json::to_value(&ready).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert_eq!(json["files"], 100);
+        assert_eq!(json["chunks"], 200);
     }
 
     // --- EmbedWorker tests ---

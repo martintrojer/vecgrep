@@ -78,8 +78,9 @@ pub mod interactive {
         let debounce = Duration::from_millis(300);
 
         // Index progress state
-        let mut pipeline_status = PipelineStatus::Scanning {
+        let mut pipeline_status = PipelineStatus::Indexing {
             indexed: 0,
+            total: None,
             chunks: 0,
         };
 
@@ -166,14 +167,14 @@ pub mod interactive {
             let preview_scroll_val = preview_scroll;
             let preview_cache_ref = &preview_file_cache;
             let index_status = match pipeline_status {
-                PipelineStatus::Scanning { indexed, chunks } => {
-                    format!("{indexed}/?? files | {chunks} chunks")
-                }
                 PipelineStatus::Indexing {
                     indexed,
                     total,
                     chunks,
-                } => format!("{indexed}/{total} files | {chunks} chunks"),
+                } => {
+                    let total_str = total.map_or("??".to_string(), |t| t.to_string());
+                    format!("{indexed}/{total_str} files | {chunks} chunks")
+                }
                 PipelineStatus::Ready { files, chunks } => {
                     format!("{files} files | {chunks} chunks")
                 }
