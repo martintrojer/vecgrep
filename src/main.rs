@@ -648,8 +648,7 @@ fn finish_indexing(
             if walk_prefix.as_os_str().is_empty() {
                 idx.remove_stale_files(&indexer.all_paths, None)?
             } else {
-                let prefix = format!("{}/", walk_prefix.display());
-                idx.remove_stale_files(&indexer.all_paths, Some(&prefix))?
+                idx.remove_stale_files(&indexer.all_paths, Some(walk_prefix))?
             }
         }
         StaleRemovalScope::None => 0,

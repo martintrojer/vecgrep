@@ -399,11 +399,9 @@ impl Index {
             let scoped: Vec<SearchResult> = search_results
                 .into_iter()
                 .filter(|r| {
-                    path_scopes.iter().any(|scope| {
-                        let scope = Path::new(scope);
-                        let file = Path::new(&r.chunk.file_path);
-                        file == scope || file.starts_with(scope)
-                    })
+                    path_scopes
+                        .iter()
+                        .any(|scope| crate::paths::is_under(&r.chunk.file_path, Path::new(scope)))
                 })
                 .collect();
             Ok(scoped)
@@ -421,14 +419,14 @@ impl Index {
     }
 
     /// Remove non-explicit stale files and clear the explicit flag on walked files.
-    /// If `prefix` is provided, only non-explicit files under that prefix are
+    /// If `scope` is provided, only non-explicit files under that directory are
     /// considered stale. Explicit files are never removed (they stay cached for
     /// fast re-search). Files seen in the walk have their explicit flag cleared
     /// so they become normal cached entries.
     pub fn remove_stale_files(
         &self,
         current_paths: &[String],
-        prefix: Option<&str>,
+        scope: Option<&Path>,
     ) -> Result<usize> {
         self.with_transaction(|conn| {
             let stored = all_file_paths_with_explicit(conn)?;
@@ -441,7 +439,7 @@ impl Index {
                     // Only remove non-explicit files within the prefix scope.
                     // Explicit files stay cached for fast re-search.
                     if !is_explicit {
-                        let in_scope = prefix.is_none_or(|p| path.starts_with(p));
+                        let in_scope = scope.is_none_or(|s| crate::paths::is_under(path, s));
                         if in_scope {
                             if let Ok(file_id) = get_file_id(conn, path) {
                                 delete_file_by_id(conn, file_id)?;
@@ -761,7 +759,9 @@ mod tests {
         }
 
         let current = vec!["src/a.rs".to_string()];
-        let removed = index.remove_stale_files(&current, Some("src/")).unwrap();
+        let removed = index
+            .remove_stale_files(&current, Some(Path::new("src")))
+            .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(index.chunk_count().unwrap(), 3);
     }
