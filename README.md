@@ -127,7 +127,7 @@ Search is a vector KNN query via [sqlite-vec](https://github.com/asg017/sqlite-v
 `vecgrep` accepts files, directories, or a mix of both. The project root is discovered once and the cache lives at that root, so different path selections still share the same index.
 
 - One invocation uses one selected project root and one cache. Paths outside that root are rejected by default.
-- **Results are scoped to requested paths**: `vecgrep "query" src/` only returns results from `src/`, not the entire index. Same behavior as ripgrep.
+- **Results are scoped to requested paths**: `vecgrep "query" src/` only returns results from `src/`, not the entire index. Running from a subdirectory without explicit paths scopes results to that subdirectory — `cd src && vecgrep "query"` only shows `src/` results. Same behavior as ripgrep.
 - Single directory path: vecgrep walks that subtree recursively and performs stale cleanup for that subtree.
 - Multiple directory paths: vecgrep walks all of them and updates the shared cache, but skips stale cleanup because the input is not one contiguous subtree.
 - Explicit file paths: vecgrep indexes them with an `explicit` flag. They stay cached for fast re-search but are excluded from directory-only searches. Only the specific explicit files you pass appear in results — not all explicit files from prior invocations. When a directory walk rediscovers the file, the flag is cleared. Consistent across CLI, TUI, and `--serve`.
@@ -189,7 +189,7 @@ To build from source:
 cargo install --path .
 ```
 
-The first build downloads the ONNX model (~90 MB) from HuggingFace and caches it locally. Subsequent builds reuse the cached model.
+The first build downloads the ONNX model (~90 MB) from HuggingFace and caches it locally. Subsequent builds reuse the cached model. The release binary is ~109 MB because the embedding model is compiled in — no external files or services needed at runtime.
 
 ### Install the AI skill
 
@@ -229,7 +229,6 @@ embedder_model = "mxbai-embed-large"
 # Search defaults
 top_k = 20
 threshold = 0.25
-context = 5
 
 # File discovery
 hidden = true
@@ -261,7 +260,6 @@ Options:
   -t, --type <TYPE>             Filter by file type (rust, python, js, ...)
   -T, --type-not <TYPE>         Exclude file type
   -g, --glob <PATTERN>          Filter by glob
-  -C, --context <N>             Context lines around match [default: 3]
   -l, --files-with-matches      Print only file paths with matches
   -c, --count                   Print count of matching chunks per file
   -., --hidden                  Search hidden files and directories
