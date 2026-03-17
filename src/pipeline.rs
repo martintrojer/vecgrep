@@ -74,11 +74,14 @@ impl StreamingIndexer {
         }
     }
 
-    pub fn status(&self) -> PipelineStatus {
+    /// Build the current pipeline status.
+    /// `total_chunks` should be the total chunk count from the index (not just
+    /// this indexing pass) so that `Ready` reflects the full index state.
+    pub fn status(&self, total_chunks: usize) -> PipelineStatus {
         if self.indexing_done {
             return PipelineStatus::Ready {
                 files: self.all_paths.len(),
-                chunks: self.indexed_chunks,
+                chunks: total_chunks,
             };
         }
 
@@ -200,7 +203,7 @@ impl StreamingIndexer {
                     process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
                 self.indexed_chunks += chunk_count;
 
-                if !on_batch(self.status())? {
+                if !on_batch(self.status(idx.chunk_count().unwrap_or(0)))? {
                     return Ok(self.indexed_count);
                 }
             }
@@ -412,7 +415,8 @@ fn worker_loop(
         if !indexer.indexing_done {
             match indexer.poll(&mut embedder, &idx) {
                 Ok(_) => {
-                    progress_tx.send(indexer.status()).ok();
+                    let total_chunks = idx.chunk_count().unwrap_or(0);
+                    progress_tx.send(indexer.status(total_chunks)).ok();
                 }
                 Err(e) => {
                     tracing::error!("Indexing error: {e:#}");
@@ -728,7 +732,7 @@ mod tests {
         let mut indexer =
             StreamingIndexer::new(rx, 500, 100, 32, std::path::Path::new(""), Some(progress));
 
-        let status = indexer.status();
+        let status = indexer.status(0);
         assert_eq!(
             status,
             PipelineStatus::Indexing {
@@ -746,7 +750,8 @@ mod tests {
             .drain_all(&mut embedder, &idx, |_| Ok(true))
             .unwrap();
 
-        match indexer.status() {
+        let total_chunks = idx.chunk_count().unwrap();
+        match indexer.status(total_chunks) {
             PipelineStatus::Ready { files, chunks } => {
                 assert_eq!(files, 1);
                 assert_eq!(chunks, 1);
@@ -779,7 +784,7 @@ mod tests {
         let indexer =
             StreamingIndexer::new(rx, 500, 100, 32, std::path::Path::new(""), Some(progress));
 
-        match indexer.status() {
+        match indexer.status(0) {
             PipelineStatus::Indexing { total, .. } => {
                 // Walker is done but indexer hasn't consumed files yet.
                 // total should be Some because walk_done is true.
