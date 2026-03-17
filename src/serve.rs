@@ -69,7 +69,9 @@ fn handle_request(
             root,
         ),
         "/status" => {
-            let body = serde_json::to_string(pipeline_status).unwrap();
+            let mut status = serde_json::to_value(pipeline_status).unwrap();
+            status["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
+            let body = serde_json::to_string(&status).unwrap();
             let resp = Response::from_string(body).with_header(json_response_header());
             respond(request, resp);
             Ok(())
@@ -433,6 +435,10 @@ mod tests {
         assert!(
             json["chunks"].as_u64().unwrap() >= 3,
             "expected at least 3 chunks, got: {json}"
+        );
+        assert!(
+            json["version"].as_str().is_some(),
+            "expected version field, got: {json}"
         );
     }
 
