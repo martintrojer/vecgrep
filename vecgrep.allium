@@ -36,7 +36,7 @@ config {
     precedence: cli > project > global
 
     top_k: Integer = 10
-    threshold: Decimal = 0.3
+    threshold: Decimal = 0.2
     chunk_size: Integer = 256
     chunk_overlap: Integer = 64
     full_index: Boolean = false
