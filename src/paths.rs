@@ -5,7 +5,9 @@ use crate::types::SearchResult;
 /// Convert a walker-relative path to a project-root-relative path.
 pub fn to_project_relative(walker_path: &str, cwd_suffix: &Path) -> String {
     let stripped = walker_path.strip_prefix("./").unwrap_or(walker_path);
-    if cwd_suffix.as_os_str().is_empty() {
+    if stripped == "." || stripped.is_empty() {
+        cwd_suffix.to_string_lossy().to_string()
+    } else if cwd_suffix.as_os_str().is_empty() {
         stripped.to_string()
     } else {
         format!("{}/{}", cwd_suffix.display(), stripped)

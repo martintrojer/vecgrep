@@ -557,15 +557,26 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
-    let search_scope = SearchScope {
-        explicit_paths: invocation
+    let search_scope = {
+        let cwd_suffix = &invocation.path_plan.cwd_suffix;
+        let explicit_paths: Vec<String> = invocation
             .args
             .paths
             .iter()
             .filter(|p| Path::new(p).is_file())
-            .cloned()
-            .collect(),
-        path_scopes: invocation.args.paths.clone(),
+            .map(|p| paths::to_project_relative(p, cwd_suffix))
+            .collect();
+        let path_scopes: Vec<String> = invocation
+            .args
+            .paths
+            .iter()
+            .map(|p| paths::to_project_relative(p, cwd_suffix))
+            .filter(|p| !p.is_empty())
+            .collect();
+        SearchScope {
+            explicit_paths,
+            path_scopes,
+        }
     };
 
     if matches!(invocation.run_mode, RunMode::Serve) {
