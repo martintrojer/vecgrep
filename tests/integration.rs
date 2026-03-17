@@ -1348,3 +1348,139 @@ fn test_search_scoped_to_given_directory() {
         "docs/guide.md should not appear when searching only src/, got: {stdout}"
     );
 }
+
+#[test]
+fn test_search_from_subdirectory_scopes_to_cwd() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main_function() { startup(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\nHow to start up the main application",
+    )
+    .unwrap();
+
+    // Index everything from project root
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search from src/ with default path "." — should only return src/ results
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "startup"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("main.rs"),
+        "expected main.rs in results from src/, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("guide.md"),
+        "docs/guide.md should not appear when searching from src/, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_search_from_subdirectory_with_explicit_outside_path() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main_function() { startup(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\nHow to start up the main application",
+    )
+    .unwrap();
+
+    // Index everything from project root
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search from src/ but also pass an explicit file outside cwd
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args([
+            "--quiet",
+            "--threshold",
+            "0.0",
+            "startup",
+            ".",
+            "../docs/guide.md",
+        ])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("main.rs"),
+        "expected main.rs in results, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("guide.md"),
+        "explicit ../docs/guide.md should appear since it was passed as a path, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_search_from_subdirectory_with_outside_directory() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main_function() { startup(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "# Guide\nHow to start up the main application",
+    )
+    .unwrap();
+
+    // Index everything from project root
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--full-index", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Search from src/ but also pass ../docs/ as an additional directory
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--quiet", "--threshold", "0.0", "startup", ".", "../docs"])
+        .current_dir(dir.path().join("src"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("main.rs"),
+        "expected main.rs from src/, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("guide.md"),
+        "expected guide.md from ../docs/, got: {stdout}"
+    );
+}

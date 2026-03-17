@@ -395,11 +395,7 @@ impl Index {
             .collect();
 
         // Scope results to the requested paths (unless searching the project root)
-        let needs_scoping = !path_scopes.is_empty()
-            && !path_scopes
-                .iter()
-                .all(|s| s.is_empty() || Path::new(s) == Path::new("."));
-        if needs_scoping {
+        if !path_scopes.is_empty() {
             let scoped: Vec<SearchResult> = search_results
                 .into_iter()
                 .filter(|r| {
