@@ -50,11 +50,11 @@ vecgrep is a semantic grep tool: it embeds a query and file chunks into vectors,
 **Data pipeline** (orchestrated in `main.rs`, streamed via `std::sync::mpsc`):
 
 ```
-walker (thread) →  channel(64)  →  StreamingIndexer  →  index (SQLite)  →  search  →  output/tui/serve
-(files)            (backpressure)   (chunk + embed)      (cache)            (rank)     (display)
+walker (thread) →  channel  →  StreamingIndexer  →  index (SQLite)  →  search  →  output/tui/serve
+(files)            (unbounded)  (chunk + embed)      (cache)            (rank)     (display)
 ```
 
-The walker runs on a background thread feeding files through a bounded `sync_channel(batch_size * 2)`. The three modes consume the channel differently:
+The walker runs on a background thread feeding files through an unbounded `mpsc::channel`. The walker finishes quickly and its `StreamProgress` provides the total file count for progress display (e.g., "42/380 files"). The three modes consume the channel differently:
 
 - **CLI default**: `drain_all()` blocks until indexing is complete, then searches the up-to-date index. Embedder and Index stay on the main thread.
 - **CLI `--full-index`**: `drain_all()` blocks until all files are indexed (with threshold prompt), then searches. Same single-threaded ownership.

@@ -556,7 +556,7 @@ fn test_first_run_status_output_is_compact() {
         "expected compact model loading line, got: {stderr:?}"
     );
     assert!(
-        stderr.contains("Indexing complete. 1 files, 1 chunks, 1 walked."),
+        stderr.contains("Indexed 1/1 files, 1 chunks."),
         "expected compact indexing summary, got: {stderr:?}"
     );
     assert!(
