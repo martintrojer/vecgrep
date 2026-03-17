@@ -16,28 +16,36 @@ pub struct WalkedFile {
 
 pub struct StreamProgress {
     walked_files: AtomicUsize,
+    walk_done: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StreamProgressSnapshot {
     pub walked_files: usize,
+    pub walk_done: bool,
 }
 
 impl StreamProgress {
     pub fn new() -> Self {
         Self {
             walked_files: AtomicUsize::new(0),
+            walk_done: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub fn snapshot(&self) -> StreamProgressSnapshot {
         StreamProgressSnapshot {
             walked_files: self.walked_files.load(Ordering::Relaxed),
+            walk_done: self.walk_done.load(Ordering::Relaxed),
         }
     }
 
     fn on_send(&self) {
         self.walked_files.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn mark_done(&self) {
+        self.walk_done.store(true, Ordering::Relaxed);
     }
 }
 
@@ -160,7 +168,7 @@ where
 pub fn walk_paths_streaming(
     paths: &[String],
     opts: &WalkOptions,
-    sender: std::sync::mpsc::SyncSender<WalkedFile>,
+    sender: std::sync::mpsc::Sender<WalkedFile>,
 ) -> Result<usize> {
     walk_paths_streaming_with_progress(paths, opts, sender, Arc::new(StreamProgress::new()))
 }
@@ -168,7 +176,7 @@ pub fn walk_paths_streaming(
 pub fn walk_paths_streaming_with_progress(
     paths: &[String],
     opts: &WalkOptions,
-    sender: std::sync::mpsc::SyncSender<WalkedFile>,
+    sender: std::sync::mpsc::Sender<WalkedFile>,
     progress: Arc<StreamProgress>,
 ) -> Result<usize> {
     let mut count = 0;
@@ -180,6 +188,7 @@ pub fn walk_paths_streaming_with_progress(
         count += 1;
         true
     })?;
+    progress.mark_done();
     Ok(count)
 }
 
@@ -617,7 +626,7 @@ mod tests {
 
         let batch_files = walk_paths(&paths, &opts).unwrap();
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(32);
+        let (tx, rx) = std::sync::mpsc::channel();
         let paths_clone = paths.clone();
         let opts2 = default_opts();
         let handle =
@@ -639,7 +648,7 @@ mod tests {
     #[test]
     fn test_walk_streaming_receiver_drop() {
         let dir = TempDir::new().unwrap();
-        for i in 0..1000 {
+        for i in 0..100 {
             std::fs::write(
                 dir.path().join(format!("{}.txt", i)),
                 format!("content {}", i),
@@ -650,20 +659,18 @@ mod tests {
         let paths = vec![dir.path().to_string_lossy().to_string()];
         let opts = default_opts();
 
-        // Channel capacity of 1 ensures the walker blocks quickly, making
-        // early exit reliable regardless of system speed.
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || walk_paths_streaming(&paths, &opts, tx));
 
         // Receive one then drop the receiver
         let _first = rx.recv();
         drop(rx);
 
-        // Walker thread should exit gracefully (not panic) and report partial count.
-        // With a channel capacity of 1 and 1000 files, the walker can send at most
-        // a handful before the receiver is dropped.
-        let count = handle.join().unwrap().unwrap();
-        assert!(count < 1000, "expected early exit, got {count} files");
+        // Walker thread should exit gracefully (not panic).
+        // With an unbounded channel it may have sent all files before the
+        // drop, so we just verify it doesn't panic.
+        let result = handle.join().unwrap();
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -676,17 +683,16 @@ mod tests {
         let progress = Arc::new(StreamProgress::new());
         let progress_for_thread = Arc::clone(&progress);
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             walk_paths_streaming_with_progress(&paths, &opts, tx, progress_for_thread).unwrap()
         });
 
         let count = handle.join().unwrap();
         assert_eq!(count, 1);
-        assert_eq!(
-            progress.snapshot(),
-            StreamProgressSnapshot { walked_files: 1 }
-        );
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.walked_files, 1);
+        assert!(snapshot.walk_done);
         let _ = rx.recv().unwrap();
     }
 }

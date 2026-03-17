@@ -9,7 +9,7 @@
 ## Critical review findings
 
 - [x] README documents nonexistent `-C`/`--context` flag and `context` config key — removed from README
-- [ ] Show indexing progress as fraction (e.g. "42/380 files") — the walker runs ahead so total is available; currently only shows indexed count with no denominator
+- [x] Show indexing progress as fraction (e.g. "42/380 files") — unbounded channel lets walker run ahead; progress shows N/M when total is known
 - [ ] Add `-p`/`--pretty` short flag (ripgrep convention for forcing colors + headings when piping)
-- [ ] Document `--` separator support in README — rg users expect `vecgrep "pattern" -- file1 file2`; likely works via clap but not tested or mentioned
+- [x] `--` separator — works natively via clap, no code changes needed. Clap even suggests it in error messages for dash-prefixed queries
 - [x] Acknowledge binary size (~109MB with embedded model vs ~6MB for ripgrep) in README Install section

@@ -10,13 +10,14 @@ use crate::embedder::Embedder;
 use crate::index::Index;
 use crate::paths;
 use crate::types::{SearchResult, SearchScope};
-use crate::walker::{StreamProgress, StreamProgressSnapshot, WalkedFile};
+use crate::walker::{StreamProgress, WalkedFile};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CliIndexingProgress {
     pub indexed_count: usize,
     pub indexed_chunks: usize,
     pub walked_count: usize,
+    pub walk_done: bool,
 }
 
 /// Manages incremental indexing from a streaming channel.
@@ -58,7 +59,7 @@ impl StreamingIndexer {
     }
 
     pub fn cli_progress(&self) -> CliIndexingProgress {
-        let StreamProgressSnapshot { walked_files, .. } = self
+        let snapshot = self
             .stream_progress
             .as_ref()
             .map(|progress| progress.snapshot())
@@ -67,7 +68,8 @@ impl StreamingIndexer {
         CliIndexingProgress {
             indexed_count: self.indexed_count,
             indexed_chunks: self.indexed_chunks,
-            walked_count: walked_files.max(self.all_paths.len()),
+            walked_count: snapshot.walked_files.max(self.all_paths.len()),
+            walk_done: snapshot.walk_done,
         }
     }
 
@@ -546,7 +548,7 @@ mod tests {
         let paths = vec![dir.path().to_string_lossy().to_string()];
         let opts = walker::WalkOptions::default();
 
-        let (tx, rx) = mpsc::sync_channel(32);
+        let (tx, rx) = mpsc::channel();
         let handle =
             std::thread::spawn(move || walker::walk_paths_streaming(&paths, &opts, tx).unwrap());
 

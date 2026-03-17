@@ -46,10 +46,17 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 
 fn render_progress(frame_idx: usize, progress: CliIndexingProgress) {
     let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-    eprint!(
-        "\r{} {} files | {} chunks | {} walked",
-        frame, progress.indexed_count, progress.indexed_chunks, progress.walked_count
-    );
+    if progress.walk_done && progress.walked_count > 0 {
+        eprint!(
+            "\r{} {}/{} files | {} chunks",
+            frame, progress.indexed_count, progress.walked_count, progress.indexed_chunks
+        );
+    } else {
+        eprint!(
+            "\r{} {}/?? files | {} chunks",
+            frame, progress.indexed_count, progress.indexed_chunks
+        );
+    }
     std::io::stderr().flush().ok();
 }
 
@@ -173,7 +180,7 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
     let walk_paths = invocation.args.paths.clone();
 
     let walk_opts = build_walk_options(&invocation.args);
-    let (tx, rx) = std::sync::mpsc::sync_channel::<walker::WalkedFile>(BATCH_SIZE * 2);
+    let (tx, rx) = std::sync::mpsc::channel::<walker::WalkedFile>();
     let stream_progress = Arc::new(walker::StreamProgress::new());
     let walker_progress = Arc::clone(&stream_progress);
     let walker_handle = std::thread::spawn(move || {
@@ -232,10 +239,17 @@ fn drain_initial_indexing(
             if show_spinner {
                 clear_progress_line();
             }
-            eprintln!(
-                "Warning: {} files need indexing so far (still scanning).",
-                progress.indexed_count
-            );
+            if progress.walk_done {
+                eprintln!(
+                    "Warning: {} files need indexing ({} files found).",
+                    progress.indexed_count, progress.walked_count
+                );
+            } else {
+                eprintln!(
+                    "Warning: {} files need indexing so far (still scanning).",
+                    progress.indexed_count
+                );
+            }
             if !confirm_continue()? {
                 eprintln!("Aborted.");
                 aborted = true;
@@ -640,15 +654,15 @@ fn finish_indexing(
     if indexer.indexed_count > 0 {
         status!(
             quiet,
-            "Indexing complete. {} files, {} chunks, {} walked.",
+            "Indexed {}/{} files, {} chunks.",
             indexer.indexed_count,
-            indexer.indexed_chunks,
-            indexer.all_paths.len()
+            indexer.all_paths.len(),
+            indexer.indexed_chunks
         );
     } else {
         status!(
             quiet,
-            "Index is up to date. Scanned {} files.",
+            "Index is up to date. {} files.",
             indexer.all_paths.len()
         );
     }
