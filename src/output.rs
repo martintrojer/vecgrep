@@ -110,13 +110,28 @@ pub fn print_count(results: &[SearchResult], color: ColorChoice) -> std::io::Res
 const SCORE_HIGH_THRESHOLD: f32 = 0.7;
 const SCORE_MEDIUM_THRESHOLD: f32 = 0.5;
 
-pub fn score_to_color(score: f32) -> Color {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreTier {
+    High,
+    Medium,
+    Low,
+}
+
+pub fn score_tier(score: f32) -> ScoreTier {
     if score >= SCORE_HIGH_THRESHOLD {
-        Color::Green
+        ScoreTier::High
     } else if score >= SCORE_MEDIUM_THRESHOLD {
-        Color::Yellow
+        ScoreTier::Medium
     } else {
-        Color::Red
+        ScoreTier::Low
+    }
+}
+
+pub fn score_to_color(score: f32) -> Color {
+    match score_tier(score) {
+        ScoreTier::High => Color::Green,
+        ScoreTier::Medium => Color::Yellow,
+        ScoreTier::Low => Color::Red,
     }
 }
 
