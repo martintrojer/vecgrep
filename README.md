@@ -58,8 +58,8 @@ curl -s "http://localhost:8080/search?q=error+handling&k=5"
 
 # Check indexing status (useful for IDE plugins)
 curl -s "http://localhost:8080/status"
-# => {"status":"indexing","indexed":42,"total":380,"chunks":85}
-# => {"status":"ready","files":380,"chunks":850}
+# => {"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.0"}
+# => {"status":"ready","files":380,"chunks":850,"version":"0.9.0"}
 
 # Use with fzf for interactive fuzzy semantic search
 vecgrep --serve --port 8080 ./src &
@@ -312,11 +312,11 @@ When running with `--serve`, the HTTP server exposes:
 
 The `/status` endpoint returns:
 ```json
-{"status":"indexing","indexed":42,"total":380,"chunks":85}
-{"status":"ready","files":380,"chunks":850}
+{"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.0"}
+{"status":"ready","files":380,"chunks":850,"version":"0.9.0"}
 ```
 
-`total` is `null` while the file walker is still scanning. IDE plugins can poll this to show indexing progress or wait for readiness.
+`total` is `null` while the file walker is still scanning. `version` is the vecgrep binary version. IDE plugins can poll this to show indexing progress or wait for readiness.
 
 ## Integrations
 
