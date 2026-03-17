@@ -40,7 +40,7 @@ impl StreamProgress {
         }
     }
 
-    fn on_send(&self) {
+    pub(crate) fn on_send(&self) {
         self.walked_files.fetch_add(1, Ordering::Relaxed);
     }
 

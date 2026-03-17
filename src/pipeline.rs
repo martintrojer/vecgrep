@@ -781,9 +781,9 @@ mod tests {
             })
             .unwrap();
         }
-        // Manually update progress to simulate walker sending
+        // Simulate walker tracking each sent file
         for _ in 0..3 {
-            progress.snapshot(); // read
+            progress.on_send();
         }
         progress.mark_done();
         drop(tx);
@@ -794,8 +794,12 @@ mod tests {
         match indexer.status(0, 0) {
             PipelineStatus::Indexing { total, .. } => {
                 // Walker is done but indexer hasn't consumed files yet.
-                // total should be Some because walk_done is true.
-                assert!(total.is_some(), "expected total when walker is done");
+                // total should be Some(3) because walk_done is true and 3 files were sent.
+                assert_eq!(
+                    total,
+                    Some(3),
+                    "expected total to reflect walked file count"
+                );
             }
             other => panic!("expected Indexing, got {other:?}"),
         }
