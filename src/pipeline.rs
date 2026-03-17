@@ -225,6 +225,8 @@ impl SearchOutcome {
 pub struct IndexProgress {
     pub indexed_count: usize,
     pub chunk_count: usize,
+    pub walked_count: usize,
+    pub walk_done: bool,
     pub indexing_done: bool,
 }
 
@@ -390,10 +392,13 @@ fn worker_loop(
         if !indexer.indexing_done {
             match indexer.poll(&mut embedder, &idx) {
                 Ok(_) => {
+                    let cli = indexer.cli_progress();
                     progress_tx
                         .send(IndexProgress {
                             indexed_count: indexer.indexed_count,
                             chunk_count: idx.chunk_count().unwrap_or(0),
+                            walked_count: cli.walked_count,
+                            walk_done: cli.walk_done,
                             indexing_done: indexer.indexing_done,
                         })
                         .ok();
