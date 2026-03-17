@@ -423,6 +423,7 @@ surface SearchServer {
 
     provides:
         SearchRequest(client, root, query, top_k?, threshold?)
+        StatusRequest(client, root)
 
     @guarantee ProgressiveIndexing
         -- Searches may return results from a partial index while
@@ -431,6 +432,13 @@ surface SearchServer {
     @guarantee SearchDefaults
         -- When top_k or threshold are omitted, the server uses the
         -- resolved config values (config.top_k, config.threshold).
+
+    @guarantee PipelineStatusEndpoint
+        -- GET /status returns the current PipelineStatus as JSON.
+        -- During indexing: {"status":"indexing","indexed":N,"total":M|null,"chunks":C}
+        -- When ready: {"status":"ready","files":N,"chunks":C}
+        -- Ready state reports full index counts from the database,
+        -- not just the current indexing pass.
 }
 
 rule ServerSearchStarts {
