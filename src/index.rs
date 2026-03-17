@@ -815,15 +815,11 @@ mod tests {
 
     #[test]
     fn test_search_threshold() {
-        // Note: uses synthetic sin-based embeddings. The cosine distance between
-        // seed=1.0 and seed=100.0 happens to be large, but this isn't guaranteed
-        // by construction. For real semantic gap assertions, see
-        // embedder::tests::test_semantic_similarity.
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
 
         let emb1 = make_test_embedding(dim, 1.0);
-        let emb2 = make_test_embedding(dim, 100.0); // very different
+        let emb2 = make_test_embedding(dim, 100.0);
 
         let chunks = vec![
             Chunk {
@@ -846,8 +842,21 @@ mod tests {
             .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2], &[false])
             .unwrap();
 
-        // Both chunks should exist
         assert_eq!(index.chunk_count().unwrap(), 2);
+
+        // Precondition: verify the two embeddings are actually dissimilar
+        let all_results = index
+            .search(&emb1, 10, -1.0, &SearchScope::default())
+            .unwrap();
+        let other_score = all_results
+            .iter()
+            .find(|r| r.chunk.text == "different")
+            .expect("should find 'different' chunk")
+            .score;
+        assert!(
+            other_score < 0.5,
+            "test precondition: embeddings must be dissimilar, got {other_score}"
+        );
 
         // High threshold — only the near-exact match should pass
         let results = index
