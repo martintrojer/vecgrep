@@ -369,8 +369,10 @@ surface CommandLine {
         -- Search results are post-filtered to only include files under
         -- the requested directory paths or matching requested file paths.
         -- Searching "src/" only returns results from src/, not the entire
-        -- index. Consistent with ripgrep path scoping. Applies across
-        -- CLI, TUI, and serve.
+        -- index. Running from a subdirectory without explicit paths scopes
+        -- results to that subdirectory (the default "." is resolved to the
+        -- cwd suffix relative to the project root). Consistent with ripgrep
+        -- path scoping. Applies across CLI, TUI, and serve.
 
     @guarantee ExplicitFilesAreCachedButFiltered
         -- Paths with kind = file are indexed with an explicit flag and
