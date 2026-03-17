@@ -472,6 +472,23 @@ fn resolve_query_flag(args: &mut Args) {
     }
 }
 
+fn build_search_scope(arg_paths: &[String], cwd_suffix: &Path) -> SearchScope {
+    let explicit_paths: Vec<String> = arg_paths
+        .iter()
+        .filter(|p| Path::new(p).is_file())
+        .map(|p| paths::to_project_relative(p, cwd_suffix))
+        .collect();
+    let path_scopes: Vec<String> = arg_paths
+        .iter()
+        .map(|p| paths::to_project_relative(p, cwd_suffix))
+        .filter(|p| !p.is_empty())
+        .collect();
+    SearchScope {
+        explicit_paths,
+        path_scopes,
+    }
+}
+
 /// Returns Ok(true) if matches were found, Ok(false) if no matches.
 fn run() -> Result<bool> {
     tracing_subscriber::fmt()
@@ -557,50 +574,32 @@ fn run() -> Result<bool> {
         return Ok(result);
     }
 
-    let search_scope = {
-        let cwd_suffix = &invocation.path_plan.cwd_suffix;
-        let explicit_paths: Vec<String> = invocation
-            .args
-            .paths
-            .iter()
-            .filter(|p| Path::new(p).is_file())
-            .map(|p| paths::to_project_relative(p, cwd_suffix))
-            .collect();
-        let path_scopes: Vec<String> = invocation
-            .args
-            .paths
-            .iter()
-            .map(|p| paths::to_project_relative(p, cwd_suffix))
-            .filter(|p| !p.is_empty())
-            .collect();
-        SearchScope {
-            explicit_paths,
-            path_scopes,
+    let search_scope = build_search_scope(&invocation.args.paths, &invocation.path_plan.cwd_suffix);
+
+    match invocation.run_mode {
+        RunMode::Serve => {
+            return run_serve_mode(
+                embedder,
+                idx,
+                indexer,
+                &invocation,
+                output,
+                &mut walker_handle,
+                search_scope,
+            );
         }
-    };
-
-    if matches!(invocation.run_mode, RunMode::Serve) {
-        return run_serve_mode(
-            embedder,
-            idx,
-            indexer,
-            &invocation,
-            output,
-            &mut walker_handle,
-            search_scope.clone(),
-        );
-    }
-
-    if matches!(invocation.run_mode, RunMode::Interactive) {
-        return run_interactive_mode(
-            embedder,
-            idx,
-            indexer,
-            &invocation,
-            output,
-            &mut walker_handle,
-            search_scope.clone(),
-        );
+        RunMode::Interactive => {
+            return run_interactive_mode(
+                embedder,
+                idx,
+                indexer,
+                &invocation,
+                output,
+                &mut walker_handle,
+                search_scope,
+            );
+        }
+        RunMode::Cli => {}
     }
 
     let found = run_cli_search(
@@ -611,25 +610,6 @@ fn run() -> Result<bool> {
         &search_scope,
         output,
     )?;
-
-    if !indexer.indexing_done {
-        drain_initial_indexing(
-            &mut indexer,
-            &mut embedder,
-            &idx,
-            quiet,
-            0,
-            show_spinner,
-            prompt_to_continue,
-        )?;
-        finish_indexing(
-            &mut indexer,
-            &idx,
-            &invocation.path_plan.stale_removal_scope,
-            quiet,
-            &mut walker_handle,
-        )?;
-    }
 
     Ok(found)
 }
@@ -737,6 +717,30 @@ mod tests {
         let outcome = handle_pre_execution_actions(&args, &path_plan, true).unwrap();
 
         assert_eq!(outcome, Some(true));
+    }
+
+    #[test]
+    fn test_handle_pre_execution_actions_clear_cache_with_query_continues() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join(".vecgrep")).unwrap();
+        let path_plan = invocation::PathPlan {
+            project_root: dir.path().canonicalize().unwrap(),
+            cwd_suffix: PathBuf::new(),
+            stale_removal_scope: StaleRemovalScope::Prefix(PathBuf::new()),
+        };
+        let args = Args::parse_from(["vecgrep", "--clear-cache", "needle"]);
+
+        let outcome = handle_pre_execution_actions(&args, &path_plan, true).unwrap();
+
+        assert_eq!(
+            outcome, None,
+            "should continue to search when query is present"
+        );
+        assert!(
+            !dir.path().join(".vecgrep").exists(),
+            "cache directory should be deleted"
+        );
     }
 
     #[test]
