@@ -47,21 +47,19 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 fn render_progress(frame_idx: usize, status: &PipelineStatus) {
     let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
     match status {
-        PipelineStatus::Scanning { indexed, chunks } => {
-            eprint!("\r{} {}/?? files | {} chunks", frame, indexed, chunks);
-        }
         PipelineStatus::Indexing {
             indexed,
             total,
             chunks,
         } => {
+            let total_str = total.map_or("??".to_string(), |t| t.to_string());
             eprint!(
                 "\r{} {}/{} files | {} chunks",
-                frame, indexed, total, chunks
+                frame, indexed, total_str, chunks
             );
         }
         PipelineStatus::Ready { files, chunks } => {
-            eprint!("\r{} {}/{} files | {} chunks", frame, files, files, chunks);
+            eprint!("\r{} {} files | {} chunks", frame, files, chunks);
         }
     }
     std::io::stderr().flush().ok();
@@ -247,19 +245,19 @@ fn drain_initial_indexing(
             if show_spinner {
                 clear_progress_line();
             }
-            match status {
-                PipelineStatus::Indexing { indexed, total, .. } => {
-                    eprintln!(
-                        "Warning: {} files need indexing ({} files found).",
-                        indexed, total
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "Warning: {} files need indexing so far (still scanning).",
-                        indexed
-                    );
-                }
+            if let PipelineStatus::Indexing {
+                total: Some(total), ..
+            } = status
+            {
+                eprintln!(
+                    "Warning: {} files need indexing ({} files found).",
+                    indexed, total
+                );
+            } else {
+                eprintln!(
+                    "Warning: {} files need indexing so far (still scanning).",
+                    indexed
+                );
             }
             if !confirm_continue()? {
                 eprintln!("Aborted.");
