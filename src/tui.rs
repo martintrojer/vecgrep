@@ -346,10 +346,10 @@ pub mod interactive {
         let items: Vec<ListItem> = results
             .iter()
             .map(|r| {
-                let score_color = match output::score_to_color(r.score) {
-                    termcolor::Color::Green => Color::Green,
-                    termcolor::Color::Yellow => Color::Yellow,
-                    _ => Color::Red,
+                let score_color = match output::score_tier(r.score) {
+                    output::ScoreTier::High => Color::Green,
+                    output::ScoreTier::Medium => Color::Yellow,
+                    output::ScoreTier::Low => Color::Red,
                 };
                 let line = Line::from(vec![
                     Span::styled(
