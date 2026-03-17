@@ -410,6 +410,14 @@ impl Index {
         }
     }
 
+    /// Get the number of files in the index.
+    pub fn file_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+        Ok(count as usize)
+    }
+
     /// Get the number of chunks in the index.
     pub fn chunk_count(&self) -> Result<usize> {
         let count: i64 = self

@@ -22,7 +22,7 @@ fn json_content_header() -> Header {
         .expect("valid header")
 }
 
-fn json_error_header() -> Header {
+fn json_response_header() -> Header {
     "Content-Type: application/json"
         .parse()
         .expect("valid header")
@@ -32,16 +32,17 @@ fn error_response(status: u16, message: &str) -> Response<std::io::Cursor<Vec<u8
     let body = serde_json::json!({"error": message}).to_string();
     Response::from_string(body)
         .with_status_code(StatusCode(status))
-        .with_header(json_error_header())
+        .with_header(json_response_header())
 }
 
-/// Handle a single HTTP search request. Returns Ok(()) after responding.
+/// Handle a single HTTP request. Returns Ok(()) after responding.
 fn handle_request(
     request: Request,
     worker: &EmbedWorker,
     default_top_k: usize,
     default_threshold: f32,
     root: &str,
+    pipeline_status: &PipelineStatus,
 ) -> Result<()> {
     if request.method() != &Method::Get {
         respond(request, error_response(405, "method not allowed"));
@@ -58,11 +59,36 @@ fn handle_request(
         }
     };
 
-    if parsed.path() != "/search" {
-        respond(request, error_response(404, "not found"));
-        return Ok(());
+    match parsed.path() {
+        "/search" => handle_search(
+            request,
+            &parsed,
+            worker,
+            default_top_k,
+            default_threshold,
+            root,
+        ),
+        "/status" => {
+            let body = serde_json::to_string(pipeline_status).unwrap();
+            let resp = Response::from_string(body).with_header(json_response_header());
+            respond(request, resp);
+            Ok(())
+        }
+        _ => {
+            respond(request, error_response(404, "not found"));
+            Ok(())
+        }
     }
+}
 
+fn handle_search(
+    request: Request,
+    parsed: &Url,
+    worker: &EmbedWorker,
+    default_top_k: usize,
+    default_threshold: f32,
+    root: &str,
+) -> Result<()> {
     let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
     let q = params
         .iter()
@@ -146,14 +172,22 @@ pub fn run_streaming(
 
     let worker = EmbedWorker::spawn(embedder, idx, indexer, config.scope);
     let mut indexing_announced = false;
+    let mut pipeline_status = PipelineStatus::Indexing {
+        indexed: 0,
+        total: None,
+        chunks: 0,
+    };
 
     loop {
         // Check index progress (non-blocking)
-        if let Some(PipelineStatus::Ready { files, chunks }) = worker.drain_progress() {
-            if !indexing_announced {
-                indexing_announced = true;
-                if !config.quiet {
-                    eprintln!("Indexed {files} files, {chunks} chunks ready.");
+        if let Some(status) = worker.drain_progress() {
+            pipeline_status = status;
+            if let PipelineStatus::Ready { files, chunks } = status {
+                if !indexing_announced {
+                    indexing_announced = true;
+                    if !config.quiet {
+                        eprintln!("Indexed {files} files, {chunks} chunks ready.");
+                    }
                 }
             }
         }
@@ -169,6 +203,7 @@ pub fn run_streaming(
             config.default_top_k,
             config.default_threshold,
             config.root,
+            &pipeline_status,
         )?;
     }
 }
@@ -377,6 +412,28 @@ mod tests {
         assert_eq!(status, 400);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("missing"));
+    }
+
+    #[test]
+    fn test_status_returns_ready() {
+        let port = test_port();
+        // Wait briefly for indexing to complete (test server has 3 pre-indexed files)
+        thread::sleep(Duration::from_millis(500));
+
+        let (status, body, content_type) = http_request("GET", port, "/status");
+
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert!(
+            json["files"].as_u64().unwrap() >= 3,
+            "expected at least 3 files, got: {json}"
+        );
+        assert!(
+            json["chunks"].as_u64().unwrap() >= 3,
+            "expected at least 3 chunks, got: {json}"
+        );
     }
 
     #[test]
