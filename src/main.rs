@@ -313,7 +313,7 @@ fn handle_pre_execution_actions(
         }
     }
 
-    if args.stats && args.query.is_none() && !args.index_only {
+    if args.stats {
         let idx = Index::open(&path_plan.project_root)?;
         print_index_stats(&idx)?;
         return Ok(Some(true));
@@ -331,13 +331,6 @@ fn handle_post_index_actions(args: &Args, idx: &Index) -> Result<Option<bool>> {
 
     if args.reindex && args.query.is_none() {
         return Ok(Some(true));
-    }
-
-    if args.stats {
-        print_index_stats(idx)?;
-        if args.query.is_none() {
-            return Ok(Some(true));
-        }
     }
 
     Ok(None)
@@ -523,6 +516,16 @@ fn run() -> Result<bool> {
 
     resolve_query_flag(&mut args);
 
+    if args.stats && args.query.is_some() {
+        use clap::error::ErrorKind;
+        Args::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--stats cannot be combined with a query",
+            )
+            .exit();
+    }
+
     if args.type_list {
         walker::print_type_list();
         return Ok(true);
@@ -560,7 +563,6 @@ fn run() -> Result<bool> {
     };
     if invocation.query.is_empty()
         && matches!(invocation.run_mode, RunMode::Cli)
-        && !invocation.args.stats
         && !invocation.args.reindex
         && !invocation.args.index_only
     {
