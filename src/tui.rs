@@ -80,6 +80,8 @@ pub mod interactive {
         // Index progress state
         let mut indexed_count: usize = 0;
         let mut chunk_count: usize = 0;
+        let mut walked_count: usize = 0;
+        let mut walk_done = false;
         let mut indexing_done = false;
 
         // Preview state
@@ -132,6 +134,8 @@ pub mod interactive {
             if let Some(progress) = worker.drain_progress() {
                 indexed_count = progress.indexed_count;
                 chunk_count = progress.chunk_count;
+                walked_count = progress.walked_count;
+                walk_done = progress.walk_done;
                 indexing_done = progress.indexing_done;
                 // Re-search when new data is indexed
                 if !query.is_empty() && !searching {
@@ -165,18 +169,22 @@ pub mod interactive {
             // 4. Render
             let preview_scroll_val = preview_scroll;
             let preview_cache_ref = &preview_file_cache;
+            let index_status = if indexing_done {
+                format!("{} chunks", chunk_count)
+            } else if walk_done && walked_count > 0 {
+                format!("{}/{} files", indexed_count, walked_count)
+            } else {
+                format!("{}/?? files", indexed_count)
+            };
+
             let status_text = if let Some(ref err) = search_error {
                 err.clone()
             } else if searching {
-                format!("Searching... | {} chunks indexed", chunk_count)
+                format!("Searching... | {index_status}")
             } else if !indexing_done {
-                format!(
-                    "{} results | Indexing: {} files...",
-                    results.len(),
-                    indexed_count
-                )
+                format!("{} results | Indexing: {index_status}", results.len())
             } else {
-                format!("{} results | {} chunks indexed", results.len(), chunk_count)
+                format!("{} results | {index_status}", results.len())
             };
 
             terminal.draw(|f| {

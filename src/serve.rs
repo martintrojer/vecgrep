@@ -154,8 +154,8 @@ pub fn run_streaming(
                 indexing_announced = true;
                 if !config.quiet {
                     eprintln!(
-                        "Indexing complete. {} files indexed, {} chunks ready.",
-                        progress.indexed_count, progress.chunk_count
+                        "Indexed {}/{} files, {} chunks ready.",
+                        progress.indexed_count, progress.walked_count, progress.chunk_count
                     );
                 }
             }
