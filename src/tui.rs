@@ -40,6 +40,7 @@ pub mod interactive {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
+        let path_scopes = scope.path_scopes.clone();
         let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
 
         let result = event_loop(
@@ -49,6 +50,7 @@ pub mod interactive {
             args.top_k.unwrap(),
             args.threshold.unwrap(),
             cwd_suffix,
+            &path_scopes,
         );
 
         disable_raw_mode()?;
@@ -65,6 +67,7 @@ pub mod interactive {
         top_k: usize,
         threshold: f32,
         cwd_suffix: &Path,
+        path_scopes: &[String],
     ) -> Result<()> {
         let mut query = initial_query.to_string();
         let mut results: Vec<SearchResult> = Vec::new();
@@ -180,14 +183,23 @@ pub mod interactive {
                 }
             };
 
+            let scope_str = if path_scopes.is_empty() {
+                String::new()
+            } else {
+                format!(" | scope: {}", path_scopes.join(", "))
+            };
+
             let status_text = if let Some(ref err) = search_error {
                 err.clone()
             } else if searching {
-                format!("Searching... | {index_status}")
+                format!("Searching... | {index_status}{scope_str}")
             } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
-                format!("{} results | Indexing: {index_status}", results.len())
+                format!(
+                    "{} results | Indexing: {index_status}{scope_str}",
+                    results.len()
+                )
             } else {
-                format!("{} results | {index_status}", results.len())
+                format!("{} results | {index_status}{scope_str}", results.len())
             };
 
             terminal.draw(|f| {
