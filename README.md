@@ -58,8 +58,8 @@ curl -s "http://localhost:8080/search?q=error+handling&k=5"
 
 # Check indexing status (useful for IDE plugins)
 curl -s "http://localhost:8080/status"
-# => {"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.0"}
-# => {"status":"ready","files":380,"chunks":850,"version":"0.9.0"}
+# => {"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.1","root":"/path/to/project"}
+# => {"status":"ready","files":380,"chunks":850,"version":"0.9.1","root":"/path/to/project"}
 
 # Use with fzf for interactive fuzzy semantic search
 vecgrep --serve --port 8080 ./src &
@@ -270,7 +270,7 @@ Arguments:
 
 Options:
   -k, --top-k <N>              Number of results [default: 10]
-      --threshold <F>           Minimum similarity 0.0–1.0 [default: 0.3]
+      --threshold <F>           Minimum similarity 0.0–1.0 [default: 0.2]
   -i, --interactive             Interactive TUI mode
   -t, --type <TYPE>             Filter by file type (rust, python, js, ...)
   -T, --type-not <TYPE>         Exclude file type
@@ -313,8 +313,8 @@ When running with `--serve`, the HTTP server exposes:
 
 The `/status` endpoint returns:
 ```json
-{"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.0","root":"/path/to/project"}
-{"status":"ready","files":380,"chunks":850,"version":"0.9.0","root":"/path/to/project","scope":["src"]}
+{"status":"indexing","indexed":42,"total":380,"chunks":85,"version":"0.9.1","root":"/path/to/project"}
+{"status":"ready","files":380,"chunks":850,"version":"0.9.1","root":"/path/to/project","scope":["src"]}
 ```
 
 `total` is `null` while the file walker is still scanning. `version` is the vecgrep binary version. `root` is the project root path. `scope` lists active path scopes (omitted when searching the full project). IDE plugins can poll this to show indexing progress or wait for readiness.

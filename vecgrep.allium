@@ -80,6 +80,8 @@ entity Invocation {
     reindex_requested: Boolean
     clear_cache_requested: Boolean
     skip_outside_root: Boolean
+    no_scope: Boolean           -- when true, search entire project index ignoring path scopes
+                                -- conflicts with explicit paths
     selected_root: ProjectRoot?
     paths: SearchPath with invocation = this
     admitted_paths: paths where status = admitted
