@@ -1573,6 +1573,10 @@ fn test_no_scope_returns_results_from_entire_project() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
+        stdout.contains("main.rs"),
+        "scoped search should find main.rs in src/, got: {stdout}"
+    );
+    assert!(
         !stdout.contains("guide.md"),
         "without --no-scope, docs should be excluded, got: {stdout}"
     );
@@ -1656,5 +1660,28 @@ fn test_no_scope_at_project_root_is_same_as_default() {
     assert_eq!(
         stdout1, stdout2,
         "--no-scope at project root should produce same results"
+    );
+}
+
+#[test]
+fn test_stats_rejects_query() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--stats", "some query"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--stats with query should exit with code 2"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("--stats cannot be combined with a query"),
+        "expected conflict error, got: {stderr}"
     );
 }
