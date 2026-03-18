@@ -24,6 +24,13 @@ pub mod interactive {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    #[derive(Clone, Copy, PartialEq)]
+    enum SearchTrigger {
+        None,
+        AutoRefresh,
+        UserInput,
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run_streaming(
         embedder: Embedder,
@@ -74,10 +81,9 @@ pub mod interactive {
         let mut list_state = ListState::default();
         let mut show_preview = true;
         let mut last_search = Instant::now() - Duration::from_secs(1);
-        let mut needs_search = true;
-        let mut needs_search_user = true; // distinguishes user vs auto-refresh
+        let mut pending_search = SearchTrigger::UserInput;
         let mut searching = false;
-        let mut user_searching = false; // true only for user-initiated searches
+        let mut active_search_trigger = SearchTrigger::None;
         let mut active_request_id: Option<u64> = None;
         let mut search_error: Option<String> = None;
         let debounce = Duration::from_millis(300);
@@ -100,8 +106,8 @@ pub mod interactive {
         if !query.is_empty() {
             active_request_id = Some(worker.search(&query, top_k, threshold));
             searching = true;
-            user_searching = true;
-            needs_search = false;
+            active_search_trigger = SearchTrigger::UserInput;
+            pending_search = SearchTrigger::None;
         }
 
         loop {
@@ -109,7 +115,7 @@ pub mod interactive {
             if let Some(outcome) = worker.try_recv_results() {
                 if active_request_id == Some(outcome.request_id()) {
                     searching = false;
-                    user_searching = false;
+                    active_search_trigger = SearchTrigger::None;
                     match outcome {
                         SearchOutcome::Results {
                             results: new_results,
@@ -145,13 +151,11 @@ pub mod interactive {
                 pipeline_status = status;
                 let is_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
 
-                if !query.is_empty() && !searching {
+                if !query.is_empty() && !searching && pending_search == SearchTrigger::None {
                     if was_indexing && is_ready {
-                        // Final re-search when indexing completes
-                        needs_search = true;
+                        pending_search = SearchTrigger::AutoRefresh;
                     } else if was_indexing && last_auto_refresh.elapsed() >= auto_refresh_interval {
-                        // Periodic refresh during indexing — results stream in
-                        needs_search = true;
+                        pending_search = SearchTrigger::AutoRefresh;
                         last_auto_refresh = Instant::now();
                     }
                 }
@@ -205,7 +209,7 @@ pub mod interactive {
 
             let status_text = if let Some(ref err) = search_error {
                 err.clone()
-            } else if user_searching {
+            } else if active_search_trigger == SearchTrigger::UserInput {
                 format!("Searching... | {index_status}{scope_str}")
             } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
                 format!(
@@ -339,14 +343,12 @@ pub mod interactive {
                         }
                         KeyCode::Backspace => {
                             query.pop();
-                            needs_search = true;
-                            needs_search_user = true;
+                            pending_search = SearchTrigger::UserInput;
                             last_search = Instant::now();
                         }
                         KeyCode::Char(c) => {
                             query.push(c);
-                            needs_search = true;
-                            needs_search_user = true;
+                            pending_search = SearchTrigger::UserInput;
                             last_search = Instant::now();
                         }
                         _ => {}
@@ -355,13 +357,15 @@ pub mod interactive {
             }
 
             // 6. Debounced search
-            if needs_search && !searching && last_search.elapsed() >= debounce && !query.is_empty()
+            if pending_search != SearchTrigger::None
+                && !searching
+                && last_search.elapsed() >= debounce
+                && !query.is_empty()
             {
-                user_searching = needs_search_user;
+                active_search_trigger = pending_search;
                 active_request_id = Some(worker.search(&query, top_k, threshold));
                 searching = true;
-                needs_search = false;
-                needs_search_user = false;
+                pending_search = SearchTrigger::None;
                 last_selected = None;
             }
         }

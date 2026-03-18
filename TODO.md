@@ -8,3 +8,5 @@
 - [ ] `event_loop` in `tui.rs` is ~280 lines — consider splitting into `handle_input`, `update_state`, and `render` if the TUI grows further
 - [ ] `make_relative` in `paths.rs` allocates a `PathBuf` per call — potential micro-optimization if path rewriting appears in profiles
 - [ ] `Args` struct in `cli.rs` has 30+ fields — approaching the threshold where grouping (e.g. `WalkArgs`, `OutputArgs`) would improve readability
+- [ ] `score_to_color` only used in one place — consider inlining since `score_tier` is the public API
+- [ ] No test for `/status` with active path scopes (scope field presence untested — needs second test server)

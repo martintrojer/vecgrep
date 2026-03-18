@@ -48,6 +48,7 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// regardless of indexing speed.
 struct Spinner {
     status: Arc<std::sync::Mutex<PipelineStatus>>,
+    paused: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -58,11 +59,16 @@ impl Spinner {
             total: None,
             chunks: 0,
         }));
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let status_clone = Arc::clone(&status);
+        let paused_clone = Arc::clone(&paused);
         let handle = std::thread::spawn(move || {
             let mut frame_idx = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(200));
+                if paused_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
                 let s = *status_clone.lock().unwrap();
                 if matches!(s, PipelineStatus::Ready { .. }) {
                     break;
@@ -88,6 +94,7 @@ impl Spinner {
         });
         Self {
             status,
+            paused,
             handle: Some(handle),
         }
     }
@@ -96,30 +103,27 @@ impl Spinner {
         *self.status.lock().unwrap() = new_status;
     }
 
-    fn stop(mut self) {
-        // Signal ready to stop the thread
-        *self.status.lock().unwrap() = PipelineStatus::Ready {
-            files: 0,
-            chunks: 0,
-        };
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+    fn pause(&self) {
+        self.paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         eprint!("\r\x1b[2K");
         std::io::stderr().flush().ok();
+    }
+
+    fn resume(&self) {
+        self.paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 impl Drop for Spinner {
     fn drop(&mut self) {
-        if self.handle.is_some() {
+        if let Some(h) = self.handle.take() {
             *self.status.lock().unwrap() = PipelineStatus::Ready {
                 files: 0,
                 chunks: 0,
             };
-            if let Some(h) = self.handle.take() {
-                let _ = h.join();
-            }
+            let _ = h.join();
             eprint!("\r\x1b[2K");
             std::io::stderr().flush().ok();
         }
@@ -302,15 +306,8 @@ fn drain_initial_indexing(
         let indexed = status.indexed();
         if !quiet && !threshold_prompted && threshold > 0 && indexed >= threshold {
             threshold_prompted = true;
-            // Stop spinner briefly for the prompt
             if let Some(ref s) = spinner {
-                s.update(PipelineStatus::Ready {
-                    files: 0,
-                    chunks: 0,
-                });
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                eprint!("\r\x1b[2K");
-                std::io::stderr().flush().ok();
+                s.pause();
             }
             if let PipelineStatus::Indexing {
                 total: Some(total), ..
@@ -331,9 +328,8 @@ fn drain_initial_indexing(
                 aborted = true;
                 return Ok(false);
             }
-            // Resume spinner
             if let Some(ref s) = spinner {
-                s.update(status);
+                s.resume();
             }
         }
         if let Some(ref s) = spinner {
@@ -342,9 +338,7 @@ fn drain_initial_indexing(
         Ok(true)
     })?;
 
-    if let Some(s) = spinner {
-        s.stop();
-    }
+    drop(spinner);
 
     if aborted {
         Ok(IndexDrainOutcome::Aborted)

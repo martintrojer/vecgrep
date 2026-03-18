@@ -309,7 +309,7 @@ impl Index {
         })
     }
 
-    const SEARCH_QUERY_NO_EXPLICIT: &'static str = "\
+    const SEARCH_QUERY_NO_EXPLICIT: &str = "\
         SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
         FROM vec_chunks v \
         JOIN chunks c ON c.id = v.chunk_id \
