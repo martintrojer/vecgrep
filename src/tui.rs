@@ -75,10 +75,14 @@ pub mod interactive {
         let mut show_preview = true;
         let mut last_search = Instant::now() - Duration::from_secs(1);
         let mut needs_search = true;
+        let mut needs_search_user = true; // distinguishes user vs auto-refresh
         let mut searching = false;
+        let mut user_searching = false; // true only for user-initiated searches
         let mut active_request_id: Option<u64> = None;
         let mut search_error: Option<String> = None;
         let debounce = Duration::from_millis(300);
+        let auto_refresh_interval = Duration::from_secs(3);
+        let mut last_auto_refresh = Instant::now();
 
         // Index progress state
         let mut pipeline_status = PipelineStatus::Indexing {
@@ -96,6 +100,7 @@ pub mod interactive {
         if !query.is_empty() {
             active_request_id = Some(worker.search(&query, top_k, threshold));
             searching = true;
+            user_searching = true;
             needs_search = false;
         }
 
@@ -104,6 +109,7 @@ pub mod interactive {
             if let Some(outcome) = worker.try_recv_results() {
                 if active_request_id == Some(outcome.request_id()) {
                     searching = false;
+                    user_searching = false;
                     match outcome {
                         SearchOutcome::Results {
                             results: new_results,
@@ -135,11 +141,19 @@ pub mod interactive {
 
             // 2. Check for index progress (non-blocking)
             if let Some(status) = worker.drain_progress() {
-                let was_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
+                let was_indexing = !matches!(pipeline_status, PipelineStatus::Ready { .. });
                 pipeline_status = status;
-                // Re-search when new data is indexed
-                if !was_ready && !query.is_empty() && !searching {
-                    needs_search = true;
+                let is_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
+
+                if !query.is_empty() && !searching {
+                    if was_indexing && is_ready {
+                        // Final re-search when indexing completes
+                        needs_search = true;
+                    } else if was_indexing && last_auto_refresh.elapsed() >= auto_refresh_interval {
+                        // Periodic refresh during indexing — results stream in
+                        needs_search = true;
+                        last_auto_refresh = Instant::now();
+                    }
                 }
             }
 
@@ -191,7 +205,7 @@ pub mod interactive {
 
             let status_text = if let Some(ref err) = search_error {
                 err.clone()
-            } else if searching {
+            } else if user_searching {
                 format!("Searching... | {index_status}{scope_str}")
             } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
                 format!(
@@ -326,11 +340,13 @@ pub mod interactive {
                         KeyCode::Backspace => {
                             query.pop();
                             needs_search = true;
+                            needs_search_user = true;
                             last_search = Instant::now();
                         }
                         KeyCode::Char(c) => {
                             query.push(c);
                             needs_search = true;
+                            needs_search_user = true;
                             last_search = Instant::now();
                         }
                         _ => {}
@@ -341,9 +357,11 @@ pub mod interactive {
             // 6. Debounced search
             if needs_search && !searching && last_search.elapsed() >= debounce && !query.is_empty()
             {
+                user_searching = needs_search_user;
                 active_request_id = Some(worker.search(&query, top_k, threshold));
                 searching = true;
                 needs_search = false;
+                needs_search_user = false;
                 last_selected = None;
             }
         }
