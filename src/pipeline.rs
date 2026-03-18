@@ -167,13 +167,13 @@ impl StreamingIndexer {
     }
 
     /// Blocking drain: process all files from the channel until it closes.
-    /// Calls `on_batch` after each batch is processed, with the count indexed so far.
+    /// Calls `on_progress` after each file is processed.
     /// Returns the total number of files indexed.
     pub fn drain_all<F>(
         &mut self,
         embedder: &mut Embedder,
         idx: &Index,
-        mut on_batch: F,
+        mut on_progress: F,
     ) -> Result<usize>
     where
         F: FnMut(PipelineStatus) -> Result<bool>,
@@ -203,7 +203,7 @@ impl StreamingIndexer {
                     process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
                 self.indexed_chunks += chunk_count;
 
-                if !on_batch(self.status(
+                if !on_progress(self.status(
                     idx.file_count().unwrap_or(0),
                     idx.chunk_count().unwrap_or(0),
                 ))? {

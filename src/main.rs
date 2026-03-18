@@ -44,30 +44,86 @@ fn main() {
 const BATCH_SIZE: usize = 32;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn render_progress(frame_idx: usize, status: &PipelineStatus) {
-    let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-    match status {
-        PipelineStatus::Indexing {
-            indexed,
-            total,
-            chunks,
-        } => {
-            let total_str = total.map_or("??".to_string(), |t| t.to_string());
-            eprint!(
-                "\r{} {}/{} files | {} chunks",
-                frame, indexed, total_str, chunks
-            );
-        }
-        PipelineStatus::Ready { files, chunks } => {
-            eprint!("\r{} {} files | {} chunks", frame, files, chunks);
-        }
-    }
-    std::io::stderr().flush().ok();
+/// A spinner that runs on its own thread, rendering at a fixed rate
+/// regardless of indexing speed.
+struct Spinner {
+    status: Arc<std::sync::Mutex<PipelineStatus>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
-fn clear_progress_line() {
-    eprint!("\r\x1b[2K");
-    std::io::stderr().flush().ok();
+impl Spinner {
+    fn start() -> Self {
+        let status = Arc::new(std::sync::Mutex::new(PipelineStatus::Indexing {
+            indexed: 0,
+            total: None,
+            chunks: 0,
+        }));
+        let status_clone = Arc::clone(&status);
+        let handle = std::thread::spawn(move || {
+            let mut frame_idx = 0;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let s = *status_clone.lock().unwrap();
+                if matches!(s, PipelineStatus::Ready { .. }) {
+                    break;
+                }
+                let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
+                match s {
+                    PipelineStatus::Indexing {
+                        indexed,
+                        total,
+                        chunks,
+                    } => {
+                        let total_str = total.map_or("??".to_string(), |t| t.to_string());
+                        eprint!(
+                            "\r{} {}/{} files | {} chunks",
+                            frame, indexed, total_str, chunks
+                        );
+                    }
+                    PipelineStatus::Ready { .. } => break,
+                }
+                std::io::stderr().flush().ok();
+                frame_idx += 1;
+            }
+        });
+        Self {
+            status,
+            handle: Some(handle),
+        }
+    }
+
+    fn update(&self, new_status: PipelineStatus) {
+        *self.status.lock().unwrap() = new_status;
+    }
+
+    fn stop(mut self) {
+        // Signal ready to stop the thread
+        *self.status.lock().unwrap() = PipelineStatus::Ready {
+            files: 0,
+            chunks: 0,
+        };
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        eprint!("\r\x1b[2K");
+        std::io::stderr().flush().ok();
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            *self.status.lock().unwrap() = PipelineStatus::Ready {
+                files: 0,
+                chunks: 0,
+            };
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+            eprint!("\r\x1b[2K");
+            std::io::stderr().flush().ok();
+        }
+    }
 }
 
 type WalkerHandle = std::thread::JoinHandle<anyhow::Result<usize>>;
@@ -237,13 +293,24 @@ fn drain_initial_indexing(
 ) -> Result<IndexDrainOutcome> {
     let mut threshold_prompted = false;
     let mut aborted = false;
-    let mut frame_idx = 0;
+    let spinner = if show_spinner {
+        Some(Spinner::start())
+    } else {
+        None
+    };
     indexer.drain_all(embedder, idx, |status| {
         let indexed = status.indexed();
         if !quiet && !threshold_prompted && threshold > 0 && indexed >= threshold {
             threshold_prompted = true;
-            if show_spinner {
-                clear_progress_line();
+            // Stop spinner briefly for the prompt
+            if let Some(ref s) = spinner {
+                s.update(PipelineStatus::Ready {
+                    files: 0,
+                    chunks: 0,
+                });
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                eprint!("\r\x1b[2K");
+                std::io::stderr().flush().ok();
             }
             if let PipelineStatus::Indexing {
                 total: Some(total), ..
@@ -264,16 +331,19 @@ fn drain_initial_indexing(
                 aborted = true;
                 return Ok(false);
             }
+            // Resume spinner
+            if let Some(ref s) = spinner {
+                s.update(status);
+            }
         }
-        if show_spinner {
-            render_progress(frame_idx, &status);
-            frame_idx += 1;
+        if let Some(ref s) = spinner {
+            s.update(status);
         }
         Ok(true)
     })?;
 
-    if show_spinner {
-        clear_progress_line();
+    if let Some(s) = spinner {
+        s.stop();
     }
 
     if aborted {
