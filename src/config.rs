@@ -4,7 +4,7 @@ use std::path::PathBuf;
 /// User configuration loaded from `~/.config/vecgrep/config.toml`.
 /// All fields are optional — absent means "use CLI default".
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub embedder_url: Option<String>,
     pub embedder_model: Option<String>,
@@ -43,14 +43,17 @@ pub fn project_config_path(project_root: &std::path::Path) -> PathBuf {
     project_root.join(".vecgrep").join("config.toml")
 }
 
-fn load_config_file(path: &std::path::Path) -> Option<Config> {
-    let content = std::fs::read_to_string(path).ok()?;
+/// Load and parse a config file. Returns `None` if the file doesn't exist.
+/// Returns `Err` if the file exists but can't be parsed.
+fn load_config_file(path: &std::path::Path) -> Result<Option<Config>, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read {}: {}", path.display(), e)),
+    };
     match toml::from_str(&content) {
-        Ok(config) => Some(config),
-        Err(e) => {
-            eprintln!("Warning: failed to parse {}: {}", path.display(), e);
-            None
-        }
+        Ok(config) => Ok(Some(config)),
+        Err(e) => Err(format!("Failed to parse {}: {}", path.display(), e)),
     }
 }
 
@@ -90,17 +93,21 @@ fn merge(base: Config, override_config: Config) -> Config {
 }
 
 /// Load config with precedence: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml).
-/// Returns default config if neither file exists.
-pub fn load_config(project_root: &std::path::Path) -> Config {
-    let global = global_config_path().and_then(|p| load_config_file(&p));
-    let project = load_config_file(&project_config_path(project_root));
+/// Returns default config if neither file exists. Returns `Err` if a config file
+/// exists but can't be parsed (e.g., unknown fields, syntax errors).
+pub fn load_config(project_root: &std::path::Path) -> Result<Config, String> {
+    let global = match global_config_path() {
+        Some(p) => load_config_file(&p)?,
+        None => None,
+    };
+    let project = load_config_file(&project_config_path(project_root))?;
 
-    match (global, project) {
+    Ok(match (global, project) {
         (Some(g), Some(p)) => merge(g, p),
         (Some(g), None) => g,
         (None, Some(p)) => p,
         (None, None) => Config::default(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -197,20 +204,24 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_toml_returns_default() {
+    fn test_invalid_toml_is_error() {
         let result: Result<Config, _> = toml::from_str("not valid toml {{{{");
         assert!(result.is_err());
-        // load_config() would return Config::default() in this case
     }
 
     #[test]
-    fn test_unknown_fields_ignored() {
+    fn test_unknown_fields_rejected() {
         let toml = r#"
             top_k = 5
-            unknown_field = "ignored"
+            unknown_field = "typo"
         "#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.top_k, Some(5));
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err(), "unknown fields should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown_field"),
+            "error should name the unknown field, got: {err}"
+        );
     }
 
     #[test]
@@ -293,7 +304,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = load_config(dir.path());
+        let config = load_config(dir.path()).unwrap();
         assert_eq!(config.top_k, Some(42));
         assert_eq!(config.hidden, Some(true));
     }
@@ -333,7 +344,7 @@ mod tests {
         let _g1 = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
         let _g2 = EnvGuard::set("HOME", home.path());
 
-        let config = load_config(project.path());
+        let config = load_config(project.path()).unwrap();
         assert_eq!(config.top_k, Some(17));
         assert_eq!(config.quiet, Some(true));
     }

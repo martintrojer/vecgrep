@@ -204,7 +204,13 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
 }
 
 pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
-    let config = config::load_config(project_root);
+    let config = match config::load_config(project_root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     resolve_config(&mut args, &config);
     let (args, path_plan) = admit_paths(args, cwd, project_root)?;
     let query = args.query.clone().unwrap_or_default();
