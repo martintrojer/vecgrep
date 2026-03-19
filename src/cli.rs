@@ -163,6 +163,12 @@ pub struct Args {
     /// Search the entire project index, ignoring path scoping from cwd or arguments.
     #[arg(long)]
     pub no_scope: bool,
+
+    /// Command to open a file from TUI results. Uses {file} and {line} placeholders.
+    /// Examples: "nvim +{line} {file}", "bat -n --highlight-range {line}:{line} {file}"
+    /// Default: $PAGER or less.
+    #[arg(long)]
+    pub open_cmd: Option<String>,
 }
 
 /// Hardcoded defaults for config-overridable fields.

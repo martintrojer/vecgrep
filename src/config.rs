@@ -26,6 +26,7 @@ pub struct Config {
     pub glob: Option<Vec<String>>,
     pub port: Option<u16>,
     pub skip_outside_root: Option<bool>,
+    pub open_cmd: Option<String>,
 }
 
 /// Return the global config path (`$XDG_CONFIG_HOME/vecgrep/config.toml`,
@@ -84,6 +85,7 @@ fn merge(base: Config, override_config: Config) -> Config {
         glob: override_config.glob.or(base.glob),
         port: override_config.port.or(base.port),
         skip_outside_root: override_config.skip_outside_root.or(base.skip_outside_root),
+        open_cmd: override_config.open_cmd.or(base.open_cmd),
     }
 }
 

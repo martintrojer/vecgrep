@@ -153,6 +153,7 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
         .take()
         .or_else(|| config.embedder_model.clone());
     args.max_depth = args.max_depth.or(config.max_depth);
+    args.open_cmd = args.open_cmd.take().or_else(|| config.open_cmd.clone());
 
     // Option fields: cli.or(config) — list types
     if args.file_type.is_none() {
@@ -459,6 +460,32 @@ mod tests {
 
         assert_eq!(invocation.run_mode, RunMode::Serve);
         assert!(invocation.query.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_config_open_cmd_cli_overrides_config() {
+        let mut args = parse_args(&["vecgrep", "--open-cmd", "nvim +{line} {file}", "needle"]);
+        let config = config::Config {
+            open_cmd: Some("less {file}".to_string()),
+            ..Default::default()
+        };
+
+        resolve_config(&mut args, &config);
+
+        assert_eq!(args.open_cmd.as_deref(), Some("nvim +{line} {file}"));
+    }
+
+    #[test]
+    fn test_resolve_config_open_cmd_from_config() {
+        let mut args = parse_args(&["vecgrep", "needle"]);
+        let config = config::Config {
+            open_cmd: Some("bat {file}".to_string()),
+            ..Default::default()
+        };
+
+        resolve_config(&mut args, &config);
+
+        assert_eq!(args.open_cmd.as_deref(), Some("bat {file}"));
     }
 
     #[test]
