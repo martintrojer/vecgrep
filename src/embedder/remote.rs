@@ -5,7 +5,7 @@ use super::l2_norm;
 /// Default max chars per text for remote embedders.
 /// Assumes 512-token context at ~2.5 chars/token (URLs, markdown, code
 /// tokenize more densely than plain English).
-pub(super) const DEFAULT_REMOTE_MAX_CHARS: usize = 1200;
+const DEFAULT_REMOTE_MAX_CHARS: usize = 1200;
 
 /// Remote embedder using an OpenAI-compatible API.
 pub struct RemoteEmbedder {

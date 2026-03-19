@@ -84,6 +84,11 @@ fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
+/// Convert a non-Send ort error into an anyhow error.
+fn ort_err(e: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("{}", e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

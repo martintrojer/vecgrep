@@ -4,7 +4,7 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
-use super::{l2_norm, MAX_SEQ_LEN};
+use super::{l2_norm, ort_err, MAX_SEQ_LEN};
 
 const MODEL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models/model.onnx"));
 const TOKENIZER_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models/tokenizer.json"));
@@ -18,13 +18,13 @@ pub struct LocalEmbedder {
 impl LocalEmbedder {
     pub fn new() -> Result<Self> {
         let session = Session::builder()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .map_err(ort_err)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .map_err(ort_err)?
             .with_intra_threads(num_cpus::get())
-            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .map_err(ort_err)?
             .commit_from_memory(MODEL_BYTES)
-            .map_err(|e| anyhow::anyhow!("Failed to load ONNX model: {}", e))?;
+            .map_err(|e| ort_err(format_args!("Failed to load ONNX model: {e}")))?;
 
         let mut tokenizer = Tokenizer::from_bytes(TOKENIZER_BYTES)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
@@ -64,13 +64,11 @@ impl LocalEmbedder {
             }
         }
 
-        let shape = vec![batch_size as i64, max_len as i64];
-        let input_ids_tensor = Tensor::from_array((shape.clone(), input_ids))
-            .map_err(|e| anyhow::anyhow!("Failed to create input_ids tensor: {}", e))?;
-        let attention_mask_tensor = Tensor::from_array((shape.clone(), attention_mask.clone()))
-            .map_err(|e| anyhow::anyhow!("Failed to create attention_mask tensor: {}", e))?;
-        let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids))
-            .map_err(|e| anyhow::anyhow!("Failed to create token_type_ids tensor: {}", e))?;
+        let shape = [batch_size as i64, max_len as i64];
+        let input_ids_tensor = Tensor::from_array((shape, input_ids)).map_err(ort_err)?;
+        let attention_mask_tensor =
+            Tensor::from_array((shape, attention_mask.clone())).map_err(ort_err)?;
+        let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids)).map_err(ort_err)?;
 
         let inputs = ort::inputs![
             "input_ids" => input_ids_tensor,
@@ -78,14 +76,9 @@ impl LocalEmbedder {
             "token_type_ids" => token_type_ids_tensor,
         ];
 
-        let outputs = self
-            .session
-            .run(inputs)
-            .map_err(|e| anyhow::anyhow!("Inference failed: {}", e))?;
+        let outputs = self.session.run(inputs).map_err(ort_err)?;
 
-        let (out_shape, out_data) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow::anyhow!("Failed to extract tensor: {}", e))?;
+        let (out_shape, out_data) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
 
         let dims: Vec<usize> = out_shape.iter().map(|&d| d as usize).collect();
         let hidden_size = dims[2];

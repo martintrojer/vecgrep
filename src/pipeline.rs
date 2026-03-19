@@ -28,10 +28,37 @@ pub enum PipelineStatus {
 }
 
 impl PipelineStatus {
+    /// Initial status before any indexing has started.
+    pub fn initial() -> Self {
+        Self::Indexing {
+            indexed: 0,
+            total: None,
+            chunks: 0,
+        }
+    }
+
     pub fn indexed(&self) -> usize {
         match self {
             Self::Indexing { indexed, .. } => *indexed,
             Self::Ready { .. } => 0,
+        }
+    }
+}
+
+impl std::fmt::Display for PipelineStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Indexing {
+                indexed,
+                total,
+                chunks,
+            } => {
+                let total_str = total.map_or("??".to_string(), |t| t.to_string());
+                write!(f, "{indexed}/{total_str} files | {chunks} chunks")
+            }
+            Self::Ready { files, chunks } => {
+                write!(f, "{files} files | {chunks} chunks")
+            }
         }
     }
 }

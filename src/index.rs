@@ -485,27 +485,25 @@ impl Index {
         })
     }
 
-    /// Get index statistics.
-    pub fn stats(&self) -> Result<IndexStats> {
-        let file_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
-        let chunk_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
-        let failed_chunk_count: i64 = self.conn.query_row(
+    /// Get the number of chunks with failed embeddings (zero vectors).
+    pub fn failed_chunk_count(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(embedding_failed), 0) FROM chunks",
             [],
             |r| r.get(0),
         )?;
+        Ok(count as usize)
+    }
 
+    /// Get index statistics.
+    pub fn stats(&self) -> Result<IndexStats> {
         let db_path = self.db_path()?;
         let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
         Ok(IndexStats {
-            file_count: file_count as usize,
-            chunk_count: chunk_count as usize,
-            failed_chunk_count: failed_chunk_count as usize,
+            file_count: self.file_count()?,
+            chunk_count: self.chunk_count()?,
+            failed_chunk_count: self.failed_chunk_count()?,
             db_size_bytes: db_size,
         })
     }
@@ -535,7 +533,13 @@ pub(crate) fn ensure_gitignore_entry(gitignore_path: &Path) {
         }
         new_content.push_str(entry);
         new_content.push('\n');
-        let _ = std::fs::write(gitignore_path, new_content);
+        if let Err(e) = std::fs::write(gitignore_path, new_content) {
+            tracing::warn!(
+                "Failed to update .gitignore at {}: {}",
+                gitignore_path.display(),
+                e
+            );
+        }
     }
 }
 
