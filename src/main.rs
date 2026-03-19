@@ -366,8 +366,15 @@ fn handle_pre_execution_actions(
 ) -> Result<Option<bool>> {
     if args.clear_cache {
         let cache_dir = path_plan.project_root.join(".vecgrep");
-        if cache_dir.exists() {
-            std::fs::remove_dir_all(&cache_dir)?;
+        let db_path = cache_dir.join("index.db");
+        if db_path.exists() {
+            // Remove index.db and any SQLite WAL/SHM files, preserve config.toml
+            for suffix in &["", "-wal", "-shm"] {
+                let p = cache_dir.join(format!("index.db{suffix}"));
+                if p.exists() {
+                    std::fs::remove_file(&p)?;
+                }
+            }
             status!(quiet, "Cache cleared.");
         } else {
             status!(quiet, "No cache found.");
@@ -826,7 +833,10 @@ mod tests {
     fn test_handle_pre_execution_actions_clear_cache_with_query_continues() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::create_dir(dir.path().join(".vecgrep")).unwrap();
+        let vecgrep_dir = dir.path().join(".vecgrep");
+        std::fs::create_dir(&vecgrep_dir).unwrap();
+        std::fs::write(vecgrep_dir.join("index.db"), "fake db").unwrap();
+        std::fs::write(vecgrep_dir.join("config.toml"), "top_k = 5").unwrap();
         let path_plan = invocation::PathPlan {
             project_root: dir.path().canonicalize().unwrap(),
             cwd_suffix: PathBuf::new(),
@@ -841,8 +851,12 @@ mod tests {
             "should continue to search when query is present"
         );
         assert!(
-            !dir.path().join(".vecgrep").exists(),
-            "cache directory should be deleted"
+            !vecgrep_dir.join("index.db").exists(),
+            "index.db should be deleted"
+        );
+        assert!(
+            vecgrep_dir.join("config.toml").exists(),
+            "config.toml should be preserved"
         );
     }
 
