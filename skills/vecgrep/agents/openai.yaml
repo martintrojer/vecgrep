@@ -1,4 +1,4 @@
 interface:
   display_name: "vecgrep"
-  short_description: "Guidance for using vecgrep well"
-  default_prompt: "Use $vecgrep to explain how to search, index, and troubleshoot vecgrep."
+  short_description: "Semantic code search — find code by meaning, not just text"
+  default_prompt: "Use $vecgrep to search codebases by meaning. Use it when you need to find relevant code, similar patterns, or explore an unfamiliar codebase."

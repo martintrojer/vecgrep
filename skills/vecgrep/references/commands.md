@@ -1,88 +1,66 @@
 # Vecgrep Commands
 
-Use these examples when answering "how do I use vecgrep?" questions.
-
-## Common Commands
+## Search
 
 ```bash
-# Search the current project
-vecgrep "error handling"
-
-# Search a specific directory
-vecgrep "authentication flow" src/
-
-# Build or refresh the index without searching
-vecgrep --index-only .
-
-# Force a full rebuild, then search
-vecgrep --reindex "query text" .
-
-# Force a full rebuild without searching
-vecgrep --reindex .
-
-# Show index statistics
-vecgrep --stats .
-
-# Show the resolved project root
-vecgrep --show-root
+vecgrep "error handling" ./src                 # semantic search
+vecgrep "match Ok(v) => v" ./src               # code snippet as query
+vecgrep "query" -t rust                        # filter by type
+vecgrep "query" -T markdown                    # exclude type
+vecgrep "query" -g '*.rs'                      # glob filter
+vecgrep "query" --threshold 0.1               # lower threshold for more results
+vecgrep --no-scope "query"                     # search entire project (ignore cwd scope)
 ```
 
-## Filtering And Output
+## Output Modes
 
 ```bash
-# Restrict by file type
-vecgrep "database migrations" -t rust -t sql
-
-# Exclude a file type
-vecgrep "frontend state" -T minified
-
-# Restrict by glob
-vecgrep "render pipeline" -g '*.rs' -g '!target/**'
-
-# JSONL output for scripting
-vecgrep --json "login form"
-
-# Only print matching files
-vecgrep -l "oauth callback"
-
-# Print counts per file
-vecgrep -c "retry logic"
+vecgrep -l "query"                             # file paths only
+vecgrep -c "query"                             # count per file
+vecgrep --json "query"                         # JSONL for scripting
+vecgrep -p "query"                             # force colors when piping
 ```
 
-## Interactive And Server Modes
+## Interactive / Server
 
 ```bash
-# Start the TUI
-vecgrep --interactive
+vecgrep -i "query"                             # TUI mode
+vecgrep -i --full-index                        # TUI after full index
+vecgrep --serve --port 8080                    # HTTP server
+```
 
-# Start the TUI after a full upfront index
-vecgrep --interactive --full-index
+## Index Management
 
-# Start the HTTP server
-vecgrep --serve
+```bash
+vecgrep --stats                                # index state
+vecgrep --reindex                              # force rebuild
+vecgrep --clear-cache                          # delete index (keeps config)
+vecgrep --index-only ./src                     # build without searching
+vecgrep --show-root                            # print project root
+```
 
-# Start the server after a full upfront index
-vecgrep --serve --full-index
+## Combining With Other Tools
+
+```bash
+vecgrep -l "error handling" | xargs rg "unwrap"
+rg -l "TODO" | xargs vecgrep "technical debt"
+vecgrep --json "auth" | jq -r '.file' | sort -u | xargs git blame
+vecgrep --json "query" | jq -r 'select(.score > 0.5) | "\(.file):\(.start_line)"'
+vecgrep -l "error handling" | entr -r cargo test
 ```
 
 ## Remote Embedder
 
 ```bash
-vecgrep \
-  --embedder-url http://localhost:11434/v1/embeddings \
-  --embedder-model mxbai-embed-large \
-  "query text"
+vecgrep --embedder-url http://localhost:11434/v1/embeddings \
+        --embedder-model mxbai-embed-large "query"
 ```
 
-## Troubleshooting Shortcuts
+## Troubleshooting
 
 ```bash
-# Rebuild the cache if results seem stale
-vecgrep --reindex .
-
-# Check for failed remote embeddings
-vecgrep --stats .
-
-# Ignore outside-root paths instead of failing
-vecgrep --skip-outside-root "query" ../other-path
+vecgrep --show-root                            # verify root
+vecgrep --stats                                # check holes, file count
+vecgrep --reindex                              # rebuild if stale
+vecgrep --skip-outside-root "query" ../other   # ignore outside-root paths
 ```

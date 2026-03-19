@@ -1,79 +1,92 @@
 ---
 name: vecgrep
-description: Explain how to use vecgrep effectively for semantic search, indexing, filtering, TUI/server modes, and troubleshooting. Use when Codex needs to answer questions about vecgrep commands, flag selection, project-root behavior, local vs remote embedders, reindexing, stats, or common "why didn't this search/index work?" cases.
+description: Use vecgrep for semantic code search — finding code by meaning, not just text. Use when you need to locate relevant code, understand a codebase, find similar patterns, or answer questions about what code does. Also covers indexing, filtering, troubleshooting, and configuration.
 ---
 
-# Vecgrep Usage
+# Vecgrep — Semantic Code Search
 
-Give practical, command-first guidance. Prefer short examples over long prose.
+vecgrep searches codebases by meaning using local embeddings. Use it when grep/ripgrep would require knowing the exact words, but you know the concept.
 
-## Start Here
+## When to Use
 
-Treat these as the main user-facing modes:
+- **Finding code by concept**: "error handling", "authentication flow", "database connection pooling"
+- **Finding similar patterns**: pass a code snippet as the query
+- **Exploring unfamiliar codebases**: "how does this project handle configuration?"
+- **Narrowing before exact search**: `vecgrep -l "auth" | xargs rg "token"`
 
-- Plain CLI search: index first, then search the up-to-date index.
-- `--index-only`: build or refresh the index without searching.
-- `--reindex`: rebuild the index from scratch, with or without a query.
-- `--stats`: report indexed files, chunks, holes, and DB size.
-- `--interactive`: run the TUI with progressive indexing unless `--full-index` is set.
-- `--serve`: run the HTTP server with progressive indexing unless `--full-index` is set.
+## Quick Reference
 
-For concrete commands, read [references/commands.md](references/commands.md).
+```bash
+# Semantic search
+vecgrep "error handling for network timeouts" ./src
 
-## Explain Indexing Correctly
+# Code snippet as query
+vecgrep "match result { Ok(v) => v, Err(e) => return Err(e) }" ./src
 
-Be precise about these behaviors:
+# Filter by file type
+vecgrep "sorting algorithm" -t rust
 
-- Normal CLI searches wait for indexing to finish before searching.
-- `--full-index` only changes interactive/server behavior; plain CLI already waits.
-- `--reindex` clears cached index data and rebuilds it.
-- Config changes that affect embeddings or chunking rebuild the cache automatically.
-- `--stats` includes `Holes`, which are chunks stored with zero-vector embeddings after remote embedding failures.
+# Files only (for piping)
+vecgrep -l "retry logic" ./src | xargs rg "unwrap"
 
-If a user expects progressive partial results from a normal CLI search, correct that expectation explicitly.
+# JSONL for structured output
+vecgrep --json "authentication" ./src
 
-## Explain Roots And Paths
+# Search entire project from any subdirectory
+vecgrep --no-scope "startup"
 
-Vecgrep is single-root by design.
+# Interactive TUI
+vecgrep -i "query"
+```
 
-- The project root is discovered by walking up for `.git/`, `.hg/`, `.jj/`, or `.vecgrep/`.
-- The cache lives at `.vecgrep/index.db` under that root.
-- Paths outside the selected root fail by default.
-- `--skip-outside-root` ignores outside-root paths instead of failing.
-- `--show-root` prints the resolved root.
+## Combining With Other Tools
 
-When debugging missing files, check root selection before assuming indexing is broken.
+```bash
+# Semantic find → exact grep
+vecgrep -l "error handling" ./src | xargs rg "unwrap"
 
-## Explain Embedder Modes
+# Exact find → semantic rank
+rg -l "TODO" ./src | xargs vecgrep "technical debt"
 
-Distinguish the two embedder paths:
+# Semantic find → git blame
+vecgrep --json "auth" ./src | jq -r '.file' | sort -u | xargs git blame
 
-- Local embedder: built-in ONNX model, tokenizer-aware chunking, silent model truncation, no index holes from embedding failures.
-- Remote embedder: OpenAI-compatible API via `--embedder-url` and `--embedder-model`, heuristic chunk sizing, possible HTTP context-limit failures, and possible holes if fallback embedding attempts still fail.
+# Structured extraction
+vecgrep --json "error handling" ./src | jq -r 'select(.score > 0.5) | "\(.file):\(.start_line)"'
+```
 
-When users report remote embedding failures, mention context-length limits and the `Holes` count from `--stats`.
+## Index Management
 
-## Troubleshooting Workflow
+```bash
+vecgrep --stats              # check index state
+vecgrep --reindex            # force full rebuild
+vecgrep --clear-cache        # delete cached index (preserves config)
+vecgrep --index-only ./src   # build index without searching
+vecgrep --show-root          # print resolved project root
+```
 
-Use this order:
+## Key Behaviors
 
-1. Confirm the root with `--show-root`.
-2. Check index state with `--stats`.
-3. If the cache may be stale or corrupted, suggest `--reindex`.
-4. If the user changed model or chunk settings, explain that a rebuild is expected.
-5. If using a remote embedder, check server URL, model name, and context limits.
-6. If a path is missing, verify it is inside the selected root and not ignored by flags or ignore files.
+- **Single root**: project root discovered from `.git/`, `.hg/`, `.jj/`, or `.vecgrep/`. Cache at `.vecgrep/index.db`.
+- **Path scoping**: `vecgrep "query" src/` only returns `src/` results. `--no-scope` searches the full index.
+- **Content hashing**: only changed files are re-embedded. Config/model changes trigger full rebuild.
+- **Default threshold**: 0.2. Lower it (`--threshold 0.1`) if getting too few results on small/code-heavy repos.
 
-## Response Style
+## Filtering
 
-Prefer:
+```bash
+vecgrep "query" -t rust -t python      # include types
+vecgrep "query" -T markdown            # exclude types
+vecgrep "query" -g '*.rs'              # glob filter
+vecgrep "query" -l                     # file paths only
+vecgrep "query" -c                     # count per file
+vecgrep "query" --json                 # JSONL output
+```
 
-- exact commands
-- short explanations of why a flag matters
-- explicit corrections when users confuse `--full-index`, `--reindex`, or root scoping
+## Troubleshooting
 
-Avoid:
-
-- implementation-detail dumps unless the user asks
-- generic vector search explanations
-- suggesting multi-root behavior that vecgrep does not support
+1. Check root: `vecgrep --show-root`
+2. Check index: `vecgrep --stats`
+3. Stale results? `vecgrep --reindex`
+4. Too few results? Lower threshold: `--threshold 0.1`
+5. Missing files? Check they're inside the root and not gitignored
