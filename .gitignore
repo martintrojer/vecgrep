@@ -1,4 +1,5 @@
 /target
 .claude/
 .vecgrep/
+!.vecgrep/config.toml
 *.onnx

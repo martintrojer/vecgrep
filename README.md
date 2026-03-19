@@ -2,7 +2,7 @@
 
 Semantic grep — like [ripgrep](https://github.com/BurntSushi/ripgrep), but with vector search.
 
-<!-- TODO: add demo GIF/video here -->
+![vecgrep TUI demo](doc/demo.gif)
 
 Search your codebase by meaning, not just text. Ask for "error handling for network timeouts" and find the relevant code, even if it doesn't contain those exact words.
 
