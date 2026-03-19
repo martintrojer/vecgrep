@@ -58,6 +58,7 @@ pub mod interactive {
             args.threshold.unwrap(),
             cwd_suffix,
             &path_scopes,
+            args.open_cmd.as_deref(),
         );
 
         disable_raw_mode()?;
@@ -67,6 +68,7 @@ pub mod interactive {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn event_loop(
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         worker: &EmbedWorker,
@@ -75,6 +77,7 @@ pub mod interactive {
         threshold: f32,
         cwd_suffix: &Path,
         path_scopes: &[String],
+        open_cmd: Option<&str>,
     ) -> Result<()> {
         let mut query = initial_query.to_string();
         let mut results: Vec<SearchResult> = Vec::new();
@@ -307,12 +310,25 @@ pub mod interactive {
                                     disable_raw_mode()?;
                                     execute!(io::stdout(), LeaveAlternateScreen)?;
 
-                                    let pager = std::env::var("PAGER")
-                                        .unwrap_or_else(|_| "less".to_string());
-                                    let _ = std::process::Command::new(&pager)
-                                        .arg(format!("+{}G", line))
-                                        .arg(&file)
-                                        .status();
+                                    let default_cmd = format!(
+                                        "{} +{{line}}G {{file}}",
+                                        std::env::var("PAGER")
+                                            .unwrap_or_else(|_| "less".to_string())
+                                    );
+                                    let cmd = open_cmd.unwrap_or(default_cmd.as_str());
+                                    if !cmd.contains("{file}") {
+                                        eprintln!(
+                                            "Warning: --open-cmd missing {{file}} placeholder"
+                                        );
+                                    }
+                                    let expanded = cmd
+                                        .replace("{file}", &file)
+                                        .replace("{line}", &line.to_string());
+                                    let parts: Vec<&str> = expanded.split_whitespace().collect();
+                                    if let Some((program, args)) = parts.split_first() {
+                                        let _ =
+                                            std::process::Command::new(program).args(args).status();
+                                    }
 
                                     return Ok(());
                                 }
