@@ -1051,4 +1051,63 @@ mod tests {
             other => panic!("expected SearchError, got: {other:?}"),
         }
     }
+
+    #[test]
+    fn test_process_batch_explicit_files() {
+        let mut embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        // Index a normal file and an explicit file
+        let files = vec![
+            (
+                WalkedFile {
+                    rel_path: "normal.rs".to_string(),
+                    content: "fn normal() {}".to_string(),
+                    explicit: false,
+                },
+                "hash_normal".to_string(),
+            ),
+            (
+                WalkedFile {
+                    rel_path: "explicit.rs".to_string(),
+                    content: "fn explicit() {}".to_string(),
+                    explicit: true,
+                },
+                "hash_explicit".to_string(),
+            ),
+        ];
+
+        process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
+
+        // Default search (no explicit paths in scope) should only find normal files
+        let query_emb = embedder.embed("function").unwrap();
+        let results = idx
+            .search(&query_emb, 10, 0.0, &SearchScope::default())
+            .unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert!(
+            paths.contains(&"normal.rs"),
+            "normal file should appear in default search"
+        );
+        assert!(
+            !paths.contains(&"explicit.rs"),
+            "explicit file should NOT appear in default search"
+        );
+
+        // Search with explicit file in scope should find both
+        let scope = SearchScope {
+            explicit_paths: vec!["explicit.rs".to_string()],
+            path_scopes: vec![],
+        };
+        let results = idx.search(&query_emb, 10, 0.0, &scope).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert!(
+            paths.contains(&"normal.rs"),
+            "normal file should appear with explicit scope"
+        );
+        assert!(
+            paths.contains(&"explicit.rs"),
+            "explicit file should appear when in scope"
+        );
+    }
 }

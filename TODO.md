@@ -21,15 +21,11 @@
 
 ### Missing Coverage
 - [ ] Remote embedder zero-vector fallback path (`remote.rs:62-79`) is untested — test that zero vectors are returned when `embedding_dim` is known, and errors propagate when it's `None`
-- [ ] No test for schema version migration — opening an index with an old `PRAGMA user_version` should trigger a rebuild
-- [ ] No test for `--no-scope` behavior at the search layer
 - [ ] `resolve_query_flag` error path calls `process::exit()` (`main.rs:539-545`) — refactor to return `Result` to enable testing
-- [ ] Add unit test for `process_batch` with `explicit: true` files (integration tests cover it, but unit coverage would catch regressions faster)
 - [ ] No test for `/status` with active path scopes (scope field presence untested — needs second test server)
 
 ### Test Quality
 - [ ] Server tests in `serve.rs` share a single `OnceLock` server instance — works because the HTTP API is read-only, but if mutations are added later, tests will need isolation
-- [ ] `test_status_returns_ready` uses `sleep(500ms)` instead of polling `/status` — fragile on slow CI
 - [ ] `test_large_file_multiple_chunks` uses magic-number slack of 60 tokens (`chunker.rs:170`) — bound could be tighter or proportional
 
 ## Future

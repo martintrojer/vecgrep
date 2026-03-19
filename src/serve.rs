@@ -422,8 +422,24 @@ mod tests {
     #[test]
     fn test_status_returns_ready() {
         let port = test_port();
-        // Wait briefly for indexing to complete (test server has 3 pre-indexed files)
-        thread::sleep(Duration::from_millis(500));
+        // Poll /status until the server reports "ready" (indexing complete)
+        let mut body = String::new();
+        for _ in 0..50 {
+            let (s, b, _) = http_request("GET", port, "/status");
+            if s == 200 {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&b) {
+                    if json["status"] == "ready" {
+                        body = b;
+                        break;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !body.is_empty(),
+            "server did not reach ready status within 5s"
+        );
 
         let (status, body, content_type) = http_request("GET", port, "/status");
 
