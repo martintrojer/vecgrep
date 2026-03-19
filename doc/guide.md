@@ -178,8 +178,13 @@ file_type = ["rust", "python"]
 # glob = ["!*.generated.*"]
 # max_depth = 5
 
-# TUI
+# TUI file opener — {file}, {line}, {end_line} placeholders
+# open_cmd = "less -N +{line}G {file}"
 # open_cmd = "nvim +{line} {file}"
+# open_cmd = "vim +{line} {file}"
+# open_cmd = "emacs +{line} {file}"
+# open_cmd = "code -g {file}:{line}"
+# open_cmd = "bat -n --highlight-line {line}:{end_line} --paging always --pager 'less +{line}G' {file}"
 
 # Server
 # port = 8080
@@ -226,7 +231,7 @@ Options:
       --show-root               Print resolved project root and exit
       --skip-outside-root       Ignore paths outside the selected project root
       --no-scope                Search entire project index (ignore cwd scoping)
-      --open-cmd <CMD>          Command to open files from TUI ({file} and {line} placeholders)
+      --open-cmd <CMD>          Command to open files from TUI ({file}, {line}, {end_line})
       --json                    JSONL output (includes "root" field)
       --serve                   Start HTTP server mode
       --port <PORT>             Port for HTTP server [default: auto]

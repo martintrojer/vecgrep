@@ -164,8 +164,8 @@ pub struct Args {
     #[arg(long)]
     pub no_scope: bool,
 
-    /// Command to open a file from TUI results. Uses {file} and {line} placeholders.
-    /// Examples: "nvim +{line} {file}", "bat -n --highlight-range {line}:{line} {file}"
+    /// Command to open a file from TUI results. Placeholders: {file}, {line}, {end_line}.
+    /// Examples: "nvim +{line} {file}", "bat -n --highlight-line {line}:{end_line} {file}"
     /// Default: $PAGER or less.
     #[arg(long)]
     pub open_cmd: Option<String>,
