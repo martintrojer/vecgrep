@@ -1,6 +1,6 @@
 # vecgrep TUI demo
 # Record with: vhs doc/demo.tape
-# Requires: vecgrep on PATH, vhs installed (brew install vhs)
+# Requires: vecgrep on PATH, nvim, vhs installed (brew install vhs)
 
 Output doc/demo.gif
 Set Width 1200
@@ -8,50 +8,57 @@ Set Height 700
 Set FontSize 16
 Set Shell zsh
 Set Theme "Catppuccin Mocha"
+Set TypingSpeed 50ms
 
-# Pre-clear cache so indexing is visible
-Hide
-Type "vecgrep --clear-cache ./src > /dev/null 2>&1"
+# Beat 1: Clear cache and launch TUI with nvim opener
+Type "vecgrep --clear-cache && vecgrep -i 'streaming results'"
+Sleep 500ms
+Enter
+
+# Wait for model load + indexing
+Sleep 6s
+
+# Beat 2: Navigate results
+Down
+Sleep 1s
+Down
+Sleep 1s
+Down
+Sleep 1500ms
+
+# Beat 3: Change query
+Backspace 17
+Sleep 500ms
+Type "embedding"
+Sleep 3s
+
+# Beat 4: Navigate new results
+Down
+Sleep 1s
+Down
+Sleep 1500ms
+
+# Beat 5: Toggle preview
+Tab
+Sleep 1500ms
+Tab
+Sleep 1500ms
+
+# Beat 6: Open in nvim
+Enter
+Sleep 2s
+Up
+Sleep 100ms
+Down
+Sleep 100ms
+Down
+Sleep 1s
+
+# Beat 7: Exit nvim
+Type ":q"
 Enter
 Sleep 1s
-Show
 
-# Beat 1: Cold start — TUI opens, indexing runs live
-Type "vecgrep -i --open-cmd 'nvim +{line} {file}' ./src"
-Sleep 500ms
+Type "vecgrep -q -l 'using config from files' ./src"
 Enter
-Sleep 4s
-
-# Beat 2: Type first query — results appear
-Type "error handling"
-Sleep 2500ms
-
-# Beat 3: Navigate results — preview updates
-Down
-Sleep 800ms
-Down
-Sleep 800ms
-Down
-Sleep 1200ms
-
-# Beat 4: Change query — completely different results
-Backspace 14
-Sleep 300ms
-Type "embedding"
-Sleep 2500ms
-
-# Beat 5: Navigate new results
-Down
-Sleep 800ms
-Down
-Sleep 1200ms
-
-# Beat 6: Toggle preview off and on
-Tab
-Sleep 1200ms
-Tab
-Sleep 1200ms
-
-# Beat 7: Exit
-Escape
-Sleep 500ms
+Sleep 2s
