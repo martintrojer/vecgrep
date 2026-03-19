@@ -305,6 +305,7 @@ pub mod interactive {
                             if let Some(sel) = list_state.selected() {
                                 if let Some(result) = results.get(sel) {
                                     let line = result.chunk.start_line;
+                                    let end_line = result.chunk.end_line;
                                     let file = result.chunk.file_path.clone();
 
                                     disable_raw_mode()?;
@@ -321,16 +322,28 @@ pub mod interactive {
                                             "Warning: --open-cmd missing {{file}} placeholder"
                                         );
                                     }
+                                    // Warn on unknown placeholders
+                                    let valid = ["{file}", "{line}", "{end_line}"];
+                                    for cap in cmd.split('{').skip(1) {
+                                        if let Some(name) = cap.split('}').next() {
+                                            let placeholder = format!("{{{name}}}");
+                                            if !valid.contains(&placeholder.as_str()) {
+                                                eprintln!(
+                                                    "Warning: unknown placeholder '{placeholder}' in --open-cmd"
+                                                );
+                                            }
+                                        }
+                                    }
                                     let expanded = cmd
                                         .replace("{file}", &file)
-                                        .replace("{line}", &line.to_string());
-                                    let parts: Vec<&str> = expanded.split_whitespace().collect();
-                                    if let Some((program, args)) = parts.split_first() {
-                                        if let Err(e) =
-                                            std::process::Command::new(program).args(args).status()
-                                        {
-                                            eprintln!("Failed to run '{}': {}", expanded, e);
-                                        }
+                                        .replace("{line}", &line.to_string())
+                                        .replace("{end_line}", &end_line.to_string());
+                                    if let Err(e) = std::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(&expanded)
+                                        .status()
+                                    {
+                                        eprintln!("Failed to run '{}': {}", expanded, e);
                                     }
 
                                     return Ok(());
