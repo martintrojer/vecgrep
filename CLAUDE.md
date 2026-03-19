@@ -22,7 +22,7 @@ cargo clean
 cargo test --test benchmark_models -- --nocapture
 ```
 
-**Model benchmarks** (see [BENCHMARK.md](BENCHMARK.md)):
+**Model benchmarks** (see [BENCHMARK.md](doc/BENCHMARK.md)):
 - Built-in all-MiniLM-L6-v2 wins at small scale (<500 docs) thanks to best separation (0.505)
 - At large scale (6,500+ docs), Ollama models (mxbai-embed-large, embeddinggemma) beat MiniLM by ~3% MRR — richer representations help with more distractors
 - All texts truncated to 1024 chars for fair cross-model comparison

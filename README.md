@@ -8,22 +8,22 @@ Search your codebase by meaning, not just text. Ask for "error handling for netw
 
 - **Local-first** — embedding model ships inside the binary. No API keys, no GPU, your code stays on your machine.
 - **Fast** — indexes thousands of files in seconds, searches in milliseconds. Interactive TUI and HTTP server update results progressively during indexing.
-- **Bring your own model** — optionally connect to [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible API. See [BENCHMARK.md](BENCHMARK.md).
+- **Bring your own model** — optionally connect to [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible API. See [BENCHMARK.md](doc/BENCHMARK.md).
 
 ## Install
 
 Pre-built binaries on the [releases page](https://github.com/mtrojer/vecgrep/releases), or:
 
 ```bash
-mise use github:martintrojer/vecgrep    # mise
-cargo install vecgrep                    # cargo
+mise use github:martintrojer/vecgrep  # mise
+cargo install vecgrep                 # cargo
 ```
 
 ### AI skill for coding agents
 
 ```bash
-npx skills add martintrojer/vecgrep                    # Codex / generic
-/plugin marketplace add martintrojer/vecgrep            # Claude Code
+npx skills add martintrojer/vecgrep           # Codex / generic
+/plugin marketplace add martintrojer/vecgrep  # Claude Code
 ```
 
 ## Quick start
@@ -50,8 +50,10 @@ vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxb
 
 ## Documentation
 
-- **[User Guide](doc/guide.md)** — full examples, options reference, path semantics, configuration, server API
-- **[Benchmarks](BENCHMARK.md)** — model comparisons and retrieval accuracy
+- **[User Guide](doc/GUIDE.md)** — examples, path semantics, embedding models, ignoring files
+- **[Configuration](doc/CONFIG.md)** — config files, options reference, environment variables
+- **[Server API](doc/SERVER.md)** — HTTP endpoints for IDE integration
+- **[Benchmarks](doc/BENCHMARK.md)** — model comparisons and retrieval accuracy
 
 ## How it works
 
