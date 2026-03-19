@@ -326,8 +326,11 @@ pub mod interactive {
                                         .replace("{line}", &line.to_string());
                                     let parts: Vec<&str> = expanded.split_whitespace().collect();
                                     if let Some((program, args)) = parts.split_first() {
-                                        let _ =
-                                            std::process::Command::new(program).args(args).status();
+                                        if let Err(e) =
+                                            std::process::Command::new(program).args(args).status()
+                                        {
+                                            eprintln!("Failed to run '{}': {}", expanded, e);
+                                        }
                                     }
 
                                     return Ok(());
