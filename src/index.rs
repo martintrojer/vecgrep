@@ -1492,4 +1492,75 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.file_path, "main.rs");
     }
+
+    #[test]
+    fn test_schema_version_change_triggers_rebuild() {
+        init_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        let index = Index { conn };
+        index.create_tables().unwrap();
+
+        // Insert data
+        let dim = EMBEDDING_DIM;
+        let emb = make_test_embedding(dim, 1.0);
+        let chunk = Chunk {
+            file_path: "old.rs".into(),
+            text: "old data".into(),
+            start_line: 1,
+            end_line: 1,
+        };
+        index
+            .upsert_file("old.rs", "hash", &[chunk], &[emb], &[false])
+            .unwrap();
+        assert_eq!(index.file_count().unwrap(), 1);
+
+        // Simulate an old schema version
+        index.conn.execute("PRAGMA user_version = 1", []).unwrap();
+
+        // Re-create tables — should detect version mismatch and drop everything
+        index.create_tables().unwrap();
+
+        // All data should be gone (tables were dropped and recreated)
+        assert_eq!(index.file_count().unwrap(), 0);
+        assert_eq!(index.chunk_count().unwrap(), 0);
+
+        // Schema version should be current
+        let version: i64 = index
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_no_scope_returns_all_results() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+
+        // Insert files in different directories
+        for (path, seed) in &[("src/a.rs", 1.0), ("tests/b.rs", 1.1), ("docs/c.md", 1.2)] {
+            let emb = make_test_embedding(dim, *seed);
+            let chunk = Chunk {
+                file_path: path.to_string(),
+                text: format!("content of {path}"),
+                start_line: 1,
+                end_line: 1,
+            };
+            index
+                .upsert_file(path, &format!("hash-{path}"), &[chunk], &[emb], &[false])
+                .unwrap();
+        }
+
+        // SearchScope::default() (no scoping) should return all files
+        let query = make_test_embedding(dim, 1.05);
+        let results = index
+            .search(&query, 10, -1.0, &SearchScope::default())
+            .unwrap();
+
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert_eq!(paths.len(), 3, "expected all 3 files, got: {paths:?}");
+        assert!(paths.contains(&"src/a.rs"));
+        assert!(paths.contains(&"tests/b.rs"));
+        assert!(paths.contains(&"docs/c.md"));
+    }
 }
