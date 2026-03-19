@@ -1,502 +1,547 @@
-pub mod interactive {
-    use crate::embedder::Embedder;
-    use crate::index::Index;
-    use crate::output;
-    use crate::paths;
-    use crate::pipeline::{EmbedWorker, PipelineStatus, SearchOutcome, StreamingIndexer};
-    use crate::types::SearchResult;
-    use crate::types::SearchScope;
-    use anyhow::Result;
-    use crossterm::{
-        event::{self, Event, KeyCode},
-        execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    };
-    use ratatui::{
-        backend::CrosstermBackend,
-        layout::{Constraint, Direction, Layout},
-        style::{Color, Modifier, Style},
-        text::{Line, Span},
-        widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-        Terminal,
-    };
-    use std::io;
-    use std::path::Path;
-    use std::time::{Duration, Instant};
+use crate::embedder::Embedder;
+use crate::index::Index;
+use crate::output;
+use crate::paths;
+use crate::pipeline::{EmbedWorker, PipelineStatus, SearchOutcome, StreamingIndexer};
+use crate::types::SearchResult;
+use crate::types::SearchScope;
+use anyhow::Result;
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    Terminal,
+};
+use std::io;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-    #[derive(Clone, Copy, PartialEq)]
-    enum SearchTrigger {
-        None,
-        AutoRefresh,
-        UserInput,
+#[derive(Clone, Copy, PartialEq)]
+enum SearchTrigger {
+    None,
+    AutoRefresh,
+    UserInput,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_streaming(
+    embedder: Embedder,
+    idx: Index,
+    indexer: StreamingIndexer,
+    initial_query: &str,
+    args: &crate::cli::Args,
+    cwd_suffix: &Path,
+    scope: SearchScope,
+) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let path_scopes = scope.path_scopes.clone();
+    let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
+
+    let result = event_loop(
+        &mut terminal,
+        &worker,
+        initial_query,
+        args.top_k.unwrap(),
+        args.threshold.unwrap(),
+        cwd_suffix,
+        &path_scopes,
+        args.open_cmd.as_deref(),
+    );
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    worker: &EmbedWorker,
+    initial_query: &str,
+    top_k: usize,
+    threshold: f32,
+    cwd_suffix: &Path,
+    path_scopes: &[String],
+    open_cmd: Option<&str>,
+) -> Result<()> {
+    let mut query = initial_query.to_string();
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut list_state = ListState::default();
+    let mut show_preview = true;
+    let mut last_search = Instant::now() - Duration::from_secs(1);
+    let mut pending_search = SearchTrigger::UserInput;
+    let mut searching = false;
+    let mut active_search_trigger = SearchTrigger::None;
+    let mut active_request_id: Option<u64> = None;
+    let mut search_error: Option<String> = None;
+    let debounce = Duration::from_millis(300);
+    let auto_refresh_interval = Duration::from_secs(3);
+    let mut last_auto_refresh = Instant::now();
+
+    // Index progress state
+    let mut pipeline_status = PipelineStatus::initial();
+
+    // Preview state
+    let mut preview_file_cache: Option<(String, String)> = None;
+    let mut preview_scroll: u16 = 0;
+    let mut last_selected: Option<usize> = None;
+
+    // Initial search
+    if !query.is_empty() {
+        active_request_id = Some(worker.search(&query, top_k, threshold));
+        searching = true;
+        active_search_trigger = SearchTrigger::UserInput;
+        pending_search = SearchTrigger::None;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn run_streaming(
-        embedder: Embedder,
-        idx: Index,
-        indexer: StreamingIndexer,
-        initial_query: &str,
-        args: &crate::cli::Args,
-        cwd_suffix: &Path,
-        scope: SearchScope,
-    ) -> Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let path_scopes = scope.path_scopes.clone();
-        let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
-
-        let result = event_loop(
-            &mut terminal,
-            &worker,
-            initial_query,
-            args.top_k.unwrap(),
-            args.threshold.unwrap(),
-            cwd_suffix,
-            &path_scopes,
-            args.open_cmd.as_deref(),
-        );
-
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        terminal.show_cursor()?;
-
-        result
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn event_loop(
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        worker: &EmbedWorker,
-        initial_query: &str,
-        top_k: usize,
-        threshold: f32,
-        cwd_suffix: &Path,
-        path_scopes: &[String],
-        open_cmd: Option<&str>,
-    ) -> Result<()> {
-        let mut query = initial_query.to_string();
-        let mut results: Vec<SearchResult> = Vec::new();
-        let mut list_state = ListState::default();
-        let mut show_preview = true;
-        let mut last_search = Instant::now() - Duration::from_secs(1);
-        let mut pending_search = SearchTrigger::UserInput;
-        let mut searching = false;
-        let mut active_search_trigger = SearchTrigger::None;
-        let mut active_request_id: Option<u64> = None;
-        let mut search_error: Option<String> = None;
-        let debounce = Duration::from_millis(300);
-        let auto_refresh_interval = Duration::from_secs(3);
-        let mut last_auto_refresh = Instant::now();
-
-        // Index progress state
-        let mut pipeline_status = PipelineStatus::Indexing {
-            indexed: 0,
-            total: None,
-            chunks: 0,
-        };
-
-        // Preview state
-        let mut preview_file_cache: Option<(String, String)> = None;
-        let mut preview_scroll: u16 = 0;
-        let mut last_selected: Option<usize> = None;
-
-        // Initial search
-        if !query.is_empty() {
-            active_request_id = Some(worker.search(&query, top_k, threshold));
-            searching = true;
-            active_search_trigger = SearchTrigger::UserInput;
-            pending_search = SearchTrigger::None;
-        }
-
-        loop {
-            // 1. Check for search results (non-blocking)
-            if let Some(outcome) = worker.try_recv_results() {
-                if active_request_id == Some(outcome.request_id()) {
-                    searching = false;
-                    active_search_trigger = SearchTrigger::None;
-                    match outcome {
-                        SearchOutcome::Results {
-                            results: new_results,
-                            ..
-                        } => {
-                            search_error = None;
-                            results = new_results;
-                            if !results.is_empty() {
-                                list_state.select(Some(0));
-                            } else {
-                                list_state.select(None);
-                            }
-                            paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
-                        }
-                        SearchOutcome::SearchError { message, .. } => {
-                            search_error = Some(format!("Search error: {message}"));
-                            results.clear();
+    loop {
+        // 1. Check for search results (non-blocking)
+        if let Some(outcome) = worker.try_recv_results() {
+            if active_request_id == Some(outcome.request_id()) {
+                searching = false;
+                active_search_trigger = SearchTrigger::None;
+                match outcome {
+                    SearchOutcome::Results {
+                        results: new_results,
+                        ..
+                    } => {
+                        search_error = None;
+                        results = new_results;
+                        if !results.is_empty() {
+                            list_state.select(Some(0));
+                        } else {
                             list_state.select(None);
                         }
-                        SearchOutcome::EmbedError { message, .. } => {
-                            search_error = Some(format!("Embed error: {message}"));
-                            results.clear();
-                            list_state.select(None);
-                        }
+                        paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
                     }
-                    last_selected = None;
-                }
-            }
-
-            // 2. Check for index progress (non-blocking)
-            if let Some(status) = worker.drain_progress() {
-                let was_indexing = !matches!(pipeline_status, PipelineStatus::Ready { .. });
-                pipeline_status = status;
-                let is_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
-
-                if !query.is_empty() && !searching && pending_search == SearchTrigger::None {
-                    if was_indexing && is_ready {
-                        pending_search = SearchTrigger::AutoRefresh;
-                    } else if was_indexing && last_auto_refresh.elapsed() >= auto_refresh_interval {
-                        pending_search = SearchTrigger::AutoRefresh;
-                        last_auto_refresh = Instant::now();
+                    SearchOutcome::SearchError { message, .. } => {
+                        search_error = Some(format!("Search error: {message}"));
+                        results.clear();
+                        list_state.select(None);
+                    }
+                    SearchOutcome::EmbedError { message, .. } => {
+                        search_error = Some(format!("Embed error: {message}"));
+                        results.clear();
+                        list_state.select(None);
                     }
                 }
-            }
-
-            // 3. Detect selection change and update preview cache/scroll
-            let current_selected = list_state.selected();
-            if current_selected != last_selected {
-                last_selected = current_selected;
-                if let Some(sel) = current_selected {
-                    if let Some(result) = results.get(sel) {
-                        let path = &result.chunk.file_path;
-                        let needs_load = match &preview_file_cache {
-                            Some((cached_path, _)) => cached_path != path,
-                            None => true,
-                        };
-                        if needs_load {
-                            if let Ok(content) = std::fs::read_to_string(path) {
-                                preview_file_cache = Some((path.clone(), content));
-                            } else {
-                                preview_file_cache = None;
-                            }
-                        }
-                        preview_scroll = (result.chunk.start_line.saturating_sub(4)) as u16;
-                    }
-                }
-            }
-
-            // 4. Render
-            let preview_scroll_val = preview_scroll;
-            let preview_cache_ref = &preview_file_cache;
-            let index_status = match pipeline_status {
-                PipelineStatus::Indexing {
-                    indexed,
-                    total,
-                    chunks,
-                } => {
-                    let total_str = total.map_or("??".to_string(), |t| t.to_string());
-                    format!("{indexed}/{total_str} files | {chunks} chunks")
-                }
-                PipelineStatus::Ready { files, chunks } => {
-                    format!("{files} files | {chunks} chunks")
-                }
-            };
-
-            let scope_str = if path_scopes.is_empty() {
-                String::new()
-            } else {
-                format!(" | scope: {}", path_scopes.join(", "))
-            };
-
-            let status_text = if let Some(ref err) = search_error {
-                err.clone()
-            } else if active_search_trigger == SearchTrigger::UserInput {
-                format!("Searching... | {index_status}{scope_str}")
-            } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
-                format!(
-                    "{} results | Indexing: {index_status}{scope_str}",
-                    results.len()
-                )
-            } else {
-                format!("{} results | {index_status}{scope_str}", results.len())
-            };
-
-            terminal.draw(|f| {
-                let main_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(3),
-                        Constraint::Min(5),
-                        Constraint::Length(1),
-                    ])
-                    .split(f.area());
-
-                let query_block = Paragraph::new(query.as_str())
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" Query (semantic search) "),
-                    )
-                    .style(Style::default().fg(Color::Yellow));
-                f.render_widget(query_block, main_chunks[0]);
-
-                if show_preview && !results.is_empty() {
-                    let result_area = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-                        .split(main_chunks[1]);
-
-                    render_list(f, &results, &mut list_state, result_area[0]);
-                    render_preview(
-                        f,
-                        &results,
-                        &list_state,
-                        result_area[1],
-                        preview_cache_ref,
-                        preview_scroll_val,
-                    );
-                } else {
-                    render_list(f, &results, &mut list_state, main_chunks[1]);
-                }
-
-                let status = Line::from(vec![
-                    Span::styled(
-                        " Esc",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(":quit "),
-                    Span::styled(
-                        "Enter",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(":view "),
-                    Span::styled(
-                        "Tab",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(":preview "),
-                    Span::styled(
-                        "PgUp/PgDn",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(":scroll "),
-                    Span::raw(format!(" | {}", status_text)),
-                ]);
-                let status_bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
-                f.render_widget(status_bar, main_chunks[2]);
-            })?;
-
-            // 5. Handle input
-            if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Esc => return Ok(()),
-                        KeyCode::Enter => {
-                            if let Some(sel) = list_state.selected() {
-                                if let Some(result) = results.get(sel) {
-                                    let line = result.chunk.start_line;
-                                    let end_line = result.chunk.end_line;
-                                    let file = result.chunk.file_path.clone();
-
-                                    disable_raw_mode()?;
-                                    execute!(io::stdout(), LeaveAlternateScreen)?;
-
-                                    let default_cmd = format!(
-                                        "{} +{{line}}G {{file}}",
-                                        std::env::var("PAGER")
-                                            .unwrap_or_else(|_| "less".to_string())
-                                    );
-                                    let cmd = open_cmd.unwrap_or(default_cmd.as_str());
-                                    if !cmd.contains("{file}") {
-                                        eprintln!(
-                                            "Warning: --open-cmd missing {{file}} placeholder"
-                                        );
-                                    }
-                                    // Warn on unknown placeholders
-                                    let valid = ["{file}", "{line}", "{end_line}"];
-                                    for cap in cmd.split('{').skip(1) {
-                                        if let Some(name) = cap.split('}').next() {
-                                            let placeholder = format!("{{{name}}}");
-                                            if !valid.contains(&placeholder.as_str()) {
-                                                eprintln!(
-                                                    "Warning: unknown placeholder '{placeholder}' in --open-cmd"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    let expanded = cmd
-                                        .replace("{file}", &file)
-                                        .replace("{line}", &line.to_string())
-                                        .replace("{end_line}", &end_line.to_string());
-                                    if let Err(e) = std::process::Command::new("sh")
-                                        .arg("-c")
-                                        .arg(&expanded)
-                                        .status()
-                                    {
-                                        eprintln!("Failed to run '{}': {}", expanded, e);
-                                    }
-
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        KeyCode::Tab => {
-                            show_preview = !show_preview;
-                        }
-                        KeyCode::Up => {
-                            if let Some(sel) = list_state.selected() {
-                                if sel > 0 {
-                                    list_state.select(Some(sel - 1));
-                                }
-                            }
-                        }
-                        KeyCode::Down => {
-                            if let Some(sel) = list_state.selected() {
-                                if sel + 1 < results.len() {
-                                    list_state.select(Some(sel + 1));
-                                }
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            preview_scroll = preview_scroll.saturating_sub(10);
-                        }
-                        KeyCode::PageDown => {
-                            preview_scroll = preview_scroll.saturating_add(10);
-                        }
-                        KeyCode::Backspace => {
-                            query.pop();
-                            pending_search = SearchTrigger::UserInput;
-                            last_search = Instant::now();
-                        }
-                        KeyCode::Char(c) => {
-                            query.push(c);
-                            pending_search = SearchTrigger::UserInput;
-                            last_search = Instant::now();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // 6. Debounced search
-            if pending_search != SearchTrigger::None
-                && !searching
-                && last_search.elapsed() >= debounce
-                && !query.is_empty()
-            {
-                active_search_trigger = pending_search;
-                active_request_id = Some(worker.search(&query, top_k, threshold));
-                searching = true;
-                pending_search = SearchTrigger::None;
                 last_selected = None;
             }
         }
-    }
 
-    fn render_list(
-        f: &mut ratatui::Frame,
-        results: &[SearchResult],
-        list_state: &mut ListState,
-        area: ratatui::layout::Rect,
-    ) {
-        let items: Vec<ListItem> = results
-            .iter()
-            .map(|r| {
-                let score_color = match output::score_tier(r.score) {
-                    output::ScoreTier::High => Color::Green,
-                    output::ScoreTier::Medium => Color::Yellow,
-                    output::ScoreTier::Low => Color::Red,
-                };
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("[{:.3}] ", r.score),
-                        Style::default()
-                            .fg(score_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&r.chunk.file_path, Style::default().fg(Color::Magenta)),
-                    Span::styled(
-                        format!(":{}:{}", r.chunk.start_line, r.chunk.end_line),
-                        Style::default().fg(Color::Green),
-                    ),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
+        // 2. Check for index progress (non-blocking)
+        if let Some(status) = worker.drain_progress() {
+            let was_indexing = !matches!(pipeline_status, PipelineStatus::Ready { .. });
+            pipeline_status = status;
+            let is_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Results "))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(">> ");
-
-        f.render_stateful_widget(list, area, list_state);
-    }
-
-    fn render_preview(
-        f: &mut ratatui::Frame,
-        results: &[SearchResult],
-        list_state: &ListState,
-        area: ratatui::layout::Rect,
-        file_cache: &Option<(String, String)>,
-        scroll: u16,
-    ) {
-        let content = if let Some(sel) = list_state.selected() {
-            if let Some(result) = results.get(sel) {
-                if let Some((_, ref file_content)) = file_cache {
-                    let chunk_start = result.chunk.start_line;
-                    let chunk_end = result.chunk.end_line;
-                    let highlight_style = Style::default().bg(Color::DarkGray);
-
-                    file_content
-                        .lines()
-                        .enumerate()
-                        .map(|(i, line)| {
-                            let line_num = i + 1;
-                            let in_chunk = line_num >= chunk_start && line_num <= chunk_end;
-                            let num_style = if in_chunk {
-                                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            };
-                            let text_style = if in_chunk {
-                                highlight_style
-                            } else {
-                                Style::default()
-                            };
-                            Line::from(vec![
-                                Span::styled(format!("{:>5} ", line_num), num_style),
-                                Span::styled(line, text_style),
-                            ])
-                        })
-                        .collect()
-                } else {
-                    vec![Line::raw("Unable to read file")]
+            if !query.is_empty() && !searching && pending_search == SearchTrigger::None {
+                if was_indexing && is_ready {
+                    pending_search = SearchTrigger::AutoRefresh;
+                } else if was_indexing && last_auto_refresh.elapsed() >= auto_refresh_interval {
+                    pending_search = SearchTrigger::AutoRefresh;
+                    last_auto_refresh = Instant::now();
                 }
+            }
+        }
+
+        // 3. Detect selection change and update preview cache/scroll
+        let current_selected = list_state.selected();
+        if current_selected != last_selected {
+            last_selected = current_selected;
+            if let Some(sel) = current_selected {
+                if let Some(result) = results.get(sel) {
+                    let path = &result.chunk.file_path;
+                    let needs_load = match &preview_file_cache {
+                        Some((cached_path, _)) => cached_path != path,
+                        None => true,
+                    };
+                    if needs_load {
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            preview_file_cache = Some((path.clone(), content));
+                        } else {
+                            preview_file_cache = None;
+                        }
+                    }
+                    preview_scroll = (result.chunk.start_line.saturating_sub(4)) as u16;
+                }
+            }
+        }
+
+        // 4. Render
+        let preview_scroll_val = preview_scroll;
+        let preview_cache_ref = &preview_file_cache;
+        let index_status = pipeline_status.to_string();
+
+        let scope_str = if path_scopes.is_empty() {
+            String::new()
+        } else {
+            format!(" | scope: {}", path_scopes.join(", "))
+        };
+
+        let status_text = if let Some(ref err) = search_error {
+            err.clone()
+        } else if active_search_trigger == SearchTrigger::UserInput {
+            format!("Searching... | {index_status}{scope_str}")
+        } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
+            format!(
+                "{} results | Indexing: {index_status}{scope_str}",
+                results.len()
+            )
+        } else {
+            format!("{} results | {index_status}{scope_str}", results.len())
+        };
+
+        terminal.draw(|f| {
+            let main_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(5),
+                    Constraint::Length(1),
+                ])
+                .split(f.area());
+
+            let query_block = Paragraph::new(query.as_str())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Query (semantic search) "),
+                )
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(query_block, main_chunks[0]);
+
+            if show_preview && !results.is_empty() {
+                let result_area = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(main_chunks[1]);
+
+                render_list(f, &results, &mut list_state, result_area[0]);
+                render_preview(
+                    f,
+                    &results,
+                    &list_state,
+                    result_area[1],
+                    preview_cache_ref,
+                    preview_scroll_val,
+                );
             } else {
-                vec![Line::raw("No selection")]
+                render_list(f, &results, &mut list_state, main_chunks[1]);
+            }
+
+            let status = Line::from(vec![
+                Span::styled(
+                    " Esc",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(":quit "),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(":view "),
+                Span::styled(
+                    "Tab",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(":preview "),
+                Span::styled(
+                    "PgUp/PgDn",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(":scroll "),
+                Span::raw(format!(" | {}", status_text)),
+            ]);
+            let status_bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
+            f.render_widget(status_bar, main_chunks[2]);
+        })?;
+
+        // 5. Handle input
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Esc => return Ok(()),
+                    KeyCode::Enter => {
+                        if let Some(sel) = list_state.selected() {
+                            if let Some(result) = results.get(sel) {
+                                let line = result.chunk.start_line;
+                                let end_line = result.chunk.end_line;
+                                let file = result.chunk.file_path.clone();
+
+                                disable_raw_mode()?;
+                                execute!(io::stdout(), LeaveAlternateScreen)?;
+
+                                let default_cmd = format!(
+                                    "{} +{{line}}G {{file}}",
+                                    std::env::var("PAGER").unwrap_or_else(|_| "less".to_string())
+                                );
+                                let cmd = open_cmd.unwrap_or(default_cmd.as_str());
+                                for warning in validate_open_cmd(cmd) {
+                                    eprintln!("{warning}");
+                                }
+                                let expanded = expand_open_cmd(cmd, &file, line, end_line);
+                                if let Err(e) = std::process::Command::new("sh")
+                                    .arg("-c")
+                                    .arg(&expanded)
+                                    .status()
+                                {
+                                    eprintln!("Failed to run '{}': {}", expanded, e);
+                                }
+
+                                return Ok(());
+                            }
+                        }
+                    }
+                    KeyCode::Tab => {
+                        show_preview = !show_preview;
+                    }
+                    KeyCode::Up => {
+                        if let Some(sel) = list_state.selected() {
+                            if sel > 0 {
+                                list_state.select(Some(sel - 1));
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        if let Some(sel) = list_state.selected() {
+                            if sel + 1 < results.len() {
+                                list_state.select(Some(sel + 1));
+                            }
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        preview_scroll = preview_scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        preview_scroll = preview_scroll.saturating_add(10);
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        pending_search = SearchTrigger::UserInput;
+                        last_search = Instant::now();
+                    }
+                    KeyCode::Char(c) => {
+                        query.push(c);
+                        pending_search = SearchTrigger::UserInput;
+                        last_search = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 6. Debounced search
+        if pending_search != SearchTrigger::None
+            && !searching
+            && last_search.elapsed() >= debounce
+            && !query.is_empty()
+        {
+            active_search_trigger = pending_search;
+            active_request_id = Some(worker.search(&query, top_k, threshold));
+            searching = true;
+            pending_search = SearchTrigger::None;
+            last_selected = None;
+        }
+    }
+}
+
+fn render_list(
+    f: &mut ratatui::Frame,
+    results: &[SearchResult],
+    list_state: &mut ListState,
+    area: ratatui::layout::Rect,
+) {
+    let items: Vec<ListItem> = results
+        .iter()
+        .map(|r| {
+            let score_color = match output::score_tier(r.score) {
+                output::ScoreTier::High => Color::Green,
+                output::ScoreTier::Medium => Color::Yellow,
+                output::ScoreTier::Low => Color::Red,
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("[{:.3}] ", r.score),
+                    Style::default()
+                        .fg(score_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&r.chunk.file_path, Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    format!(":{}:{}", r.chunk.start_line, r.chunk.end_line),
+                    Style::default().fg(Color::Green),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Results "))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(list, area, list_state);
+}
+
+fn render_preview(
+    f: &mut ratatui::Frame,
+    results: &[SearchResult],
+    list_state: &ListState,
+    area: ratatui::layout::Rect,
+    file_cache: &Option<(String, String)>,
+    scroll: u16,
+) {
+    let content = if let Some(sel) = list_state.selected() {
+        if let Some(result) = results.get(sel) {
+            if let Some((_, ref file_content)) = file_cache {
+                let chunk_start = result.chunk.start_line;
+                let chunk_end = result.chunk.end_line;
+                let highlight_style = Style::default().bg(Color::DarkGray);
+
+                file_content
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        let line_num = i + 1;
+                        let in_chunk = line_num >= chunk_start && line_num <= chunk_end;
+                        let num_style = if in_chunk {
+                            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        let text_style = if in_chunk {
+                            highlight_style
+                        } else {
+                            Style::default()
+                        };
+                        Line::from(vec![
+                            Span::styled(format!("{:>5} ", line_num), num_style),
+                            Span::styled(line, text_style),
+                        ])
+                    })
+                    .collect()
+            } else {
+                vec![Line::raw("Unable to read file")]
             }
         } else {
             vec![Line::raw("No selection")]
-        };
+        }
+    } else {
+        vec![Line::raw("No selection")]
+    };
 
-        let preview = Paragraph::new(content)
-            .block(Block::default().borders(Borders::ALL).title(" Preview "))
-            .scroll((scroll, 0));
+    let preview = Paragraph::new(content)
+        .block(Block::default().borders(Borders::ALL).title(" Preview "))
+        .scroll((scroll, 0));
 
-        f.render_widget(preview, area);
+    f.render_widget(preview, area);
+}
+
+/// Expand `{file}`, `{line}`, and `{end_line}` placeholders in an open-cmd template.
+fn expand_open_cmd(cmd: &str, file: &str, line: usize, end_line: usize) -> String {
+    cmd.replace("{file}", file)
+        .replace("{line}", &line.to_string())
+        .replace("{end_line}", &end_line.to_string())
+}
+
+/// Return warnings for an open-cmd template (missing `{file}`, unknown placeholders).
+fn validate_open_cmd(cmd: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !cmd.contains("{file}") {
+        warnings.push("Warning: --open-cmd missing {file} placeholder".to_string());
+    }
+    let valid = ["{file}", "{line}", "{end_line}"];
+    for cap in cmd.split('{').skip(1) {
+        if let Some(name) = cap.split('}').next() {
+            let placeholder = format!("{{{name}}}");
+            if !valid.contains(&placeholder.as_str()) {
+                warnings.push(format!(
+                    "Warning: unknown placeholder '{placeholder}' in --open-cmd"
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_open_cmd_all_placeholders() {
+        let result = expand_open_cmd("nvim +{line} {file}", "src/main.rs", 42, 50);
+        assert_eq!(result, "nvim +42 src/main.rs");
+    }
+
+    #[test]
+    fn test_expand_open_cmd_with_end_line() {
+        let result = expand_open_cmd(
+            "bat -n --highlight-line {line}:{end_line} {file}",
+            "a.rs",
+            10,
+            20,
+        );
+        assert_eq!(result, "bat -n --highlight-line 10:20 a.rs");
+    }
+
+    #[test]
+    fn test_expand_open_cmd_no_placeholders() {
+        let result = expand_open_cmd("less", "file.rs", 1, 5);
+        assert_eq!(result, "less");
+    }
+
+    #[test]
+    fn test_validate_open_cmd_missing_file() {
+        let warnings = validate_open_cmd("less +{line}G");
+        assert!(warnings.iter().any(|w| w.contains("missing {file}")));
+    }
+
+    #[test]
+    fn test_validate_open_cmd_unknown_placeholder() {
+        let warnings = validate_open_cmd("{file} {col}");
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("unknown placeholder '{col}'")));
+    }
+
+    #[test]
+    fn test_validate_open_cmd_valid() {
+        let warnings = validate_open_cmd("nvim +{line} {file}");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validate_open_cmd_all_valid_placeholders() {
+        let warnings = validate_open_cmd("{file} {line} {end_line}");
+        assert!(warnings.is_empty());
     }
 }

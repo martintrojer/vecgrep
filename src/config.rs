@@ -333,6 +333,87 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_all_fields_override_wins() {
+        // Every Config field is set in both base and override.
+        // Asserts that merge() picks the override for every field,
+        // catching missing fields when new options are added.
+        let base = Config {
+            embedder_url: Some("base-url".into()),
+            embedder_model: Some("base-model".into()),
+            top_k: Some(1),
+            threshold: Some(0.1),
+            chunk_size: Some(100),
+            chunk_overlap: Some(10),
+            full_index: Some(false),
+            hidden: Some(false),
+            follow: Some(false),
+            ignore_files: Some(vec!["base.ignore".into()]),
+            no_ignore: Some(false),
+            max_depth: Some(1),
+            color: Some("never".into()),
+            quiet: Some(false),
+            index_warn_threshold: Some(100),
+            file_type: Some(vec!["rust".into()]),
+            file_type_not: Some(vec!["markdown".into()]),
+            glob: Some(vec!["*.rs".into()]),
+            port: Some(8080),
+            skip_outside_root: Some(false),
+            open_cmd: Some("base-cmd".into()),
+        };
+
+        let override_config = Config {
+            embedder_url: Some("override-url".into()),
+            embedder_model: Some("override-model".into()),
+            top_k: Some(99),
+            threshold: Some(0.99),
+            chunk_size: Some(999),
+            chunk_overlap: Some(99),
+            full_index: Some(true),
+            hidden: Some(true),
+            follow: Some(true),
+            ignore_files: Some(vec!["override.ignore".into()]),
+            no_ignore: Some(true),
+            max_depth: Some(99),
+            color: Some("always".into()),
+            quiet: Some(true),
+            index_warn_threshold: Some(999),
+            file_type: Some(vec!["python".into()]),
+            file_type_not: Some(vec!["json".into()]),
+            glob: Some(vec!["*.py".into()]),
+            port: Some(9090),
+            skip_outside_root: Some(true),
+            open_cmd: Some("override-cmd".into()),
+        };
+
+        let merged = merge(base, override_config);
+        assert_eq!(merged.embedder_url.as_deref(), Some("override-url"));
+        assert_eq!(merged.embedder_model.as_deref(), Some("override-model"));
+        assert_eq!(merged.top_k, Some(99));
+        assert_eq!(merged.threshold, Some(0.99));
+        assert_eq!(merged.chunk_size, Some(999));
+        assert_eq!(merged.chunk_overlap, Some(99));
+        assert_eq!(merged.full_index, Some(true));
+        assert_eq!(merged.hidden, Some(true));
+        assert_eq!(merged.follow, Some(true));
+        // ignore_files is additive: override + base
+        assert_eq!(
+            merged.ignore_files,
+            Some(vec!["override.ignore".into(), "base.ignore".into()])
+        );
+        assert_eq!(merged.no_ignore, Some(true));
+        assert_eq!(merged.max_depth, Some(99));
+        assert_eq!(merged.color.as_deref(), Some("always"));
+        assert_eq!(merged.quiet, Some(true));
+        assert_eq!(merged.index_warn_threshold, Some(999));
+        assert_eq!(merged.file_type, Some(vec!["python".into()]));
+        assert_eq!(merged.file_type_not, Some(vec!["json".into()]));
+        assert_eq!(merged.glob, Some(vec!["*.py".into()]));
+        assert_eq!(merged.port, Some(9090));
+        assert_eq!(merged.skip_outside_root, Some(true));
+        assert_eq!(merged.open_cmd.as_deref(), Some("override-cmd"));
+    }
+
+    #[test]
     fn test_load_config_reads_global_from_xdg_config_home() {
         let _lock = env_lock().lock().unwrap();
         let xdg = tempfile::TempDir::new().unwrap();

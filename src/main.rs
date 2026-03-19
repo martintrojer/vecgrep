@@ -54,11 +54,7 @@ struct Spinner {
 
 impl Spinner {
     fn start() -> Self {
-        let status = Arc::new(std::sync::Mutex::new(PipelineStatus::Indexing {
-            indexed: 0,
-            total: None,
-            chunks: 0,
-        }));
+        let status = Arc::new(std::sync::Mutex::new(PipelineStatus::initial()));
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let status_clone = Arc::clone(&status);
         let paused_clone = Arc::clone(&paused);
@@ -69,25 +65,15 @@ impl Spinner {
                 if paused_clone.load(std::sync::atomic::Ordering::Relaxed) {
                     continue;
                 }
-                let s = *status_clone.lock().unwrap();
+                let s = match status_clone.lock() {
+                    Ok(s) => *s,
+                    Err(_) => break,
+                };
                 if matches!(s, PipelineStatus::Ready { .. }) {
                     break;
                 }
                 let frame = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-                match s {
-                    PipelineStatus::Indexing {
-                        indexed,
-                        total,
-                        chunks,
-                    } => {
-                        let total_str = total.map_or("??".to_string(), |t| t.to_string());
-                        eprint!(
-                            "\r{} {}/{} files | {} chunks",
-                            frame, indexed, total_str, chunks
-                        );
-                    }
-                    PipelineStatus::Ready { .. } => break,
-                }
+                eprint!("\r{} {}", frame, s);
                 std::io::stderr().flush().ok();
                 frame_idx += 1;
             }
@@ -454,7 +440,7 @@ fn run_interactive_mode(
     walker_handle: &mut Option<WalkerHandle>,
     scope: SearchScope,
 ) -> Result<bool> {
-    tui::interactive::run_streaming(
+    tui::run_streaming(
         embedder,
         idx,
         indexer,

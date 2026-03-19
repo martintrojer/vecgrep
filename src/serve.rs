@@ -180,11 +180,7 @@ pub fn run_streaming(
     let path_scopes = config.scope.path_scopes.clone();
     let worker = EmbedWorker::spawn(embedder, idx, indexer, config.scope);
     let mut indexing_announced = false;
-    let mut pipeline_status = PipelineStatus::Indexing {
-        indexed: 0,
-        total: None,
-        chunks: 0,
-    };
+    let mut pipeline_status = PipelineStatus::initial();
 
     loop {
         // Check index progress (non-blocking)
