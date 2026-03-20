@@ -10,41 +10,59 @@ Set Shell zsh
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 50ms
 
-# Beat 1: Clear cache and launch TUI with nvim opener
-Type "vecgrep --clear-cache && vecgrep -i 'streaming results'"
-Sleep 500ms
+Type "vecgrep --clear-cache -l 'creates index, first time only'"
 Enter
-
-# Wait for model load + indexing
 Sleep 6s
 
-# Beat 2: Navigate results
-Down
+# --- grep can't find it, vecgrep can ---
+Type "echo '--- normal grep matches exact text, not meaning (thus finds nothing in this example) ---'"
+Enter
 Sleep 1s
-Down
-Sleep 1s
-Down
+Type "grep -rn 'handle errors' src/"
+Enter
 Sleep 1500ms
 
-# Beat 3: Change query
-Backspace 17
+Type "echo '--- vecgrep searches by meaning (finds relevant parts of files) ---'"
+Enter
 Sleep 500ms
-Type "embedding"
+Type "vecgrep 'handle errors' src/"
+Enter
 Sleep 3s
 
-# Beat 4: Navigate new results
+# --- Interactive TUI with live search ---
+Type "echo '--- interactive mode: search, browse, open in editor ---'"
+Enter
+Sleep 500ms
+Type "vecgrep -i 'cache invalidation'"
+Enter
+Sleep 2s
+
+# Navigate results — preview follows selection
 Down
-Sleep 1s
+Sleep 800ms
+Down
+Sleep 800ms
 Down
 Sleep 1500ms
 
-# Beat 5: Toggle preview
-Tab
+# Live re-search with a different query
+Backspace 20
+Type "how files are discovered"
+Sleep 3s
+
+# Browse new results
+Down
+Sleep 800ms
+Down
 Sleep 1500ms
+
+# Toggle preview off and back
+Tab
+Sleep 1200ms
 Tab
 Sleep 1500ms
 
-# Beat 6: Open in nvim
+# --- Open result in neovim ---
 Enter
 Sleep 2s
 Up
@@ -54,11 +72,15 @@ Sleep 100ms
 Down
 Sleep 1s
 
-# Beat 7: Exit nvim
+# Exit neovim
 Type ":q"
 Enter
 Sleep 1s
 
-Type "vecgrep -q -l 'using config from files' ./src"
+# --- CLI one-liner: list matching files ---
+Type "echo '--- also works as a CLI tool, showing matching hunks or files ---'"
 Enter
-Sleep 2s
+Sleep 500ms
+Type "vecgrep -ql 'database schema' src/"
+Enter
+Sleep 3s
