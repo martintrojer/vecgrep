@@ -386,7 +386,7 @@ fn handle_post_index_actions(args: &Args, idx: &Index) -> Result<Option<bool>> {
         return Ok(Some(true));
     }
 
-    if args.reindex && args.query.is_none() {
+    if args.reindex {
         return Ok(Some(true));
     }
 
@@ -573,8 +573,28 @@ fn run() -> Result<bool> {
 
     resolve_query_flag(&mut args);
 
+    // --index-only never searches, so all positionals are paths.
+    if args.index_only {
+        if let Some(positional) = args.query.take() {
+            if args.paths == ["."] {
+                args.paths = vec![positional];
+            } else {
+                args.paths.insert(0, positional);
+            }
+        }
+    }
+
     {
         use clap::error::ErrorKind;
+        // --reindex always rebuilds from project root; it takes no query or paths.
+        if args.reindex && (args.query.is_some() || args.paths != ["."]) {
+            Args::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--reindex does not accept a query or paths (it always rebuilds from the project root)",
+                )
+                .exit();
+        }
         if args.stats && args.query.is_some() {
             Args::command()
                 .error(
@@ -604,6 +624,11 @@ fn run() -> Result<bool> {
     if args.show_root {
         println!("{}", project_root.display());
         return Ok(true);
+    }
+
+    // --reindex always walks from the project root, regardless of cwd.
+    if args.reindex {
+        args.paths = vec![project_root.display().to_string()];
     }
 
     let mut invocation = invocation::resolve_invocation(args, &cwd, &project_root)?;
