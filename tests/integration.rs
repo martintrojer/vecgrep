@@ -358,7 +358,7 @@ fn test_reindex_without_query_repopulates_index() {
     std::fs::write(dir.path().join("main.rs"), "fn search_target() {}\n").unwrap();
 
     let initial = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .args(["search target", "--index-only"])
+        .arg("--index-only")
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -398,37 +398,149 @@ fn test_reindex_without_query_repopulates_index() {
 }
 
 #[test]
-fn test_reindex_with_query_repopulates_index_and_searches() {
+fn test_reindex_rejects_query() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
-    std::fs::write(dir.path().join("main.rs"), "fn search_target() {}\n").unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn hello() {}\n").unwrap();
 
-    let initial = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .args(["search target", "--index-only"])
+    // --reindex does not accept a query or paths
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--reindex", "some query"])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert!(
-        initial.status.success(),
-        "initial index failed: {}",
-        String::from_utf8_lossy(&initial.stderr)
+        !output.status.success(),
+        "expected --reindex to reject positional args"
     );
+}
 
-    let reindex = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .args(["--reindex", "search target"])
+#[test]
+fn test_reindex_rejects_paths() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("hello.rs"), "fn hello() {}\n").unwrap();
+
+    // --reindex does not accept explicit paths
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--reindex", "query", "sub"])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert!(
-        reindex.status.success(),
-        "reindex search failed: {}",
-        String::from_utf8_lossy(&reindex.stderr)
+        !output.status.success(),
+        "expected --reindex to reject paths"
+    );
+}
+
+#[test]
+fn test_reindex_combined_with_index_only() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn hello() {}\n").unwrap();
+
+    // Initial index
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--index-only")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // --reindex --index-only should rebuild and print stats, no search
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--reindex", "--index-only"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reindex+index-only failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8(reindex.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stdout.contains("main.rs"),
-        "expected search results after reindex, got: {stdout}"
+        stderr.contains("Files:  1"),
+        "expected stats output, got: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "expected no search results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_index_only_with_path_scopes_to_path() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("a.rs"), "fn alpha() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn beta() {}\n").unwrap();
+
+    // --index-only sub — positional "sub" should be treated as a path
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--index-only", "sub"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "index-only+path failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    // Only sub/a.rs should be indexed (not b.rs at root)
+    assert!(
+        stderr.contains("Files:  1"),
+        "expected 1 file from sub/, got: {stderr}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.is_empty(),
+        "expected no search results, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_reindex_from_subdirectory_indexes_full_project() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("a.rs"), "fn alpha() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn beta() {}\n").unwrap();
+
+    // Run --reindex from subdirectory — should still index entire project
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--reindex")
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reindex from subdir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Check stats from project root — both files should be indexed
+    let stats = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .arg("--stats")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(stats.status.success());
+    let stderr = String::from_utf8(stats.stderr).unwrap();
+    assert!(
+        stderr.contains("Files:  2"),
+        "expected 2 files from full project reindex, got: {stderr}"
     );
 }
 
