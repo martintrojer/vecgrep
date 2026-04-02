@@ -14,6 +14,7 @@ pub struct Config {
     pub chunk_overlap: Option<usize>,
     pub full_index: Option<bool>,
     pub hidden: Option<bool>,
+    pub skip_vcs: Option<bool>,
     pub follow: Option<bool>,
     pub ignore_files: Option<Vec<String>>,
     pub no_ignore: Option<bool>,
@@ -68,6 +69,7 @@ fn merge(base: Config, override_config: Config) -> Config {
         chunk_overlap: override_config.chunk_overlap.or(base.chunk_overlap),
         full_index: override_config.full_index.or(base.full_index),
         hidden: override_config.hidden.or(base.hidden),
+        skip_vcs: override_config.skip_vcs.or(base.skip_vcs),
         follow: override_config.follow.or(base.follow),
         ignore_files: match (override_config.ignore_files, base.ignore_files) {
             (Some(mut o), Some(b)) => {
@@ -346,6 +348,7 @@ mod tests {
             chunk_overlap: Some(10),
             full_index: Some(false),
             hidden: Some(false),
+            skip_vcs: Some(false),
             follow: Some(false),
             ignore_files: Some(vec!["base.ignore".into()]),
             no_ignore: Some(false),
@@ -370,6 +373,7 @@ mod tests {
             chunk_overlap: Some(99),
             full_index: Some(true),
             hidden: Some(true),
+            skip_vcs: Some(true),
             follow: Some(true),
             ignore_files: Some(vec!["override.ignore".into()]),
             no_ignore: Some(true),
@@ -394,6 +398,7 @@ mod tests {
         assert_eq!(merged.chunk_overlap, Some(99));
         assert_eq!(merged.full_index, Some(true));
         assert_eq!(merged.hidden, Some(true));
+        assert_eq!(merged.skip_vcs, Some(true));
         assert_eq!(merged.follow, Some(true));
         // ignore_files is additive: override + base
         assert_eq!(

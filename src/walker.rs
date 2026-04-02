@@ -63,6 +63,7 @@ pub struct WalkOptions {
     pub globs: Option<Vec<String>>,
     pub ignore_files: Option<Vec<String>>,
     pub hidden: bool,
+    pub skip_vcs: bool,
     pub follow: bool,
     pub no_ignore: bool,
     pub max_depth: Option<usize>,
@@ -94,6 +95,17 @@ where
             .git_global(!opts.no_ignore)
             .git_exclude(!opts.no_ignore)
             .ignore(!opts.no_ignore);
+
+        if opts.skip_vcs {
+            builder.filter_entry(|entry| {
+                if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        return !matches!(name, ".git" | ".hg" | ".jj");
+                    }
+                }
+                true
+            });
+        }
 
         if let Some(depth) = opts.max_depth {
             builder.max_depth(Some(depth));
@@ -357,6 +369,63 @@ mod tests {
         let files = walk_paths(&paths, &opts).unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
         assert!(names.iter().any(|n| n.contains(".hidden")));
+    }
+
+    #[test]
+    fn test_skip_vcs_excludes_vcs_dirs() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "git config").unwrap();
+        std::fs::create_dir(dir.path().join(".hg")).unwrap();
+        std::fs::write(dir.path().join(".hg/store"), "hg data").unwrap();
+        std::fs::create_dir(dir.path().join(".jj")).unwrap();
+        std::fs::write(dir.path().join(".jj/repo"), "jj data").unwrap();
+        std::fs::write(dir.path().join(".bashrc"), "alias ls='ls -la'").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "hello").unwrap();
+
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+
+        // --hidden without --skip-vcs: VCS dirs ARE included
+        let opts = WalkOptions {
+            hidden: true,
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.contains(".git")),
+            ".git should be included without --skip-vcs, got: {names:?}"
+        );
+
+        // --hidden --skip-vcs: VCS dirs are excluded, other dotfiles kept
+        let opts = WalkOptions {
+            hidden: true,
+            skip_vcs: true,
+            ..default_opts()
+        };
+        let files = walk_paths(&paths, &opts).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
+
+        assert!(
+            names.iter().any(|n| n.contains(".bashrc")),
+            "hidden dotfiles should be included, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("visible.txt")),
+            "normal files should be included, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".git")),
+            ".git should be excluded with --skip-vcs, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".hg")),
+            ".hg should be excluded with --skip-vcs, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".jj")),
+            ".jj should be excluded with --skip-vcs, got: {names:?}"
+        );
     }
 
     #[test]
