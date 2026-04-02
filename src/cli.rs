@@ -93,6 +93,10 @@ pub struct Args {
     #[arg(short = '.', long)]
     pub hidden: bool,
 
+    /// Skip VCS directories (.git, .hg, .jj) even when --hidden is set.
+    #[arg(long)]
+    pub skip_vcs: bool,
+
     /// Follow symbolic links.
     #[arg(short = 'L', long)]
     pub follow: bool,

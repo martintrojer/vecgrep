@@ -170,6 +170,7 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
     // Bool flags: CLI flag || config value
     args.full_index = args.full_index || config.full_index.unwrap_or(false);
     args.hidden = args.hidden || config.hidden.unwrap_or(false);
+    args.skip_vcs = args.skip_vcs || config.skip_vcs.unwrap_or(false);
     args.follow = args.follow || config.follow.unwrap_or(false);
     args.no_ignore = args.no_ignore || config.no_ignore.unwrap_or(false);
     args.quiet = args.quiet || config.quiet.unwrap_or(false);
@@ -212,6 +213,13 @@ pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Re
         }
     };
     resolve_config(&mut args, &config);
+
+    if args.skip_vcs && !args.hidden {
+        anyhow::bail!(
+            "--skip-vcs has no effect without --hidden (VCS directories are already excluded)"
+        );
+    }
+
     let (args, path_plan) = admit_paths(args, cwd, project_root)?;
     let query = args.query.clone().unwrap_or_default();
     let run_mode = determine_run_mode(&args);
@@ -332,6 +340,7 @@ mod tests {
         let mut args = parse_args(&["vecgrep", "needle"]);
         let config = config::Config {
             hidden: Some(true),
+            skip_vcs: Some(true),
             follow: Some(true),
             no_ignore: Some(true),
             quiet: Some(true),
@@ -343,6 +352,7 @@ mod tests {
         resolve_config(&mut args, &config);
 
         assert!(args.hidden);
+        assert!(args.skip_vcs);
         assert!(args.follow);
         assert!(args.no_ignore);
         assert!(args.quiet);

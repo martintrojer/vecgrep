@@ -211,6 +211,7 @@ fn build_walk_options(args: &Args) -> walker::WalkOptions {
         globs: args.glob.clone(),
         ignore_files: args.ignore_file.clone(),
         hidden: args.hidden,
+        skip_vcs: args.skip_vcs,
         follow: args.follow,
         no_ignore: args.no_ignore,
         max_depth: args.max_depth,
