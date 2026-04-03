@@ -10,7 +10,7 @@ use vecgrep::index::Index;
 use vecgrep::invocation::{
     capped_chunk_size, CliOutputContext, Invocation, RunMode, StaleRemovalScope,
 };
-use vecgrep::pipeline::PipelineStatus;
+use vecgrep::pipeline::{run_search, PipelineStatus};
 use vecgrep::root::resolve_project_root;
 use vecgrep::types::IndexConfig;
 use vecgrep::types::SearchScope;
@@ -181,11 +181,21 @@ fn prepare_index(
     reindex: bool,
 ) -> Result<Index> {
     let idx = Index::open(project_root)?;
+    let stored_config = idx.stored_config()?;
+    let hybrid_capable = if reindex && invocation.args.hybrid {
+        true
+    } else {
+        stored_config
+            .as_ref()
+            .map(|config| config.hybrid)
+            .unwrap_or(false)
+    };
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
         chunk_size: invocation.args.chunk_size.unwrap(),
         chunk_overlap: invocation.args.chunk_overlap.unwrap(),
+        hybrid: hybrid_capable,
     };
 
     let config_valid = idx.check_config(&config)?;
@@ -423,6 +433,7 @@ fn run_serve_mode(
             port: invocation.args.port,
             default_top_k: invocation.args.top_k.unwrap(),
             default_threshold: invocation.args.threshold.unwrap(),
+            hybrid: invocation.args.hybrid,
             quiet: output.quiet,
             root: output.root,
             scope,
@@ -494,13 +505,19 @@ fn run_cli_search(
     let chunk_count = idx.chunk_count()?;
     status!(output.quiet, "Index has {} chunks.", chunk_count);
 
-    let query_embedding = embedder.embed(query)?;
-    let results = idx.search(
-        &query_embedding,
+    let results = run_search(
+        embedder,
+        idx,
+        query,
         args.top_k.unwrap(),
         args.threshold.unwrap(),
         scope,
-    )?;
+        args.hybrid,
+    )
+    .map_err(|err| match err {
+        vecgrep::pipeline::SearchExecutionError::Embed(err)
+        | vecgrep::pipeline::SearchExecutionError::Search(err) => err,
+    })?;
 
     let found = render_cli_results(
         results,
@@ -783,6 +800,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+    use vecgrep::cli::ColorChoice;
     use vecgrep::embedder::EMBEDDING_DIM;
     use vecgrep::types::{Chunk, IndexConfig};
 
@@ -798,6 +816,18 @@ mod tests {
     fn make_embedding() -> Vec<f32> {
         let value = 1.0 / (EMBEDDING_DIM as f32).sqrt();
         vec![value; EMBEDDING_DIM]
+    }
+
+    fn make_invocation(dir: &TempDir, argv: &[&str]) -> Invocation {
+        let cwd = dir.path().canonicalize().unwrap();
+        let args = Args::parse_from(argv);
+        invocation::resolve_invocation(args, &cwd, &cwd).unwrap()
+    }
+
+    fn prepare_index_for_args(dir: &TempDir, argv: &[&str], reindex: bool) -> Index {
+        let invocation = make_invocation(dir, argv);
+        let embedder = Embedder::new_local().unwrap();
+        prepare_index(dir.path(), &embedder, &invocation, reindex).unwrap()
     }
 
     #[test]
@@ -890,6 +920,7 @@ mod tests {
             embedding_dim: EMBEDDING_DIM,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.set_config(&config).unwrap();
 
@@ -943,6 +974,7 @@ mod tests {
             embedding_dim: EMBEDDING_DIM,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.set_config(&config).unwrap();
 
@@ -1038,5 +1070,70 @@ mod tests {
         resolve_query_flag(&mut args);
 
         assert_eq!(args.query.as_deref(), Some("search term"));
+    }
+
+    #[test]
+    fn test_prepare_index_hybrid_query_does_not_upgrade_existing_plain_index() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        let plain_idx = prepare_index_for_args(&dir, &["vecgrep", "needle"], false);
+        assert!(!plain_idx.is_hybrid_capable().unwrap());
+
+        let hybrid_query_idx =
+            prepare_index_for_args(&dir, &["vecgrep", "--hybrid", "needle"], false);
+        assert!(
+            !hybrid_query_idx.is_hybrid_capable().unwrap(),
+            "query-time --hybrid should not silently upgrade the index"
+        );
+    }
+
+    #[test]
+    fn test_prepare_index_hybrid_capability_is_sticky_for_plain_runs_and_reindexes() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        let hybrid_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex", "--hybrid"], true);
+        assert!(hybrid_idx.is_hybrid_capable().unwrap());
+
+        let plain_idx = prepare_index_for_args(&dir, &["vecgrep", "needle"], false);
+        assert!(plain_idx.is_hybrid_capable().unwrap());
+
+        let plain_reindex_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex"], true);
+        assert!(
+            plain_reindex_idx.is_hybrid_capable().unwrap(),
+            "plain reindex should preserve existing hybrid capability"
+        );
+    }
+
+    #[test]
+    fn test_clear_cache_then_plain_reindex_drops_hybrid_capability() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        let hybrid_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex", "--hybrid"], true);
+        assert!(hybrid_idx.is_hybrid_capable().unwrap());
+
+        let path_plan = invocation::PathPlan {
+            project_root: dir.path().canonicalize().unwrap(),
+            cwd_suffix: PathBuf::new(),
+            stale_removal_scope: StaleRemovalScope::None,
+        };
+        let clear_args = Args {
+            query: Some("needle".to_string()),
+            clear_cache: true,
+            quiet: true,
+            color: Some(ColorChoice::Auto),
+            ..Default::default()
+        };
+
+        let outcome = handle_pre_execution_actions(&clear_args, &path_plan, true).unwrap();
+        assert_eq!(outcome, None);
+
+        let plain_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex", "needle"], true);
+        assert!(
+            !plain_idx.is_hybrid_capable().unwrap(),
+            "clear-cache followed by plain reindex should rebuild a vector-only index"
+        );
     }
 }

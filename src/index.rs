@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use zerocopy::IntoBytes;
@@ -8,7 +10,10 @@ use crate::embedder::EMBEDDING_DIM;
 use crate::types::{Chunk, IndexConfig, SearchResult, SearchScope};
 
 static SQLITE_VEC_INIT: Once = Once::new();
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+const SCOPE_OVERFETCH: usize = 3;
+const HYBRID_FETCH_MULTIPLIER: usize = 5;
+const RRF_K: usize = 60;
 
 fn vec_table_ddl(dim: usize) -> String {
     format!(
@@ -16,6 +21,20 @@ fn vec_table_ddl(dim: usize) -> String {
          chunk_id integer primary key, \
          embedding float[{dim}] distance_metric=cosine)"
     )
+}
+
+pub fn hybrid_lexical_query(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
 }
 
 fn init_sqlite_vec() {
@@ -39,6 +58,12 @@ fn get_file_id(conn: &Connection, path: &str) -> Result<i64> {
 }
 
 fn delete_file_by_id(conn: &Connection, file_id: i64) -> Result<()> {
+    if hybrid_enabled(conn)? {
+        conn.execute(
+            "DELETE FROM chunks_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+    }
     conn.execute(
         "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?1)",
         params![file_id],
@@ -74,9 +99,32 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn hybrid_enabled(conn: &Connection) -> Result<bool> {
+    let Some(config_json) = get_meta(conn, "config")? else {
+        return Ok(false);
+    };
+    let config: IndexConfig = serde_json::from_str(&config_json)?;
+    Ok(config.hybrid)
+}
+
+fn sync_hybrid_schema(conn: &Connection, hybrid: bool) -> Result<()> {
+    if hybrid {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                text,
+                chunk_id UNINDEXED
+            );",
+        )?;
+    } else {
+        conn.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
+    }
+    Ok(())
+}
+
 fn clear_all_data(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "DROP TABLE IF EXISTS vec_chunks;
+        "DROP TABLE IF EXISTS chunks_fts;
+         DROP TABLE IF EXISTS vec_chunks;
          DELETE FROM chunks;
          DELETE FROM files;
          DELETE FROM meta;",
@@ -86,6 +134,7 @@ fn clear_all_data(conn: &Connection) -> Result<()> {
 
 pub struct Index {
     conn: Connection,
+    db_path: Option<PathBuf>,
 }
 
 impl Index {
@@ -119,11 +168,12 @@ impl Index {
         ensure_gitignore_entry(&gitignore_path);
 
         let db_path = index_dir.join("index.db");
-        let conn = Connection::open(&db_path).context("Failed to open index database")?;
+        let conn = Self::open_connection(&db_path)?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-
-        let index = Self { conn };
+        let index = Self {
+            conn,
+            db_path: Some(db_path),
+        };
         index.create_tables()?;
         Ok(index)
     }
@@ -133,9 +183,35 @@ impl Index {
         init_sqlite_vec();
 
         let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
-        let index = Self { conn };
+        let index = Self {
+            conn,
+            db_path: None,
+        };
         index.create_tables()?;
         Ok(index)
+    }
+
+    fn open_connection(path: &Path) -> Result<Connection> {
+        let conn = Connection::open(path).context("Failed to open index database")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        Ok(conn)
+    }
+
+    pub fn open_reader(&self) -> Result<Option<Self>> {
+        let Some(path) = &self.db_path else {
+            return Ok(None);
+        };
+
+        init_sqlite_vec();
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .context("Failed to open read-only index connection")?;
+        Ok(Some(Self {
+            conn,
+            db_path: Some(path.clone()),
+        }))
     }
 
     fn create_tables(&self) -> Result<()> {
@@ -146,7 +222,8 @@ impl Index {
         self.with_transaction(|conn| {
             if current_version != SCHEMA_VERSION {
                 conn.execute_batch(
-                    "DROP TABLE IF EXISTS vec_chunks;
+                    "DROP TABLE IF EXISTS chunks_fts;
+                     DROP TABLE IF EXISTS vec_chunks;
                      DROP TABLE IF EXISTS chunks;
                      DROP TABLE IF EXISTS files;
                      DROP TABLE IF EXISTS meta;",
@@ -192,11 +269,23 @@ impl Index {
         }
     }
 
+    pub fn stored_config(&self) -> Result<Option<IndexConfig>> {
+        let Some(config_json) = get_meta(&self.conn, "config")? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_str(&config_json)?))
+    }
+
+    pub fn is_hybrid_capable(&self) -> Result<bool> {
+        Ok(self.stored_config()?.is_some_and(|config| config.hybrid))
+    }
+
     /// Store the current config and ensure vec_chunks table has correct dimension.
     pub fn set_config(&self, config: &IndexConfig) -> Result<()> {
         self.with_transaction(|conn| {
             let config_json = serde_json::to_string(config)?;
             set_meta(conn, "config", &config_json)?;
+            sync_hybrid_schema(conn, config.hybrid)?;
 
             // Create vec_chunks if it doesn't exist (new DB or after clear()).
             // The dimension is correct because clear() drops vec_chunks when
@@ -214,6 +303,7 @@ impl Index {
 
             let config_json = serde_json::to_string(config)?;
             set_meta(conn, "config", &config_json)?;
+            sync_hybrid_schema(conn, config.hybrid)?;
             conn.execute(&vec_table_ddl(config.embedding_dim), [])?;
 
             Ok(())
@@ -288,6 +378,14 @@ impl Index {
             )?;
             let mut vec_stmt =
                 conn.prepare("INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)")?;
+            let hybrid = hybrid_enabled(conn)?;
+            let mut fts_stmt = if hybrid {
+                Some(conn.prepare(
+                    "INSERT INTO chunks_fts (rowid, text, chunk_id) VALUES (?1, ?2, ?3)",
+                )?)
+            } else {
+                None
+            };
 
             for ((chunk, embedding), failed) in chunks
                 .iter()
@@ -303,13 +401,16 @@ impl Index {
                 ])?;
                 let chunk_id = conn.last_insert_rowid();
                 vec_stmt.execute(params![chunk_id, embedding.as_slice().as_bytes()])?;
+                if let Some(ref mut fts_stmt) = fts_stmt {
+                    fts_stmt.execute(params![chunk_id, chunk.text, chunk_id])?;
+                }
             }
 
             Ok(())
         })
     }
 
-    const SEARCH_QUERY_NO_EXPLICIT: &str = "\
+    const VECTOR_SEARCH_QUERY_NO_EXPLICIT: &str = "\
         SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
         FROM vec_chunks v \
         JOIN chunks c ON c.id = v.chunk_id \
@@ -319,30 +420,31 @@ impl Index {
           AND f.explicit = 0 \
         ORDER BY v.distance";
 
-    /// Over-fetch multiplier when path scopes are active, so post-filtering
-    /// doesn't return fewer results than requested.
-    const SCOPE_OVERFETCH: usize = 3;
+    const LEXICAL_SEARCH_QUERY_NO_EXPLICIT: &str = "\
+        SELECT c.text, c.start_line, c.end_line, f.path, bm25(chunks_fts) AS rank \
+        FROM chunks_fts \
+        JOIN chunks c ON c.id = chunks_fts.chunk_id \
+        JOIN files f ON f.id = c.file_id \
+        WHERE chunks_fts MATCH ?1 \
+          AND f.explicit = 0 \
+        ORDER BY rank";
 
-    /// Search for chunks most similar to the query embedding.
-    /// See `SearchScope` for how explicit files and path scoping work.
-    pub fn search(
+    fn search_vector_candidates(
         &self,
         query_embedding: &[f32],
-        top_k: usize,
-        threshold: f32,
+        candidate_limit: usize,
         scope: &SearchScope,
     ) -> Result<Vec<SearchResult>> {
         let explicit_paths = &scope.explicit_paths;
         let path_scopes = &scope.path_scopes;
-        if top_k == 0 {
+        if candidate_limit == 0 {
             return Ok(vec![]);
         }
 
-        // Over-fetch when path scopes will post-filter results
         let fetch_k = if path_scopes.is_empty() {
-            top_k
+            candidate_limit
         } else {
-            top_k * Self::SCOPE_OVERFETCH
+            candidate_limit * SCOPE_OVERFETCH
         };
 
         let query = if !explicit_paths.is_empty() {
@@ -361,7 +463,7 @@ impl Index {
                 placeholders.join(", ")
             )
         } else {
-            Self::SEARCH_QUERY_NO_EXPLICIT.to_string()
+            Self::VECTOR_SEARCH_QUERY_NO_EXPLICIT.to_string()
         };
         let mut stmt = self.conn.prepare(&query)?;
 
@@ -389,39 +491,146 @@ impl Index {
 
         let search_results: Vec<SearchResult> = results
             .into_iter()
-            .filter_map(|(text, start_line, end_line, path, distance)| {
-                let score = 1.0 - distance as f32;
-                if score >= threshold {
-                    Some(SearchResult {
-                        chunk: Chunk {
-                            file_path: path,
-                            text,
-                            start_line: start_line as usize,
-                            end_line: end_line as usize,
-                        },
-                        score,
-                    })
-                } else {
-                    None
-                }
+            .map(
+                |(text, start_line, end_line, path, distance)| SearchResult {
+                    chunk: Chunk {
+                        file_path: path,
+                        text,
+                        start_line: start_line as usize,
+                        end_line: end_line as usize,
+                    },
+                    score: 1.0 - distance as f32,
+                },
+            )
+            .collect();
+
+        Ok(scope_results(search_results, path_scopes, candidate_limit))
+    }
+
+    pub fn search_lexical(
+        &self,
+        query: &str,
+        candidate_limit: usize,
+        scope: &SearchScope,
+    ) -> Result<Vec<SearchResult>> {
+        let explicit_paths = &scope.explicit_paths;
+        let path_scopes = &scope.path_scopes;
+        if candidate_limit == 0 {
+            return Ok(vec![]);
+        }
+        let Some(match_query) = hybrid_lexical_query(query) else {
+            return Ok(vec![]);
+        };
+
+        let fetch_limit = if path_scopes.is_empty() {
+            candidate_limit
+        } else {
+            candidate_limit * SCOPE_OVERFETCH
+        };
+
+        let query = if !explicit_paths.is_empty() {
+            let placeholders: Vec<String> = (0..explicit_paths.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect();
+            format!(
+                "SELECT c.text, c.start_line, c.end_line, f.path, bm25(chunks_fts) AS rank \
+                 FROM chunks_fts \
+                 JOIN chunks c ON c.id = chunks_fts.chunk_id \
+                 JOIN files f ON f.id = c.file_id \
+                 WHERE chunks_fts MATCH ?1 \
+                   AND (f.explicit = 0 OR f.path IN ({})) \
+                 ORDER BY rank \
+                 LIMIT ?2",
+                placeholders.join(", ")
+            )
+        } else {
+            format!("{} LIMIT ?2", Self::LEXICAL_SEARCH_QUERY_NO_EXPLICIT)
+        };
+        let mut stmt = self.conn.prepare(&query)?;
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(match_query), Box::new(fetch_limit as i64)];
+        for p in explicit_paths {
+            param_values.push(Box::new(p.clone()));
+        }
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let results = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let search_results: Vec<SearchResult> = results
+            .into_iter()
+            .map(|(text, start_line, end_line, path)| SearchResult {
+                chunk: Chunk {
+                    file_path: path,
+                    text,
+                    start_line: start_line as usize,
+                    end_line: end_line as usize,
+                },
+                score: 0.0,
             })
             .collect();
 
-        // Scope results to the requested paths, truncate to top_k
-        if !path_scopes.is_empty() {
-            let scoped: Vec<SearchResult> = search_results
-                .into_iter()
-                .filter(|r| {
-                    path_scopes
-                        .iter()
-                        .any(|scope| crate::paths::is_under(&r.chunk.file_path, Path::new(scope)))
-                })
-                .take(top_k)
-                .collect();
-            Ok(scoped)
-        } else {
-            Ok(search_results)
+        Ok(scope_results(search_results, path_scopes, candidate_limit))
+    }
+
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: f32,
+        scope: &SearchScope,
+        lexical_results: Option<Vec<SearchResult>>,
+    ) -> Result<Vec<SearchResult>> {
+        if top_k == 0 {
+            return Ok(vec![]);
         }
+
+        let candidate_limit = top_k * HYBRID_FETCH_MULTIPLIER;
+        let vector_results =
+            self.search_vector_candidates(query_embedding, candidate_limit, scope)?;
+        let lexical_results = match lexical_results {
+            Some(results) => results,
+            None => self.search_lexical(query, candidate_limit, scope)?,
+        };
+
+        Ok(fuse_ranked_results(
+            query,
+            vector_results,
+            lexical_results,
+            top_k,
+            threshold,
+        ))
+    }
+
+    /// Search for chunks most similar to the query embedding.
+    /// See `SearchScope` for how explicit files and path scoping work.
+    pub fn search(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: f32,
+        scope: &SearchScope,
+    ) -> Result<Vec<SearchResult>> {
+        if top_k == 0 {
+            return Ok(vec![]);
+        }
+        let search_results: Vec<SearchResult> = self
+            .search_vector_candidates(query_embedding, top_k, scope)?
+            .into_iter()
+            .filter(|result| result.score >= threshold)
+            .collect();
+        Ok(search_results.into_iter().take(top_k).collect())
     }
 
     /// Get the number of files in the index.
@@ -514,6 +723,168 @@ impl Index {
             .query_row("PRAGMA database_list", [], |r| r.get(2))?;
         Ok(PathBuf::from(path))
     }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct ResultKey {
+    file_path: String,
+    start_line: usize,
+    end_line: usize,
+}
+
+impl ResultKey {
+    fn from_result(result: &SearchResult) -> Self {
+        Self {
+            file_path: result.chunk.file_path.clone(),
+            start_line: result.chunk.start_line,
+            end_line: result.chunk.end_line,
+        }
+    }
+}
+
+struct HybridCandidate {
+    result: SearchResult,
+    vector_rank: Option<usize>,
+    lexical_rank: Option<usize>,
+}
+
+fn scope_results(
+    results: Vec<SearchResult>,
+    path_scopes: &[String],
+    candidate_limit: usize,
+) -> Vec<SearchResult> {
+    if path_scopes.is_empty() {
+        return results.into_iter().take(candidate_limit).collect();
+    }
+
+    results
+        .into_iter()
+        .filter(|result| {
+            path_scopes
+                .iter()
+                .any(|scope| crate::paths::is_under(&result.chunk.file_path, Path::new(scope)))
+        })
+        .take(candidate_limit)
+        .collect()
+}
+
+fn rank_component(rank: usize) -> f32 {
+    1.0 / (RRF_K + rank + 1) as f32
+}
+
+fn lexical_weight(query: &str) -> f32 {
+    let token_count = query
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .count();
+    let has_code_like_marker = query.chars().any(|ch| {
+        matches!(
+            ch,
+            '_' | ':' | '/' | '\\' | '.' | '(' | ')' | '[' | ']' | '{' | '}' | '=' | '<' | '>'
+        ) || ch.is_ascii_digit()
+    });
+
+    if has_code_like_marker {
+        0.65
+    } else if token_count <= 2 {
+        0.45
+    } else if token_count == 3 {
+        0.20
+    } else {
+        0.10
+    }
+}
+
+pub fn hybrid_fused_score(
+    query: &str,
+    vector_rank: Option<usize>,
+    lexical_rank: Option<usize>,
+) -> f32 {
+    let vector_weight = 1.0;
+    let lexical_weight = lexical_weight(query);
+    let lexical_only_weight = lexical_weight * 0.2;
+    let max_score = (vector_weight + lexical_weight) * rank_component(0);
+    let vector_score = vector_rank
+        .map(|rank| vector_weight * rank_component(rank))
+        .unwrap_or(0.0);
+    let lexical_score = lexical_rank
+        .map(|rank| {
+            let weight = if vector_rank.is_some() {
+                lexical_weight
+            } else {
+                lexical_only_weight
+            };
+            weight * rank_component(rank)
+        })
+        .unwrap_or(0.0);
+    let score = vector_score + lexical_score;
+    if max_score == 0.0 {
+        0.0
+    } else {
+        score / max_score
+    }
+}
+
+fn compare_scores_desc(lhs: f32, rhs: f32) -> Ordering {
+    rhs.partial_cmp(&lhs).unwrap_or(Ordering::Equal)
+}
+
+fn fuse_ranked_results(
+    query: &str,
+    vector_results: Vec<SearchResult>,
+    lexical_results: Vec<SearchResult>,
+    top_k: usize,
+    threshold: f32,
+) -> Vec<SearchResult> {
+    let mut merged: HashMap<ResultKey, HybridCandidate> = HashMap::new();
+
+    for (rank, result) in vector_results.into_iter().enumerate() {
+        let key = ResultKey::from_result(&result);
+        merged
+            .entry(key)
+            .and_modify(|candidate| candidate.vector_rank = Some(rank))
+            .or_insert(HybridCandidate {
+                result,
+                vector_rank: Some(rank),
+                lexical_rank: None,
+            });
+    }
+
+    for (rank, result) in lexical_results.into_iter().enumerate() {
+        let key = ResultKey::from_result(&result);
+        merged
+            .entry(key)
+            .and_modify(|candidate| candidate.lexical_rank = Some(rank))
+            .or_insert(HybridCandidate {
+                result,
+                vector_rank: None,
+                lexical_rank: Some(rank),
+            });
+    }
+
+    let mut fused: Vec<SearchResult> = merged
+        .into_values()
+        .filter_map(|candidate| {
+            let score = hybrid_fused_score(query, candidate.vector_rank, candidate.lexical_rank);
+            if score >= threshold {
+                Some(SearchResult {
+                    score,
+                    ..candidate.result
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    fused.sort_by(|lhs, rhs| {
+        compare_scores_desc(lhs.score, rhs.score)
+            .then_with(|| lhs.chunk.file_path.cmp(&rhs.chunk.file_path))
+            .then_with(|| lhs.chunk.start_line.cmp(&rhs.chunk.start_line))
+            .then_with(|| lhs.chunk.end_line.cmp(&rhs.chunk.end_line))
+    });
+    fused.truncate(top_k);
+    fused
 }
 
 pub struct IndexStats {
@@ -621,6 +992,7 @@ mod tests {
             embedding_dim: 384,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.set_config(&config).unwrap();
         assert!(index.check_config(&config).unwrap());
@@ -634,12 +1006,14 @@ mod tests {
             embedding_dim: 384,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         let config2 = IndexConfig {
             model_name: "model-b".to_string(),
             embedding_dim: 384,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.set_config(&config1).unwrap();
         assert!(!index.check_config(&config2).unwrap());
@@ -718,6 +1092,121 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.text, "version 2");
+    }
+
+    #[test]
+    fn test_search_lexical_finds_matches() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        index
+            .set_config(&IndexConfig {
+                model_name: "test-model".to_string(),
+                embedding_dim: dim,
+                chunk_size: 500,
+                chunk_overlap: 100,
+                hybrid: true,
+            })
+            .unwrap();
+        let chunks = vec![Chunk {
+            file_path: "notes.rs".to_string(),
+            text: "retry timeout handling".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let embeddings = vec![make_test_embedding(dim, 1.0)];
+
+        index
+            .upsert_file("notes.rs", "hash-lex", &chunks, &embeddings, &[false])
+            .unwrap();
+
+        let results = index
+            .search_lexical("timeout retry", 10, &SearchScope::default())
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.file_path, "notes.rs");
+    }
+
+    #[test]
+    fn test_upsert_replaces_lexical_entries() {
+        let index = Index::open_in_memory().unwrap();
+        let dim = EMBEDDING_DIM;
+        index
+            .set_config(&IndexConfig {
+                model_name: "test-model".to_string(),
+                embedding_dim: dim,
+                chunk_size: 500,
+                chunk_overlap: 100,
+                hybrid: true,
+            })
+            .unwrap();
+
+        let chunks_v1 = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "alpha token".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb_v1 = vec![make_test_embedding(dim, 1.0)];
+        index
+            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1, &[false])
+            .unwrap();
+
+        let chunks_v2 = vec![Chunk {
+            file_path: "a.rs".to_string(),
+            text: "beta token".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        let emb_v2 = vec![make_test_embedding(dim, 2.0)];
+        index
+            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2, &[false])
+            .unwrap();
+
+        let old_results = index
+            .search_lexical("alpha", 10, &SearchScope::default())
+            .unwrap();
+        assert!(old_results.is_empty());
+
+        let new_results = index
+            .search_lexical("beta", 10, &SearchScope::default())
+            .unwrap();
+        assert_eq!(new_results.len(), 1);
+        assert_eq!(new_results[0].chunk.text, "beta token");
+    }
+
+    #[test]
+    fn test_hybrid_capability_roundtrip() {
+        let index = Index::open_in_memory().unwrap();
+        assert!(!index.is_hybrid_capable().unwrap());
+
+        index
+            .set_config(&IndexConfig {
+                model_name: "test-model".to_string(),
+                embedding_dim: EMBEDDING_DIM,
+                chunk_size: 500,
+                chunk_overlap: 100,
+                hybrid: true,
+            })
+            .unwrap();
+
+        assert!(index.is_hybrid_capable().unwrap());
+        assert_eq!(index.stored_config().unwrap().unwrap().hybrid, true);
+    }
+
+    #[test]
+    fn test_rebuild_for_config_can_enable_hybrid_capability() {
+        let index = Index::open_in_memory().unwrap();
+        index
+            .rebuild_for_config(&IndexConfig {
+                model_name: "test-model".to_string(),
+                embedding_dim: EMBEDDING_DIM,
+                chunk_size: 500,
+                chunk_overlap: 100,
+                hybrid: true,
+            })
+            .unwrap();
+
+        assert!(index.is_hybrid_capable().unwrap());
     }
 
     #[test]
@@ -812,6 +1301,7 @@ mod tests {
                 embedding_dim: 384,
                 chunk_size: 1,
                 chunk_overlap: 0,
+                hybrid: false,
             })
             .unwrap();
 
@@ -1127,6 +1617,7 @@ mod tests {
             embedding_dim: dim,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
 
         // Initial index
@@ -1228,6 +1719,7 @@ mod tests {
             embedding_dim: dim,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.set_config(&config).unwrap();
         assert_eq!(vec_count(&index), 0);
@@ -1245,6 +1737,7 @@ mod tests {
             embedding_dim: new_dim,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.rebuild_for_config(&config).unwrap();
 
@@ -1279,6 +1772,7 @@ mod tests {
             embedding_dim: dim,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         };
         index.set_config(&config1).unwrap();
         let chunks = vec![Chunk {
@@ -1298,6 +1792,7 @@ mod tests {
             embedding_dim: dim,
             chunk_size: 200,
             chunk_overlap: 50,
+            hybrid: false,
         };
         index.rebuild_for_config(&config2).unwrap();
 
@@ -1497,7 +1992,10 @@ mod tests {
     fn test_schema_version_change_triggers_rebuild() {
         init_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
-        let index = Index { conn };
+        let index = Index {
+            conn,
+            db_path: None,
+        };
         index.create_tables().unwrap();
 
         // Insert data

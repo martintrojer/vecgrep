@@ -2,6 +2,21 @@ use vecgrep::embedder::EMBEDDING_DIM;
 use vecgrep::index::Index;
 use vecgrep::types::{Chunk, IndexConfig, SearchScope};
 
+fn run_vecgrep(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+}
+
+fn init_repo_with_file(file_name: &str, content: &str) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(file_name), content).unwrap();
+    dir
+}
+
 fn make_embedding(dim: usize, seed: f32) -> Vec<f32> {
     let mut v: Vec<f32> = (0..dim).map(|i| (i as f32 * seed).sin()).collect();
     // L2 normalize
@@ -87,6 +102,7 @@ fn test_incremental_indexing() {
         embedding_dim: EMBEDDING_DIM,
         chunk_size: 500,
         chunk_overlap: 100,
+        hybrid: false,
     };
     index.set_config(&config).unwrap();
 
@@ -162,16 +178,108 @@ fn test_show_root_at_git_root() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
-        .arg("--show-root")
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+    let output = run_vecgrep(dir.path(), &["--show-root"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let expected = dir.path().canonicalize().unwrap();
     assert_eq!(stdout.trim(), expected.display().to_string());
+}
+
+#[test]
+fn test_hybrid_query_requires_hybrid_capable_index_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--index-only"]);
+    assert!(
+        output.status.success(),
+        "initial index failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run_vecgrep(dir.path(), &["--hybrid", "timeout retry"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("--reindex --hybrid"),
+        "expected hybrid-capability hint, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_reindex_hybrid_builds_hybrid_capable_index_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    assert!(
+        output.status.success(),
+        "hybrid reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(index.is_hybrid_capable().unwrap());
+}
+
+#[test]
+fn test_plain_runs_preserve_hybrid_capability_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    assert!(output.status.success());
+
+    let output = run_vecgrep(dir.path(), &["timeout retry"]);
+    assert!(
+        output.status.success(),
+        "plain query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(index.is_hybrid_capable().unwrap());
+}
+
+#[test]
+fn test_plain_reindex_preserves_existing_hybrid_capability_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    assert!(output.status.success());
+
+    let output = run_vecgrep(dir.path(), &["--reindex"]);
+    assert!(
+        output.status.success(),
+        "plain reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(index.is_hybrid_capable().unwrap());
+}
+
+#[test]
+fn test_clear_cache_then_plain_reindex_drops_hybrid_capability_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    assert!(output.status.success());
+
+    let output = run_vecgrep(dir.path(), &["--clear-cache", "timeout retry"]);
+    assert!(
+        output.status.success(),
+        "clear-cache run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run_vecgrep(dir.path(), &["--reindex"]);
+    assert!(
+        output.status.success(),
+        "plain reindex after clear-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(!index.is_hybrid_capable().unwrap());
 }
 
 #[test]
@@ -698,6 +806,7 @@ fn test_search_with_non_default_embedding_dim() {
         embedding_dim: dim,
         chunk_size: 500,
         chunk_overlap: 100,
+        hybrid: false,
     };
     index.rebuild_for_config(&config).unwrap();
 

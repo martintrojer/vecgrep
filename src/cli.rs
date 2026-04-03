@@ -76,6 +76,10 @@ pub struct Args {
     #[arg(long)]
     pub json: bool,
 
+    /// Combine vector search with lexical search.
+    #[arg(long)]
+    pub hybrid: bool,
+
     /// Tokens per chunk.
     #[arg(long)]
     pub chunk_size: Option<usize>,
@@ -175,6 +179,52 @@ pub struct Args {
     pub open_cmd: Option<String>,
 }
 
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            query: None,
+            paths: vec![".".to_string()],
+            query_flag: None,
+            top_k: None,
+            threshold: None,
+            interactive: false,
+            file_type: None,
+            file_type_not: None,
+            glob: None,
+            reindex: false,
+            full_index: false,
+            index_only: false,
+            stats: false,
+            clear_cache: false,
+            json: false,
+            hybrid: false,
+            chunk_size: None,
+            chunk_overlap: None,
+            quiet: false,
+            hidden: false,
+            skip_vcs: false,
+            follow: false,
+            files_with_matches: false,
+            count: false,
+            ignore_file: None,
+            no_ignore: false,
+            max_depth: None,
+            type_list: false,
+            color: None,
+            pretty: false,
+            index_warn_threshold: None,
+            show_root: false,
+            embedder_url: None,
+            embedder_model: None,
+            serve: false,
+            port: None,
+            skip_outside_root: false,
+            no_scope: false,
+            open_cmd: None,
+        }
+    }
+}
+
 /// Hardcoded defaults for config-overridable fields.
 /// These match the spec's `config {}` block defaults.
 pub const DEFAULT_TOP_K: usize = 10;
@@ -209,12 +259,22 @@ mod tests {
         assert_eq!(args.threshold, None);
         assert_eq!(args.color, None);
         assert_eq!(args.index_warn_threshold, None);
+        assert!(!args.hybrid);
     }
 
     #[test]
     fn explicit_cli_values_are_some() {
-        let args = Args::parse_from(["vecgrep", "--top-k", "5", "--chunk-size", "128", "needle"]);
+        let args = Args::parse_from([
+            "vecgrep",
+            "--top-k",
+            "5",
+            "--chunk-size",
+            "128",
+            "--hybrid",
+            "needle",
+        ]);
         assert_eq!(args.top_k, Some(5));
         assert_eq!(args.chunk_size, Some(128));
+        assert!(args.hybrid);
     }
 }

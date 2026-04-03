@@ -55,6 +55,7 @@ pub fn run_streaming(
         initial_query,
         args.top_k.unwrap(),
         args.threshold.unwrap(),
+        args.hybrid,
         cwd_suffix,
         &path_scopes,
         args.open_cmd.as_deref(),
@@ -74,6 +75,7 @@ fn event_loop(
     initial_query: &str,
     top_k: usize,
     threshold: f32,
+    hybrid: bool,
     cwd_suffix: &Path,
     path_scopes: &[String],
     open_cmd: Option<&str>,
@@ -102,7 +104,7 @@ fn event_loop(
 
     // Initial search
     if !query.is_empty() {
-        active_request_id = Some(worker.search(&query, top_k, threshold));
+        active_request_id = Some(worker.search(&query, top_k, threshold, hybrid));
         searching = true;
         active_search_trigger = SearchTrigger::UserInput;
         pending_search = SearchTrigger::None;
@@ -360,7 +362,7 @@ fn event_loop(
             && !query.is_empty()
         {
             active_search_trigger = pending_search;
-            active_request_id = Some(worker.search(&query, top_k, threshold));
+            active_request_id = Some(worker.search(&query, top_k, threshold, hybrid));
             searching = true;
             pending_search = SearchTrigger::None;
             last_selected = None;

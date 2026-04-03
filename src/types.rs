@@ -17,7 +17,7 @@ pub struct Chunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub chunk: Chunk,
-    /// Cosine similarity score (0.0–1.0).
+    /// Ranking score (0.0–1.0).
     pub score: f32,
 }
 
@@ -42,4 +42,5 @@ pub struct IndexConfig {
     pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+    pub hybrid: bool,
 }
