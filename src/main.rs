@@ -255,6 +255,7 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
         invocation.args.chunk_overlap.unwrap(),
         BATCH_SIZE,
         &invocation.path_plan.cwd_suffix,
+        &invocation.path_plan.project_root,
         Some(stream_progress),
     );
 
@@ -563,15 +564,15 @@ fn resolve_query_flag(args: &mut Args) {
     }
 }
 
-fn build_search_scope(arg_paths: &[String], cwd_suffix: &Path) -> SearchScope {
+fn build_search_scope(arg_paths: &[String], cwd_suffix: &Path, project_root: &Path) -> SearchScope {
     let explicit_paths: Vec<String> = arg_paths
         .iter()
         .filter(|p| Path::new(p).is_file())
-        .map(|p| paths::to_project_relative(p, cwd_suffix))
+        .map(|p| paths::to_project_relative(p, cwd_suffix, project_root))
         .collect();
     let path_scopes: Vec<String> = arg_paths
         .iter()
-        .map(|p| paths::to_project_relative(p, cwd_suffix))
+        .map(|p| paths::to_project_relative(p, cwd_suffix, project_root))
         .filter(|p| !p.is_empty())
         .collect();
     SearchScope {
@@ -712,7 +713,11 @@ fn run() -> Result<bool> {
     let search_scope = if invocation.args.no_scope {
         SearchScope::default()
     } else {
-        build_search_scope(&invocation.args.paths, &invocation.path_plan.cwd_suffix)
+        build_search_scope(
+            &invocation.args.paths,
+            &invocation.path_plan.cwd_suffix,
+            &invocation.path_plan.project_root,
+        )
     };
 
     match invocation.run_mode {
@@ -843,7 +848,8 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        let mut indexer = pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), None);
+        let mut indexer =
+            pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), Path::new(""), None);
 
         let outcome =
             drain_initial_indexing(&mut indexer, &mut embedder, &idx, false, 1, false, || {
@@ -945,7 +951,8 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = std::sync::mpsc::sync_channel(1);
-        let mut indexer = pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), None);
+        let mut indexer =
+            pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), Path::new(""), None);
         indexer.all_paths = vec!["live.rs".to_string()];
         indexer.indexed_count = 1;
         indexer.indexed_chunks = 1;
@@ -1008,7 +1015,8 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = std::sync::mpsc::sync_channel(1);
-        let mut indexer = pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), None);
+        let mut indexer =
+            pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), Path::new(""), None);
         indexer.all_paths = vec!["src/live.rs".to_string()];
 
         finish_indexing(

@@ -282,6 +282,53 @@ fn test_hybrid_query_returns_ranked_results_in_binary() {
 }
 
 #[test]
+fn test_hybrid_query_after_hybrid_reindex_does_not_reindex_or_remove_all_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("exact.rs"),
+        "pub struct IndexConfig {\n    pub hybrid: bool,\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("other.rs"),
+        "pub fn helper() { println!(\"hello\"); }\n",
+    )
+    .unwrap();
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    assert!(
+        output.status.success(),
+        "hybrid reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run_vecgrep(
+        dir.path(),
+        &["--json", "--threshold", "0.0", "--hybrid", "IndexConfig"],
+    );
+    assert!(
+        output.status.success(),
+        "hybrid query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Index is up to date."),
+        "expected up-to-date index on second run, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Removed "),
+        "unexpected stale-file removal on second run: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Indexed 2/2 files"),
+        "unexpected full reindex on second run: {stderr}"
+    );
+}
+
+#[test]
 fn test_plain_reindex_preserves_existing_hybrid_capability_in_binary() {
     let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
 
