@@ -57,7 +57,7 @@ Returns JSON:
   "indexed": 42,
   "total": 380,
   "chunks": 85,
-  "version": "0.9.1",
+  "version": "0.10.0",
   "root": "/path/to/project",
   "hybrid": false
 }
@@ -68,7 +68,7 @@ Returns JSON:
   "status": "ready",
   "files": 380,
   "chunks": 850,
-  "version": "0.9.1",
+  "version": "0.10.0",
   "root": "/path/to/project",
   "hybrid": false,
   "scope": ["src"]
