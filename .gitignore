@@ -4,3 +4,4 @@
 !.vecgrep/config.toml
 *.onnx
 .DS_Store
+.codex
