@@ -377,6 +377,7 @@ fn benchmark_retrieval() {
     println!();
 
     let vector_metrics = metrics_by_mode.get(RetrievalMode::Vector.label()).unwrap();
+    let hybrid_metrics = metrics_by_mode.get(RetrievalMode::Hybrid.label()).unwrap();
 
     // Quality gates
     assert!(
@@ -397,6 +398,28 @@ fn benchmark_retrieval() {
     assert!(
         vector_metrics.mean_ndcg_10() >= 0.45,
         "NDCG@10 {:.3} too low (expected >= 0.45)",
+        vector_metrics.mean_ndcg_10()
+    );
+    assert!(
+        hybrid_metrics.mean_mrr() >= 0.50,
+        "Hybrid MRR {:.3} too low (expected >= 0.50)",
+        hybrid_metrics.mean_mrr()
+    );
+    assert!(
+        hybrid_metrics.mean_recall_10() >= 0.50,
+        "Hybrid R@10 {:.3} too low (expected >= 0.50)",
+        hybrid_metrics.mean_recall_10()
+    );
+    assert!(
+        hybrid_metrics.mean_mrr() + 0.08 >= vector_metrics.mean_mrr(),
+        "Hybrid MRR {:.3} regressed too far below vector {:.3}",
+        hybrid_metrics.mean_mrr(),
+        vector_metrics.mean_mrr()
+    );
+    assert!(
+        hybrid_metrics.mean_ndcg_10() + 0.08 >= vector_metrics.mean_ndcg_10(),
+        "Hybrid NDCG@10 {:.3} regressed too far below vector {:.3}",
+        hybrid_metrics.mean_ndcg_10(),
         vector_metrics.mean_ndcg_10()
     );
 }

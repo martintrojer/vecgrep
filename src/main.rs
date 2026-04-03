@@ -182,7 +182,7 @@ fn prepare_index(
 ) -> Result<Index> {
     let idx = Index::open(project_root)?;
     let stored_config = idx.stored_config()?;
-    let hybrid_capable = if reindex && invocation.args.hybrid {
+    let hybrid_capable = if reindex && invocation.hybrid_reindex_requested {
         true
     } else {
         stored_config
@@ -1085,6 +1085,36 @@ mod tests {
         assert!(
             !hybrid_query_idx.is_hybrid_capable().unwrap(),
             "query-time --hybrid should not silently upgrade the index"
+        );
+    }
+
+    #[test]
+    fn test_config_hybrid_defaults_query_mode_without_upgrading_reindex() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join(".vecgrep")).unwrap();
+        std::fs::write(dir.path().join(".vecgrep/config.toml"), "hybrid = true\n").unwrap();
+
+        let invocation = make_invocation(&dir, &["vecgrep", "--reindex", "needle"]);
+        assert!(
+            invocation.args.hybrid,
+            "config should still enable query-time hybrid"
+        );
+        assert!(
+            !invocation.hybrid_reindex_requested,
+            "config should not count as an explicit hybrid reindex request"
+        );
+
+        let idx = prepare_index(
+            dir.path(),
+            &Embedder::new_local().unwrap(),
+            &invocation,
+            true,
+        )
+        .unwrap();
+        assert!(
+            !idx.is_hybrid_capable().unwrap(),
+            "plain --reindex should stay vector-only even when config defaults hybrid queries"
         );
     }
 

@@ -28,6 +28,11 @@
 - [ ] Server tests in `serve.rs` share a single `OnceLock` server instance — works because the HTTP API is read-only, but if mutations are added later, tests will need isolation
 - [ ] `test_large_file_multiple_chunks` uses magic-number slack of 60 tokens (`chunker.rs:170`) — bound could be tighter or proportional
 
+## Hybrid Follow-ups
+
+- [ ] Decide whether shared `--threshold` semantics across vector and hybrid modes are acceptable; if yes, document the tradeoff explicitly, otherwise split the threshold behavior per mode
+- [ ] Re-evaluate whether the per-search lexical thread/read-only SQLite connection in the overlap path is worth the added complexity, based on actual latency measurements
+
 ## Future
 - [ ] Consider IVF partitioning for vec0 virtual table if index grows beyond 100K chunks (brute-force KNN is O(n) per query)
 - [ ] `make_relative` in `paths.rs` allocates a `PathBuf` per call — potential micro-optimization if path rewriting appears in profiles
