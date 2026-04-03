@@ -56,6 +56,7 @@ vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxb
 - **[Configuration](doc/CONFIG.md)** — config files, options reference, environment variables
 - **[Server API](doc/SERVER.md)** — HTTP endpoints for IDE integration
 - **[Benchmarks](doc/BENCHMARK.md)** — model comparisons and retrieval accuracy
+- **[Philosophy](doc/PHILOSOPHY.md)**
 
 ## How it works
 
