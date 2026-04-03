@@ -194,18 +194,22 @@ fn event_loop(
         } else {
             format!(" | scope: {}", path_scopes.join(", "))
         };
+        let mode_str = if hybrid { " | mode: hybrid" } else { "" };
 
         let status_text = if let Some(ref err) = search_error {
             err.clone()
         } else if active_search_trigger == SearchTrigger::UserInput {
-            format!("Searching... | {index_status}{scope_str}")
+            format!("Searching... | {index_status}{scope_str}{mode_str}")
         } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
             format!(
-                "{} results | Indexing: {index_status}{scope_str}",
+                "{} results | Indexing: {index_status}{scope_str}{mode_str}",
                 results.len()
             )
         } else {
-            format!("{} results | {index_status}{scope_str}", results.len())
+            format!(
+                "{} results | {index_status}{scope_str}{mode_str}",
+                results.len()
+            )
         };
 
         terminal.draw(|f| {
@@ -219,11 +223,11 @@ fn event_loop(
                 .split(f.area());
 
             let query_block = Paragraph::new(query.as_str())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Query (semantic search) "),
-                )
+                .block(Block::default().borders(Borders::ALL).title(if hybrid {
+                    " Query (hybrid search) "
+                } else {
+                    " Query (semantic search) "
+                }))
                 .style(Style::default().fg(Color::Yellow));
             f.render_widget(query_block, main_chunks[0]);
 

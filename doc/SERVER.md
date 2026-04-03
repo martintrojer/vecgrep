@@ -29,6 +29,7 @@ Returns JSONL (one JSON object per line):
 ```json
 {
   "root": "/path/to/project",
+  "hybrid": false,
   "file": "src/main.rs",
   "start_line": 42,
   "end_line": 58,
@@ -57,7 +58,8 @@ Returns JSON:
   "total": 380,
   "chunks": 85,
   "version": "0.9.1",
-  "root": "/path/to/project"
+  "root": "/path/to/project",
+  "hybrid": false
 }
 ```
 
@@ -68,6 +70,7 @@ Returns JSON:
   "chunks": 850,
   "version": "0.9.1",
   "root": "/path/to/project",
+  "hybrid": false,
   "scope": ["src"]
 }
 ```
@@ -77,6 +80,7 @@ Fields:
 - `total` — `null` while the file walker is still scanning
 - `version` — vecgrep binary version
 - `root` — project root path
+- `hybrid` — whether the server is running hybrid search mode
 - `scope` — active path scopes (omitted when searching the full project)
 
 IDE plugins can poll this to show indexing progress or wait for readiness.
