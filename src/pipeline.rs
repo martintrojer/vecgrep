@@ -80,6 +80,7 @@ pub struct StreamingIndexer {
     chunk_overlap: usize,
     pub(crate) batch_size: usize,
     cwd_suffix: Box<Path>,
+    project_root: Box<Path>,
     stream_progress: Option<Arc<StreamProgress>>,
 }
 
@@ -90,6 +91,7 @@ impl StreamingIndexer {
         chunk_overlap: usize,
         batch_size: usize,
         cwd_suffix: &Path,
+        project_root: &Path,
         stream_progress: Option<Arc<StreamProgress>>,
     ) -> Self {
         Self {
@@ -102,6 +104,7 @@ impl StreamingIndexer {
             chunk_overlap,
             batch_size,
             cwd_suffix: cwd_suffix.into(),
+            project_root: project_root.into(),
             stream_progress,
         }
     }
@@ -157,7 +160,8 @@ impl StreamingIndexer {
                 }
             }
         };
-        file.rel_path = paths::to_project_relative(&file.rel_path, &self.cwd_suffix);
+        file.rel_path =
+            paths::to_project_relative(&file.rel_path, &self.cwd_suffix, &self.project_root);
         self.all_paths.push(file.rel_path.clone());
 
         let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
@@ -837,8 +841,15 @@ mod tests {
         // Simulate walker having sent 1 file
         progress.snapshot(); // just to confirm it works
 
-        let mut indexer =
-            StreamingIndexer::new(rx, 500, 100, 32, std::path::Path::new(""), Some(progress));
+        let mut indexer = StreamingIndexer::new(
+            rx,
+            500,
+            100,
+            32,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            Some(progress),
+        );
 
         let status = indexer.status(0, 0);
         assert_eq!(
@@ -890,8 +901,15 @@ mod tests {
         progress.mark_done();
         drop(tx);
 
-        let indexer =
-            StreamingIndexer::new(rx, 500, 100, 32, std::path::Path::new(""), Some(progress));
+        let indexer = StreamingIndexer::new(
+            rx,
+            500,
+            100,
+            32,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            Some(progress),
+        );
 
         match indexer.status(0, 0) {
             PipelineStatus::Indexing { total, .. } => {
@@ -966,7 +984,15 @@ mod tests {
 
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx); // no files to index
-        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
+        let indexer = StreamingIndexer::new(
+            rx,
+            500,
+            100,
+            1,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
+        );
         EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default())
     }
 
@@ -1018,7 +1044,15 @@ mod tests {
         }
         // Don't drop tx yet — worker thinks indexing is still in progress
 
-        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
+        let indexer = StreamingIndexer::new(
+            rx,
+            500,
+            100,
+            1,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
+        );
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
         // Search should work even while indexing is happening
@@ -1057,7 +1091,15 @@ mod tests {
         }
         drop(tx);
 
-        let indexer = StreamingIndexer::new(rx, 500, 100, 2, std::path::Path::new(""), None);
+        let indexer = StreamingIndexer::new(
+            rx,
+            500,
+            100,
+            2,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
+        );
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
         // Wait for indexing to complete (50 × 50ms = 2.5s max)
@@ -1112,7 +1154,15 @@ mod tests {
 
         let (tx, rx) = mpsc::sync_channel(0);
         drop(tx);
-        let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
+        let indexer = StreamingIndexer::new(
+            rx,
+            500,
+            100,
+            1,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
+        );
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
         let request_id = worker.search("dimension mismatch", 5, 0.0, false);

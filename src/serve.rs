@@ -279,8 +279,15 @@ mod tests {
                 // Create a dummy indexer (no files to index) for run_streaming
                 let (dummy_tx, dummy_rx) = std::sync::mpsc::sync_channel(0);
                 drop(dummy_tx);
-                let indexer =
-                    StreamingIndexer::new(dummy_rx, 500, 100, 1, std::path::Path::new(""), None);
+                let indexer = StreamingIndexer::new(
+                    dummy_rx,
+                    500,
+                    100,
+                    1,
+                    std::path::Path::new(""),
+                    std::path::Path::new(""),
+                    None,
+                );
                 run_streaming(
                     embedder,
                     idx,

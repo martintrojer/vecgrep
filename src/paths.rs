@@ -8,8 +8,13 @@ fn normalize_walker_path(walker_path: &str) -> &str {
 }
 
 /// Convert a walker-relative path to a project-root-relative path.
-pub fn to_project_relative(walker_path: &str, cwd_suffix: &Path) -> String {
+pub fn to_project_relative(walker_path: &str, cwd_suffix: &Path, project_root: &Path) -> String {
     let normalized = normalize_walker_path(walker_path);
+
+    if let Ok(rest) = Path::new(normalized).strip_prefix(project_root) {
+        return rest.to_string_lossy().to_string();
+    }
+
     if normalized == "." || normalized.is_empty() {
         cwd_suffix.to_string_lossy().to_string()
     } else if cwd_suffix.as_os_str().is_empty() {
@@ -79,13 +84,16 @@ mod tests {
 
     #[test]
     fn test_project_relative_empty_suffix_strips_dot_slash() {
-        assert_eq!(to_project_relative("./main.rs", Path::new("")), "main.rs");
+        assert_eq!(
+            to_project_relative("./main.rs", Path::new(""), Path::new("/repo")),
+            "main.rs"
+        );
     }
 
     #[test]
     fn test_project_relative_empty_suffix_no_dot_slash() {
         assert_eq!(
-            to_project_relative("src/main.rs", Path::new("")),
+            to_project_relative("src/main.rs", Path::new(""), Path::new("/repo")),
             "src/main.rs"
         );
     }
@@ -93,7 +101,7 @@ mod tests {
     #[test]
     fn test_project_relative_with_suffix() {
         assert_eq!(
-            to_project_relative("./main.rs", Path::new("src")),
+            to_project_relative("./main.rs", Path::new("src"), Path::new("/repo")),
             "src/main.rs"
         );
     }
@@ -101,19 +109,33 @@ mod tests {
     #[test]
     fn test_project_relative_nested_suffix() {
         assert_eq!(
-            to_project_relative("./mod.rs", Path::new("src/deep")),
+            to_project_relative("./mod.rs", Path::new("src/deep"), Path::new("/repo")),
             "src/deep/mod.rs"
         );
     }
 
     #[test]
     fn test_project_relative_dot_at_root() {
-        assert_eq!(to_project_relative(".", Path::new("")), "");
+        assert_eq!(
+            to_project_relative(".", Path::new(""), Path::new("/repo")),
+            ""
+        );
     }
 
     #[test]
     fn test_project_relative_dot_in_subdir() {
-        assert_eq!(to_project_relative(".", Path::new("src")), "src");
+        assert_eq!(
+            to_project_relative(".", Path::new("src"), Path::new("/repo")),
+            "src"
+        );
+    }
+
+    #[test]
+    fn test_project_relative_strips_absolute_project_root_prefix() {
+        assert_eq!(
+            to_project_relative("/repo/src/main.rs", Path::new(""), Path::new("/repo")),
+            "src/main.rs"
+        );
     }
 
     // --- to_cwd_relative ---
