@@ -19,6 +19,14 @@ vecgrep "sorting algorithm" --type rust
 vecgrep -i "authentication"                     # interactive TUI
 ```
 
+Useful search controls:
+
+```bash
+vecgrep -k 20 --threshold 0.35 "retry backoff" ./src
+vecgrep --chunk-size 384 --chunk-overlap 96 "parser state machine"
+vecgrep -t rust -T test -g '*.rs' "index invalidation"
+```
+
 ### Hybrid search
 
 `--hybrid` combines lexical and semantic ranking. It is most useful for short, grep-like queries with strong identifiers, symbols, or exact phrases:
@@ -81,6 +89,12 @@ vecgrep --no-scope "query"                      # search entire project
 - Multiple directories: walks all, updates shared cache, skips stale cleanup.
 - Explicit file paths: cached with an `explicit` flag for fast re-search, excluded from directory-only searches. Cleared when a directory walk rediscovers the file.
 
+If you pass paths from multiple roots, vecgrep fails by default. Use `--skip-outside-root` to ignore the out-of-root ones instead:
+
+```bash
+vecgrep --skip-outside-root "query" ./src ../other-project/file.rs
+```
+
 ## Ignoring files
 
 vecgrep respects `.gitignore` by default. For additional patterns:
@@ -97,6 +111,16 @@ ignore_files = [".vecgrep/ignore"]
 
 Supports the full gitignore pattern language — globs, directory patterns, and negation (`!keep-this.log`). The flag can be specified multiple times.
 
+Traversal-related flags:
+
+```bash
+vecgrep -. "query"                              # include hidden files
+vecgrep --skip-vcs -. "query"                  # include hidden, still skip .git/.hg/.jj
+vecgrep --no-ignore "query"                    # ignore .gitignore/.ignore rules
+vecgrep -L "query"                             # follow symlinks
+vecgrep -d 3 "query"                           # cap traversal depth
+```
+
 ## Index management
 
 ```bash
@@ -110,6 +134,13 @@ vecgrep --show-root                             # print resolved project root
 
 The index is a local cache. It rebuilds automatically when the schema version or embedding model changes. `Holes` are chunks whose remote embedding failed — they exist in the cache but never match queries.
 Hybrid support is sticky once built into the index. A plain `--reindex` preserves that capability; `--clear-cache` followed by a normal reindex drops it.
+
+For interactive and server mode, `--full-index` waits for indexing to finish before starting the UI or HTTP server:
+
+```bash
+vecgrep -i --full-index "query" ./src
+vecgrep --serve --full-index ./src
+```
 
 ## Embedding models
 
@@ -126,3 +157,100 @@ vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxb
 ```
 
 Works with [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible API. Set it once in [config](CONFIG.md) to avoid repeating flags. The index rebuilds automatically when the model changes.
+
+## Interactive and server mode
+
+Use `-i` for the TUI and `--serve` for the HTTP API:
+
+```bash
+vecgrep -i "auth flow" ./src
+vecgrep -i --query "auth flow" $(rg -l "auth" ./src)
+vecgrep --serve ./src
+vecgrep --serve --port 4123 ./src
+```
+
+- `--query` is mainly for `-i` and `--serve`, especially with `xargs`, because it forces all positionals to be treated as paths.
+- `--open-cmd` sets the command used when opening a result from the TUI:
+
+```bash
+vecgrep -i --open-cmd "nvim +{line} {file}" "query"
+vecgrep -i --open-cmd "bat -n --highlight-line {line}:{end_line} {file}" "query"
+```
+
+See also: [Server API](SERVER.md)
+
+## Output and scripting
+
+```bash
+vecgrep --json "retry logic" ./src
+vecgrep --color always "query" | less -R
+vecgrep -p "query" | less -R                  # alias for --color=always
+vecgrep -q "query" ./src                      # suppress progress/status on stderr
+vecgrep --type-list                           # list supported `-t/--type` values
+```
+
+- `--json` emits JSONL with the project `root` included in every record.
+- `--color auto|always|never` controls colored output explicitly.
+- `-p/--pretty` forces color when piping.
+- `-q/--quiet` suppresses indexing and status noise on stderr.
+- `--type-list` prints the file-type names accepted by `-t/--type` and `-T/--type-not`.
+
+## Complete flag reference
+
+Search and ranking:
+
+- `-k, --top-k <N>`: number of top results to return.
+- `--threshold <0.0-1.0>`: minimum similarity score.
+- `--hybrid`: combine semantic and lexical ranking.
+- `--chunk-size <N>`: tokens per chunk.
+- `--chunk-overlap <N>`: overlap between chunks.
+
+Modes and lifecycle:
+
+- `-i, --interactive`: start the TUI.
+- `--serve`: start the HTTP server.
+- `--port <PORT>`: fixed port for `--serve`; otherwise a free port is chosen.
+- `--query <TEXT>`: explicit query for TUI/server mode; all positionals become paths.
+- `--full-index`: finish indexing before opening the TUI/server.
+- `--index-only`: build the index and exit.
+
+Index and cache:
+
+- `--reindex`: force a full rebuild.
+- `--clear-cache`: delete `.vecgrep/index.db`.
+- `--stats`: print index statistics.
+- `--index-warn-threshold <N>`: prompt before indexing more than `N` files; `0` disables the prompt.
+- `--show-root`: print the resolved project root.
+
+Path selection and traversal:
+
+- `-t, --type <NAME>`: include file type; repeatable.
+- `-T, --type-not <NAME>`: exclude file type; repeatable.
+- `-g, --glob <PATTERN>`: include matching paths; repeatable.
+- `-., --hidden`: include hidden files and directories.
+- `--skip-vcs`: still skip `.git`, `.hg`, and `.jj` when using `--hidden`.
+- `--ignore-file <PATH>`: extra gitignore-format ignore file; repeatable.
+- `--no-ignore`: ignore `.gitignore`, `.ignore`, and similar files.
+- `-L, --follow`: follow symlinks.
+- `-d, --max-depth <N>`: limit traversal depth.
+- `--skip-outside-root`: ignore out-of-root paths instead of failing.
+- `--no-scope`: search the full project index instead of the cwd or explicit-path scope.
+
+Output control:
+
+- `-l, --files-with-matches`: print file paths only.
+- `-c, --count`: print count of matching chunks per file.
+- `--json`: emit JSONL.
+- `--color <auto|always|never>`: set color mode.
+- `-p, --pretty`: alias for `--color=always`.
+- `-q, --quiet`: suppress status output on stderr.
+- `--type-list`: print supported file types.
+
+Embedding backend:
+
+- `--embedder-url <URL>`: use an OpenAI-compatible embeddings endpoint.
+- `--embedder-model <NAME>`: model name for `--embedder-url`.
+
+TUI integration:
+
+- `--open-cmd <CMD>`: file opener template for TUI results. Supports `{file}`, `{line}`, and `{end_line}` placeholders.
