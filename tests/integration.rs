@@ -240,6 +240,48 @@ fn test_plain_runs_preserve_hybrid_capability_in_binary() {
 }
 
 #[test]
+fn test_hybrid_query_returns_ranked_results_in_binary() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(
+        dir.path().join("exact.rs"),
+        "pub struct IndexConfig {\n    pub hybrid: bool,\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("semantic.rs"),
+        "pub struct SearchSettings {\n    pub mode: SearchMode,\n}\n",
+    )
+    .unwrap();
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    assert!(
+        output.status.success(),
+        "hybrid reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run_vecgrep(
+        dir.path(),
+        &["--json", "--threshold", "0.0", "--hybrid", "IndexConfig"],
+    );
+    assert!(
+        output.status.success(),
+        "hybrid query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let first_line = stdout.lines().find(|line| !line.trim().is_empty()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(first_line).unwrap();
+    assert_eq!(json["file"], "exact.rs");
+    assert!(
+        json["score"].as_f64().unwrap_or_default() > 0.0,
+        "expected positive hybrid score, got: {json}"
+    );
+}
+
+#[test]
 fn test_plain_reindex_preserves_existing_hybrid_capability_in_binary() {
     let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
 

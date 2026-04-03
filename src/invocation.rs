@@ -34,6 +34,7 @@ pub struct Invocation {
     pub query: String,
     pub run_mode: RunMode,
     pub color_choice: termcolor::ColorChoice,
+    pub hybrid_reindex_requested: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -206,6 +207,7 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
 }
 
 pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
+    let hybrid_reindex_requested = args.hybrid;
     let config = match config::load_config(project_root) {
         Ok(c) => c,
         Err(e) => {
@@ -232,6 +234,7 @@ pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Re
         query,
         run_mode,
         color_choice,
+        hybrid_reindex_requested,
     })
 }
 

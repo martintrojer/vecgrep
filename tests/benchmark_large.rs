@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::{hybrid_fused_score, hybrid_lexical_query};
@@ -32,6 +33,12 @@ const MAX_TEXT_CHARS: usize = 1024;
 struct CachedData {
     corpus: Vec<CorpusDoc>,
     queries: Vec<QueryDoc>,
+    #[serde(default)]
+    complete: bool,
+    #[serde(default)]
+    expected_corpus_size: usize,
+    #[serde(default)]
+    language_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -231,9 +238,11 @@ fn download_dataset() -> CachedData {
 
     let mut corpus = Vec::new();
     let mut queries = Vec::new();
+    let mut language_counts = BTreeMap::new();
 
     let code_languages = ["python", "javascript", "go"];
     let per_lang = TARGET_CODE_SIZE / code_languages.len();
+    let mut complete = true;
 
     for lang in &code_languages {
         let pairs = fetch_pages(
@@ -258,6 +267,16 @@ fn download_dataset() -> CachedData {
             },
         );
 
+        if pairs.len() < per_lang {
+            complete = false;
+            eprintln!(
+                "Warning: downloaded only {} of {} requested {} examples.",
+                pairs.len(),
+                per_lang,
+                lang
+            );
+        }
+
         for (code, doc, lang) in pairs {
             let idx = corpus.len();
             corpus.push(CorpusDoc {
@@ -268,6 +287,7 @@ fn download_dataset() -> CachedData {
                 text: doc,
                 relevant_idx: idx,
             });
+            *language_counts.entry(corpus[idx].kind.clone()).or_insert(0) += 1;
         }
     }
 
@@ -277,7 +297,17 @@ fn download_dataset() -> CachedData {
         queries.len()
     );
 
-    CachedData { corpus, queries }
+    if corpus.len() < TARGET_CODE_SIZE {
+        complete = false;
+    }
+
+    CachedData {
+        corpus,
+        queries,
+        complete,
+        expected_corpus_size: TARGET_CODE_SIZE,
+        language_counts,
+    }
 }
 
 fn load_or_download() -> CachedData {
@@ -285,7 +315,17 @@ fn load_or_download() -> CachedData {
     if path.exists() {
         eprintln!("Loading cached dataset from {}...", path.display());
         let data = std::fs::read_to_string(&path).unwrap();
-        return serde_json::from_str(&data).unwrap();
+        let mut cached: CachedData = serde_json::from_str(&data).unwrap();
+        if cached.expected_corpus_size == 0 {
+            cached.expected_corpus_size = TARGET_CODE_SIZE;
+        }
+        if cached.language_counts.is_empty() {
+            for doc in &cached.corpus {
+                *cached.language_counts.entry(doc.kind.clone()).or_insert(0) += 1;
+            }
+        }
+        cached.complete = cached.complete || cached.corpus.len() >= TARGET_CODE_SIZE;
+        return cached;
     }
 
     let data = download_dataset();
@@ -435,6 +475,12 @@ fn benchmark_large_scale() {
     for doc in &data.corpus {
         *kind_counts.entry(doc.kind.as_str()).or_default() += 1;
     }
+    if !data.complete {
+        eprintln!(
+            "Warning: benchmark corpus is partial ({} / {} docs). Results are indicative, not canonical.",
+            corpus_size, data.expected_corpus_size
+        );
+    }
 
     eprintln!(
         "\n=== Large-Scale Benchmark ({} queries, {} corpus docs, dim={}) ===",
@@ -548,6 +594,12 @@ fn benchmark_large_scale() {
         println!(
             "  Failures: {} corpus, {} queries",
             total_failed, query_failures
+        );
+    }
+    if !data.complete {
+        println!(
+            "  Dataset: PARTIAL ({} / {} docs cached)",
+            corpus_size, data.expected_corpus_size
         );
     }
     println!("\n  Corpus: {:?}", kind_counts);
