@@ -12,6 +12,11 @@ use crate::paths;
 use crate::types::{SearchResult, SearchScope};
 use crate::walker::{StreamProgress, WalkedFile};
 
+pub enum SearchExecutionError {
+    Embed(anyhow::Error),
+    Search(anyhow::Error),
+}
+
 /// Pipeline state — single source of truth for indexing progress.
 /// Used by CLI spinner, TUI status bar, serve endpoint, and future `/status` API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -254,6 +259,7 @@ enum WorkerRequest {
         query: String,
         top_k: usize,
         threshold: f32,
+        hybrid: bool,
     },
     Shutdown,
 }
@@ -330,7 +336,7 @@ impl EmbedWorker {
     }
 
     /// Send a search request to the worker.
-    pub fn search(&self, query: &str, top_k: usize, threshold: f32) -> u64 {
+    pub fn search(&self, query: &str, top_k: usize, threshold: f32, hybrid: bool) -> u64 {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         self.req_tx
             .send(WorkerRequest::Search {
@@ -338,6 +344,7 @@ impl EmbedWorker {
                 query: query.to_string(),
                 top_k,
                 threshold,
+                hybrid,
             })
             .ok();
         request_id
@@ -377,6 +384,75 @@ impl Drop for EmbedWorker {
     }
 }
 
+pub fn run_search(
+    embedder: &mut Embedder,
+    idx: &Index,
+    query: &str,
+    top_k: usize,
+    threshold: f32,
+    scope: &SearchScope,
+    hybrid: bool,
+) -> std::result::Result<Vec<SearchResult>, SearchExecutionError> {
+    if hybrid
+        && !idx
+            .is_hybrid_capable()
+            .map_err(SearchExecutionError::Search)?
+    {
+        return Err(SearchExecutionError::Search(anyhow::anyhow!(
+            "hybrid search requires a hybrid-capable index; rebuild with --reindex --hybrid"
+        )));
+    }
+
+    let lexical_handle = if hybrid {
+        idx.open_reader()
+            .map_err(SearchExecutionError::Search)?
+            .map(|reader| {
+                let query = query.to_string();
+                let scope = scope.clone();
+                std::thread::spawn(move || reader.search_lexical(&query, top_k * 5, &scope))
+            })
+    } else {
+        None
+    };
+
+    let query_embedding = match embedder.embed(query) {
+        Ok(embedding) => embedding,
+        Err(err) => {
+            if let Some(handle) = lexical_handle {
+                let _ = handle.join();
+            }
+            return Err(SearchExecutionError::Embed(err));
+        }
+    };
+
+    let lexical_results = match lexical_handle {
+        Some(handle) => Some(
+            handle
+                .join()
+                .map_err(|_| {
+                    SearchExecutionError::Search(anyhow::anyhow!("lexical search thread panicked"))
+                })?
+                .map_err(SearchExecutionError::Search)?,
+        ),
+        None => None,
+    };
+
+    if hybrid {
+        idx.search_hybrid(
+            query,
+            &query_embedding,
+            top_k,
+            threshold,
+            scope,
+            lexical_results,
+        )
+        .map_err(SearchExecutionError::Search)
+    } else {
+        idx.search(&query_embedding, top_k, threshold, scope)
+            .map_err(SearchExecutionError::Search)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_search(
     embedder: &mut Embedder,
@@ -385,21 +461,20 @@ fn handle_search(
     query: &str,
     top_k: usize,
     threshold: f32,
+    hybrid: bool,
     scope: &SearchScope,
     result_tx: &mpsc::Sender<SearchOutcome>,
 ) {
-    let outcome = match embedder.embed(query) {
-        Ok(emb) => match idx.search(&emb, top_k, threshold, scope) {
-            Ok(results) => SearchOutcome::Results {
-                request_id,
-                results,
-            },
-            Err(e) => SearchOutcome::SearchError {
-                request_id,
-                message: format!("{e:#}"),
-            },
+    let outcome = match run_search(embedder, idx, query, top_k, threshold, scope, hybrid) {
+        Ok(results) => SearchOutcome::Results {
+            request_id,
+            results,
         },
-        Err(e) => SearchOutcome::EmbedError {
+        Err(SearchExecutionError::Embed(e)) => SearchOutcome::EmbedError {
+            request_id,
+            message: format!("{e:#}"),
+        },
+        Err(SearchExecutionError::Search(e)) => SearchOutcome::SearchError {
             request_id,
             message: format!("{e:#}"),
         },
@@ -421,9 +496,10 @@ fn dispatch_request(
             query,
             top_k,
             threshold,
+            hybrid,
         } => {
             handle_search(
-                embedder, idx, request_id, &query, top_k, threshold, scope, result_tx,
+                embedder, idx, request_id, &query, top_k, threshold, hybrid, scope, result_tx,
             );
             true
         }
@@ -898,7 +974,7 @@ mod tests {
     fn test_worker_search_after_indexing_done() {
         let worker = worker_with_data(&["error handling in rust", "memory management"]);
 
-        let request_id = worker.search("error handling", 5, 0.0);
+        let request_id = worker.search("error handling", 5, 0.0, false);
         let outcome = worker.recv_result_for(request_id).unwrap();
         match outcome {
             SearchOutcome::Results { results, .. } => {
@@ -946,7 +1022,7 @@ mod tests {
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
         // Search should work even while indexing is happening
-        let request_id = worker.search("existing content", 5, 0.0);
+        let request_id = worker.search("existing content", 5, 0.0, false);
         let outcome = worker.recv_result_for(request_id).unwrap();
         match outcome {
             SearchOutcome::Results { results, .. } => {
@@ -1011,7 +1087,7 @@ mod tests {
         let worker = worker_with_data(&["test content"]);
 
         // Verify worker is alive by doing a search
-        let request_id = worker.search("test", 1, 0.0);
+        let request_id = worker.search("test", 1, 0.0, false);
         match worker.recv_result_for(request_id) {
             Some(SearchOutcome::Results { .. }) => {}
             other => panic!("expected Results, got: {other:?}"),
@@ -1030,6 +1106,7 @@ mod tests {
             embedding_dim: 1024,
             chunk_size: 500,
             chunk_overlap: 100,
+            hybrid: false,
         })
         .unwrap();
 
@@ -1038,7 +1115,7 @@ mod tests {
         let indexer = StreamingIndexer::new(rx, 500, 100, 1, std::path::Path::new(""), None);
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
-        let request_id = worker.search("dimension mismatch", 5, 0.0);
+        let request_id = worker.search("dimension mismatch", 5, 0.0, false);
         match worker.recv_result_for(request_id) {
             Some(SearchOutcome::SearchError { message, .. }) => {
                 assert!(
@@ -1049,6 +1126,33 @@ mod tests {
                 );
             }
             other => panic!("expected SearchError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_search_hybrid_requires_hybrid_capable_index() {
+        let mut embedder = Embedder::new_local().unwrap();
+        let idx = Index::open_in_memory().unwrap();
+
+        let err = run_search(
+            &mut embedder,
+            &idx,
+            "error handling",
+            5,
+            0.0,
+            &SearchScope::default(),
+            true,
+        )
+        .unwrap_err();
+
+        match err {
+            SearchExecutionError::Search(message) => {
+                let text = format!("{message:#}");
+                assert!(text.contains("--reindex --hybrid"), "got: {text}");
+            }
+            SearchExecutionError::Embed(message) => {
+                panic!("unexpected embed error: {message:#}");
+            }
         }
     }
 

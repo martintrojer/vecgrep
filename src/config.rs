@@ -12,6 +12,7 @@ pub struct Config {
     pub threshold: Option<f32>,
     pub chunk_size: Option<usize>,
     pub chunk_overlap: Option<usize>,
+    pub hybrid: Option<bool>,
     pub full_index: Option<bool>,
     pub hidden: Option<bool>,
     pub skip_vcs: Option<bool>,
@@ -67,6 +68,7 @@ fn merge(base: Config, override_config: Config) -> Config {
         threshold: override_config.threshold.or(base.threshold),
         chunk_size: override_config.chunk_size.or(base.chunk_size),
         chunk_overlap: override_config.chunk_overlap.or(base.chunk_overlap),
+        hybrid: override_config.hybrid.or(base.hybrid),
         full_index: override_config.full_index.or(base.full_index),
         hidden: override_config.hidden.or(base.hidden),
         skip_vcs: override_config.skip_vcs.or(base.skip_vcs),
@@ -160,6 +162,7 @@ mod tests {
             threshold = 0.25
             chunk_size = 400
             chunk_overlap = 80
+            hybrid = true
             full_index = true
             hidden = true
             follow = false
@@ -179,6 +182,7 @@ mod tests {
         assert_eq!(config.threshold, Some(0.25));
         assert_eq!(config.chunk_size, Some(400));
         assert_eq!(config.chunk_overlap, Some(80));
+        assert_eq!(config.hybrid, Some(true));
         assert_eq!(config.full_index, Some(true));
         assert_eq!(config.hidden, Some(true));
         assert_eq!(config.max_depth, Some(10));
@@ -346,6 +350,7 @@ mod tests {
             threshold: Some(0.1),
             chunk_size: Some(100),
             chunk_overlap: Some(10),
+            hybrid: Some(false),
             full_index: Some(false),
             hidden: Some(false),
             skip_vcs: Some(false),
@@ -371,6 +376,7 @@ mod tests {
             threshold: Some(0.99),
             chunk_size: Some(999),
             chunk_overlap: Some(99),
+            hybrid: Some(true),
             full_index: Some(true),
             hidden: Some(true),
             skip_vcs: Some(true),
@@ -396,6 +402,7 @@ mod tests {
         assert_eq!(merged.threshold, Some(0.99));
         assert_eq!(merged.chunk_size, Some(999));
         assert_eq!(merged.chunk_overlap, Some(99));
+        assert_eq!(merged.hybrid, Some(true));
         assert_eq!(merged.full_index, Some(true));
         assert_eq!(merged.hidden, Some(true));
         assert_eq!(merged.skip_vcs, Some(true));

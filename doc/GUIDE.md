@@ -19,6 +19,21 @@ vecgrep "sorting algorithm" --type rust
 vecgrep -i "authentication"                     # interactive TUI
 ```
 
+### Hybrid search
+
+`--hybrid` combines lexical and semantic ranking. It is most useful for short, grep-like queries with strong identifiers, symbols, or exact phrases:
+
+```bash
+vecgrep --reindex --hybrid ./src               # build a hybrid-capable index
+vecgrep --hybrid "IndexConfig" ./src           # lexical + semantic ranking
+vecgrep --hybrid "timeout error" ./src
+```
+
+- `--hybrid` is query-time behavior, not an automatic index upgrade.
+- A hybrid query against a non-hybrid index fails with a hint to rebuild using `--reindex --hybrid`.
+- Once built, a hybrid-capable index can still serve normal vector-only searches.
+- To go back to a plain vector-only index, clear the cache and rebuild normally.
+
 ### Filtering results
 
 ```bash
@@ -87,12 +102,14 @@ Supports the full gitignore pattern language — globs, directory patterns, and 
 ```bash
 vecgrep --stats                                 # files, chunks, holes, DB size
 vecgrep --reindex ./src                         # force full re-index
+vecgrep --reindex --hybrid ./src                # rebuild with lexical + semantic support
 vecgrep --clear-cache                           # delete cached index
 vecgrep --index-only ./src                      # build index without searching
 vecgrep --show-root                             # print resolved project root
 ```
 
 The index is a local cache. It rebuilds automatically when the schema version or embedding model changes. `Holes` are chunks whose remote embedding failed — they exist in the cache but never match queries.
+Hybrid support is sticky once built into the index. A plain `--reindex` preserves that capability; `--clear-cache` followed by a normal reindex drops it.
 
 ## Embedding models
 

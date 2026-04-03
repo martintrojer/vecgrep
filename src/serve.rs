@@ -36,11 +36,13 @@ fn error_response(status: u16, message: &str) -> Response<std::io::Cursor<Vec<u8
 }
 
 /// Handle a single HTTP request. Returns Ok(()) after responding.
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     request: Request,
     worker: &EmbedWorker,
     default_top_k: usize,
     default_threshold: f32,
+    hybrid: bool,
     root: &str,
     pipeline_status: &PipelineStatus,
     path_scopes: &[String],
@@ -67,6 +69,7 @@ fn handle_request(
             worker,
             default_top_k,
             default_threshold,
+            hybrid,
             root,
         ),
         "/status" => {
@@ -94,6 +97,7 @@ fn handle_search(
     worker: &EmbedWorker,
     default_top_k: usize,
     default_threshold: f32,
+    hybrid: bool,
     root: &str,
 ) -> Result<()> {
     let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
@@ -125,7 +129,7 @@ fn handle_search(
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(default_threshold);
 
-    let request_id = worker.search(&q, top_k, threshold);
+    let request_id = worker.search(&q, top_k, threshold, hybrid);
     match worker.recv_result_for(request_id) {
         Some(SearchOutcome::Results { results, .. }) => {
             let mut body = String::new();
@@ -154,6 +158,7 @@ pub struct ServeConfig<'a> {
     pub port: Option<u16>,
     pub default_top_k: usize,
     pub default_threshold: f32,
+    pub hybrid: bool,
     pub quiet: bool,
     pub root: &'a str,
     pub scope: SearchScope,
@@ -206,6 +211,7 @@ pub fn run_streaming(
             &worker,
             config.default_top_k,
             config.default_threshold,
+            config.hybrid,
             config.root,
             &pipeline_status,
             &path_scopes,
@@ -283,6 +289,7 @@ mod tests {
                         port: Some(port),
                         default_top_k: 10,
                         default_threshold: 0.3,
+                        hybrid: false,
                         quiet: true,
                         root: "/test/root",
                         scope: SearchScope::default(),

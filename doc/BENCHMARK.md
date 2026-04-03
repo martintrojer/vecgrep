@@ -46,9 +46,92 @@ Results from `cargo test --test benchmark_large -- --ignored --nocapture`.
 
 At scale, **all Ollama models beat MiniLM** by ~3 points on MRR. The larger models produce richer representations that discriminate better in a large corpus with many similar-looking distractors. The four Ollama models are remarkably close to each other.
 
+## Hybrid retrieval benchmarks
+
+These compare retrieval modes, not embedding models:
+
+- `vector`: embedding similarity only
+- `lexical`: FTS5/BM25 only
+- `hybrid`: weighted rank fusion of vector + lexical
+
+The current hybrid policy is tuned against the built-in MiniLM model, but the helper logic is shared so the same benchmark structure can be run with external embedders too.
+
+### Small benchmark (122 docs, bundled MiniLM)
+
+Results from `cargo test --test benchmark_models -- --nocapture`.
+
+| Mode | MRR | R@5 | R@10 | NDCG@10 |
+|---|---|---|---|---|
+| `vector` | 0.933 | **0.858** | 0.941 | **0.893** |
+| `lexical` | 0.863 | 0.693 | 0.781 | 0.757 |
+| `hybrid` | **0.948** | 0.827 | **0.944** | 0.889 |
+
+On the curated vecgrep-style benchmark, the current hybrid policy improves MRR and slightly improves R@10 over vector-only while staying close on NDCG. It gives up some R@5.
+
+### Large benchmark (CodeSearchNet, bundled MiniLM)
+
+Results from `cargo test --test benchmark_large -- --ignored --nocapture`.
+
+| Mode | MRR | R@1 | R@5 | R@10 | R@50 | R@100 |
+|---|---|---|---|---|---|---|
+| `vector` | 0.9301 | 0.8930 | 0.9790 | 0.9900 | 0.9970 | 0.9980 |
+| `lexical` | **0.9640** | **0.9380** | **0.9950** | **0.9990** | **1.0000** | **1.0000** |
+| `hybrid` | 0.9455 | 0.9120 | 0.9880 | 0.9960 | 0.9980 | 0.9980 |
+
+On the large docstring-to-code benchmark, lexical retrieval wins outright and hybrid lands between lexical and vector. That means the current hybrid policy is not a universal best mode; it is query/corpus dependent.
+
+One caveat: this cached large benchmark run used a partially skewed CodeSearchNet snapshot after an upstream fetch failure on the JavaScript split, leaving the corpus at 6,092 docs (`python=3000`, `go=3000`, `javascript=92`). Treat the large-mode comparison as useful evidence, not a final universal answer.
+
+### Small benchmark (122 docs, `mxbai-embed-large:latest`)
+
+Results from:
+
+```bash
+VECGREP_EMBEDDER_URL=http://localhost:11434/v1/embeddings \
+VECGREP_EMBEDDER_MODEL=mxbai-embed-large:latest \
+cargo test --test benchmark_models -- --nocapture
+```
+
+| Mode | MRR | R@5 | R@10 | NDCG@10 |
+|---|---|---|---|---|
+| `vector` | **0.946** | **0.805** | **0.914** | **0.875** |
+| `lexical` | 0.863 | 0.693 | 0.781 | 0.757 |
+| `hybrid` | 0.942 | 0.792 | 0.892 | 0.852 |
+
+With `mxbai-embed-large:latest`, the curated small benchmark favors vector-only. The current hybrid weighting is slightly worse than pure vector on all reported metrics.
+
+### Large benchmark (CodeSearchNet, `mxbai-embed-large:latest`)
+
+Results from:
+
+```bash
+VECGREP_EMBEDDER_URL=http://localhost:11434/v1/embeddings \
+VECGREP_EMBEDDER_MODEL=mxbai-embed-large:latest \
+cargo test --test benchmark_large -- --ignored --nocapture
+```
+
+| Mode | MRR | R@1 | R@5 | R@10 | R@50 | R@100 |
+|---|---|---|---|---|---|---|
+| `vector` | 0.9586 | 0.9310 | 0.9940 | 0.9990 | 1.0000 | 1.0000 |
+| `lexical` | 0.9640 | 0.9380 | 0.9950 | 0.9990 | 1.0000 | 1.0000 |
+| `hybrid` | **0.9660** | **0.9420** | **0.9950** | **1.0000** | **1.0000** | **1.0000** |
+
+With `mxbai-embed-large:latest`, the large benchmark favors hybrid. It edges out both vector-only and lexical-only on MRR and R@1, and matches or exceeds them on the higher-k recalls.
+
 ## Analysis
 
 **Scale matters.** MiniLM wins at 122 docs (better separation), but loses at 6,500 docs (weaker representations). The crossover likely happens around 500-1,000 documents.
+
+**Hybrid is not a default winner.** The best retrieval mode depends on both the embedder and the corpus:
+
+- Built-in MiniLM:
+  - small benchmark: `hybrid` beats `vector` on MRR
+  - large benchmark: `lexical` beats both `hybrid` and `vector`
+- `mxbai-embed-large:latest`:
+  - small benchmark: `vector` beats `hybrid`
+  - large benchmark: `hybrid` beats both `vector` and `lexical`
+
+The safe product stance is still to keep `--hybrid` opt-in rather than making it the default.
 
 **Current model choice: all-MiniLM-L6-v2** — best self-contained option. 90 MB embedded in binary, no external dependencies, ~30s to index 6,500 docs. R@5 of 0.977 is excellent for most codebases.
 
@@ -104,3 +187,4 @@ cargo test --test benchmark_models -- --nocapture
 - Documentation strings as queries, code functions as relevant documents
 - All texts truncated to 1024 chars for fair cross-model comparison
 - Measures MRR, R@1, R@5, R@10, R@50, R@100
+- Now supports `vector`, `lexical`, and `hybrid` retrieval mode comparisons for the built-in model benchmark
