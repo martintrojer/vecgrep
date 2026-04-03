@@ -146,6 +146,16 @@ pub fn print_json(results: &[SearchResult], root: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn format_json_result_with_hybrid(
+    result: &SearchResult,
+    root: &str,
+    hybrid: bool,
+) -> serde_json::Value {
+    let mut json = format_json_result(result, root);
+    json["hybrid"] = serde_json::Value::Bool(hybrid);
+    json
+}
+
 /// Format a byte size into a human-readable string.
 pub(crate) fn format_size(bytes: u64) -> String {
     if bytes >= 1_000_000 {

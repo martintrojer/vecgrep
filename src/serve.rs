@@ -6,7 +6,7 @@ use url::Url;
 
 use crate::embedder::Embedder;
 use crate::index::Index;
-use crate::output::format_json_result;
+use crate::output::format_json_result_with_hybrid;
 use crate::pipeline::{EmbedWorker, PipelineStatus, SearchOutcome, StreamingIndexer};
 use crate::types::SearchScope;
 
@@ -76,6 +76,7 @@ fn handle_request(
             let mut status = serde_json::to_value(pipeline_status).unwrap();
             status["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
             status["root"] = serde_json::Value::String(root.to_string());
+            status["hybrid"] = serde_json::Value::Bool(hybrid);
             if !path_scopes.is_empty() {
                 status["scope"] = serde_json::json!(path_scopes);
             }
@@ -134,7 +135,7 @@ fn handle_search(
         Some(SearchOutcome::Results { results, .. }) => {
             let mut body = String::new();
             for result in &results {
-                let json = format_json_result(result, root);
+                let json = format_json_result_with_hybrid(result, root, hybrid);
                 body.push_str(&json.to_string());
                 body.push('\n');
             }
@@ -367,6 +368,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(lines[0]).expect("parse first JSONL response line");
         assert_eq!(json["root"], "/test/root");
+        assert_eq!(json["hybrid"], false);
         assert!(json["file"]
             .as_str()
             .expect("response includes file path")
@@ -477,6 +479,7 @@ mod tests {
             json["root"], "/test/root",
             "expected root field, got: {json}"
         );
+        assert_eq!(json["hybrid"], false, "expected hybrid field, got: {json}");
         // No scope when SearchScope is default (project root)
         assert!(
             json.get("scope").is_none(),
