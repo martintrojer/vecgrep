@@ -32,15 +32,16 @@ vecgrep -t rust -T test -g '*.rs' "index invalidation"
 `--hybrid` combines lexical and semantic ranking. It is most useful for short, grep-like queries with strong identifiers, symbols, or exact phrases:
 
 ```bash
-vecgrep --reindex --hybrid ./src               # build a hybrid-capable index
+vecgrep --reindex --hybrid-index ./src         # build a hybrid-capable index
 vecgrep --hybrid "IndexConfig" ./src           # lexical + semantic ranking
 vecgrep --hybrid "timeout error" ./src
 ```
 
-- `--hybrid` is query-time behavior, not an automatic index upgrade.
-- A hybrid query against a non-hybrid index fails with a hint to rebuild using `--reindex --hybrid`.
-- Once built, a hybrid-capable index can still serve normal vector-only searches.
-- To go back to a plain vector-only index, clear the cache and rebuild normally.
+- `--hybrid` is query-time behavior.
+- `--hybrid-index` controls whether the index stores lexical data for hybrid queries.
+- A hybrid query against a non-hybrid index fails with a hint to rebuild using `--reindex --hybrid-index`.
+- A hybrid-capable index can still serve normal vector-only searches.
+- To go back to a plain vector-only index, rebuild without `--hybrid-index`.
 
 ### Filtering results
 
@@ -126,14 +127,16 @@ vecgrep -d 3 "query"                           # cap traversal depth
 ```bash
 vecgrep --stats                                 # files, chunks, holes, DB size
 vecgrep --reindex ./src                         # force full re-index
-vecgrep --reindex --hybrid ./src                # rebuild with lexical + semantic support
-vecgrep --clear-cache                           # delete cached index
+vecgrep --reindex --hybrid-index ./src          # rebuild with lexical index support
 vecgrep --index-only ./src                      # build index without searching
+vecgrep --index-only --hybrid-index ./src       # build a hybrid-capable index without searching
+vecgrep --clear-cache                           # delete cached index
 vecgrep --show-root                             # print resolved project root
 ```
 
 The index is a local cache. It rebuilds automatically when the schema version or embedding model changes. `Holes` are chunks whose remote embedding failed — they exist in the cache but never match queries.
-Hybrid support is sticky once built into the index. A plain `--reindex` preserves that capability; `--clear-cache` followed by a normal reindex drops it.
+Index capability follows the resolved `hybrid_index` setting. A plain `--reindex` rebuilds to that target configuration instead of preserving old index history.
+Plain search and plain `--index-only` runs preserve an existing hybrid-capable index; they do not downgrade it.
 
 For interactive and server mode, `--full-index` waits for indexing to finish before starting the UI or HTTP server:
 
@@ -202,6 +205,7 @@ Search and ranking:
 - `-k, --top-k <N>`: number of top results to return.
 - `--threshold <0.0-1.0>`: minimum similarity score.
 - `--hybrid`: combine semantic and lexical ranking.
+- `--hybrid-index`: build lexical index support required by hybrid search.
 - `--chunk-size <N>`: tokens per chunk.
 - `--chunk-overlap <N>`: overlap between chunks.
 

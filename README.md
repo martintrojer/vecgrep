@@ -30,6 +30,7 @@ npx skills add martintrojer/vecgrep           # Codex / generic
 
 ```bash
 vecgrep "error handling" ./src                          # search by meaning
+vecgrep --reindex --hybrid-index ./src                 # build lexical index support
 vecgrep --hybrid "IndexConfig" ./src                   # optional lexical + semantic ranking
 vecgrep -i "authentication"                             # interactive TUI
 vecgrep -l "retry logic" | xargs rg "unwrap"            # combine with ripgrep
@@ -45,6 +46,7 @@ vecgrep --embedder-url http://localhost:11434/v1/embeddings --embedder-model mxb
 | **HTTP server** (`--serve`) | `/search` and `/status` endpoints for IDE integration ([vecgrep.nvim](https://github.com/martintrojer/vecgrep.nvim)) |
 | **Path scoping** | Results scoped to requested paths, like ripgrep. `--no-scope` to search entire project |
 | **Hybrid search** (`--hybrid`) | Optional lexical + semantic ranking for grep-like searches |
+| **Hybrid index** (`--hybrid-index`) | Builds lexical index support required by hybrid queries |
 | **File type filters** | `-t rust`, `-T markdown`, `-g "*.rs"` — same flags as ripgrep |
 | **JSONL output** | `--json` for scripting with jq |
 | **Config files** | Project (`.vecgrep/config.toml`) and global (`~/.config/vecgrep/config.toml`) |

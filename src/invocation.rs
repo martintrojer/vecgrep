@@ -34,7 +34,6 @@ pub struct Invocation {
     pub query: String,
     pub run_mode: RunMode,
     pub color_choice: termcolor::ColorChoice,
-    pub hybrid_reindex_requested: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +169,7 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
 
     // Bool flags: CLI flag || config value
     args.hybrid = args.hybrid || config.hybrid.unwrap_or(false);
+    args.hybrid_index = args.hybrid_index || config.hybrid_index.unwrap_or(false);
     args.full_index = args.full_index || config.full_index.unwrap_or(false);
     args.hidden = args.hidden || config.hidden.unwrap_or(false);
     args.skip_vcs = args.skip_vcs || config.skip_vcs.unwrap_or(false);
@@ -207,7 +207,6 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
 }
 
 pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
-    let hybrid_reindex_requested = args.hybrid;
     let config = match config::load_config(project_root) {
         Ok(c) => c,
         Err(e) => {
@@ -234,7 +233,6 @@ pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Re
         query,
         run_mode,
         color_choice,
-        hybrid_reindex_requested,
     })
 }
 
@@ -327,6 +325,7 @@ mod tests {
             "--chunk-overlap",
             "17",
             "--hybrid",
+            "--hybrid-index",
             "--full-index",
             "--quiet",
             "needle",
@@ -335,6 +334,7 @@ mod tests {
         assert_eq!(args.chunk_size, Some(123));
         assert_eq!(args.chunk_overlap, Some(17));
         assert!(args.hybrid);
+        assert!(args.hybrid_index);
         assert!(args.full_index);
         assert!(args.quiet);
         assert_eq!(args.top_k, Some(7));
@@ -351,6 +351,7 @@ mod tests {
             no_ignore: Some(true),
             quiet: Some(true),
             hybrid: Some(true),
+            hybrid_index: Some(true),
             full_index: Some(true),
             color: Some("always".to_string()),
             ..Default::default()
@@ -364,6 +365,7 @@ mod tests {
         assert!(args.no_ignore);
         assert!(args.quiet);
         assert!(args.hybrid);
+        assert!(args.hybrid_index);
         assert!(args.full_index);
         assert_eq!(args.color, Some(ColorChoice::Always));
     }
@@ -400,6 +402,7 @@ mod tests {
         assert!(!args.quiet);
         assert!(!args.hidden);
         assert!(!args.hybrid);
+        assert!(!args.hybrid_index);
     }
 
     #[test]
@@ -409,7 +412,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".vecgrep")).unwrap();
         std::fs::write(
             dir.path().join(".vecgrep/config.toml"),
-            "top_k = 42\nthreshold = 0.15\nquiet = true\nhybrid = true\n",
+            "top_k = 42\nthreshold = 0.15\nquiet = true\nhybrid = true\nhybrid_index = true\n",
         )
         .unwrap();
 
@@ -421,6 +424,7 @@ mod tests {
         assert_eq!(invocation.args.threshold, Some(0.15));
         assert!(invocation.args.quiet);
         assert!(invocation.args.hybrid);
+        assert!(invocation.args.hybrid_index);
     }
 
     #[test]

@@ -182,20 +182,21 @@ fn prepare_index(
 ) -> Result<Index> {
     let idx = Index::open(project_root)?;
     let stored_config = idx.stored_config()?;
-    let hybrid_capable = if reindex && invocation.hybrid_reindex_requested {
-        true
-    } else {
-        stored_config
-            .as_ref()
-            .map(|config| config.hybrid)
-            .unwrap_or(false)
-    };
+    let apply_requested_hybrid_index =
+        reindex || (invocation.args.index_only && invocation.args.hybrid_index);
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
         chunk_size: invocation.args.chunk_size.unwrap(),
         chunk_overlap: invocation.args.chunk_overlap.unwrap(),
-        hybrid: hybrid_capable,
+        hybrid: if apply_requested_hybrid_index {
+            invocation.args.hybrid_index
+        } else {
+            stored_config
+                .as_ref()
+                .map(|config| config.hybrid)
+                .unwrap_or(false)
+        },
     };
 
     let config_valid = idx.check_config(&config)?;
@@ -614,6 +615,22 @@ fn run() -> Result<bool> {
                 )
                 .exit();
         }
+        if args.reindex && args.hybrid {
+            Args::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--hybrid is query-time only and cannot be combined with --reindex; use --hybrid-index instead",
+                )
+                .exit();
+        }
+        if args.hybrid_index && !args.reindex && !args.index_only {
+            Args::command()
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--hybrid-index is only valid with --reindex or --index-only",
+                )
+                .exit();
+        }
         if args.stats && args.query.is_some() {
             Args::command()
                 .error(
@@ -805,7 +822,6 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
-    use vecgrep::cli::ColorChoice;
     use vecgrep::embedder::EMBEDDING_DIM;
     use vecgrep::types::{Chunk, IndexConfig};
 
@@ -1108,10 +1124,6 @@ mod tests {
             invocation.args.hybrid,
             "config should still enable query-time hybrid"
         );
-        assert!(
-            !invocation.hybrid_reindex_requested,
-            "config should not count as an explicit hybrid reindex request"
-        );
 
         let idx = prepare_index(
             dir.path(),
@@ -1127,51 +1139,59 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_index_hybrid_capability_is_sticky_for_plain_runs_and_reindexes() {
+    fn test_config_hybrid_index_upgrades_reindex_target() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join(".vecgrep")).unwrap();
+        std::fs::write(
+            dir.path().join(".vecgrep/config.toml"),
+            "hybrid_index = true\n",
+        )
+        .unwrap();
+
+        let idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex"], true);
+        assert!(idx.is_hybrid_capable().unwrap());
+    }
+
+    #[test]
+    fn test_index_only_hybrid_index_upgrades_target() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
 
-        let hybrid_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex", "--hybrid"], true);
+        let idx =
+            prepare_index_for_args(&dir, &["vecgrep", "--index-only", "--hybrid-index"], false);
+        assert!(idx.is_hybrid_capable().unwrap());
+    }
+
+    #[test]
+    fn test_plain_runs_preserve_hybrid_capability_without_hybrid_index() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        let hybrid_idx =
+            prepare_index_for_args(&dir, &["vecgrep", "--reindex", "--hybrid-index"], true);
         assert!(hybrid_idx.is_hybrid_capable().unwrap());
 
         let plain_idx = prepare_index_for_args(&dir, &["vecgrep", "needle"], false);
-        assert!(plain_idx.is_hybrid_capable().unwrap());
-
-        let plain_reindex_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex"], true);
         assert!(
-            plain_reindex_idx.is_hybrid_capable().unwrap(),
-            "plain reindex should preserve existing hybrid capability"
+            plain_idx.is_hybrid_capable().unwrap(),
+            "plain query runs should preserve existing hybrid capability"
         );
     }
 
     #[test]
-    fn test_clear_cache_then_plain_reindex_drops_hybrid_capability() {
+    fn test_plain_reindex_drops_hybrid_capability_without_hybrid_index() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
 
-        let hybrid_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex", "--hybrid"], true);
+        let hybrid_idx =
+            prepare_index_for_args(&dir, &["vecgrep", "--reindex", "--hybrid-index"], true);
         assert!(hybrid_idx.is_hybrid_capable().unwrap());
-
-        let path_plan = invocation::PathPlan {
-            project_root: dir.path().canonicalize().unwrap(),
-            cwd_suffix: PathBuf::new(),
-            stale_removal_scope: StaleRemovalScope::None,
-        };
-        let clear_args = Args {
-            query: Some("needle".to_string()),
-            clear_cache: true,
-            quiet: true,
-            color: Some(ColorChoice::Auto),
-            ..Default::default()
-        };
-
-        let outcome = handle_pre_execution_actions(&clear_args, &path_plan, true).unwrap();
-        assert_eq!(outcome, None);
 
         let plain_idx = prepare_index_for_args(&dir, &["vecgrep", "--reindex", "needle"], true);
         assert!(
             !plain_idx.is_hybrid_capable().unwrap(),
-            "clear-cache followed by plain reindex should rebuild a vector-only index"
+            "plain reindex should rebuild to the resolved non-hybrid index config"
         );
     }
 }

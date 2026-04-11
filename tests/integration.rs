@@ -201,19 +201,19 @@ fn test_hybrid_query_requires_hybrid_capable_index_in_binary() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("--reindex --hybrid"),
+        stderr.contains("--reindex --hybrid-index"),
         "expected hybrid-capability hint, got: {stderr}"
     );
 }
 
 #[test]
-fn test_reindex_hybrid_builds_hybrid_capable_index_in_binary() {
+fn test_reindex_hybrid_index_builds_hybrid_capable_index_in_binary() {
     let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
 
-    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid-index"]);
     assert!(
         output.status.success(),
-        "hybrid reindex failed: {}",
+        "hybrid-index reindex failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -222,16 +222,70 @@ fn test_reindex_hybrid_builds_hybrid_capable_index_in_binary() {
 }
 
 #[test]
-fn test_plain_runs_preserve_hybrid_capability_in_binary() {
+fn test_index_only_hybrid_index_builds_hybrid_capable_index_in_binary() {
     let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
 
-    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    let output = run_vecgrep(dir.path(), &["--index-only", "--hybrid-index"]);
+    assert!(
+        output.status.success(),
+        "hybrid-index index-only failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(index.is_hybrid_capable().unwrap());
+}
+
+#[test]
+fn test_reindex_with_config_hybrid_index_builds_hybrid_capable_index() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+    std::fs::create_dir(dir.path().join(".vecgrep")).unwrap();
+    std::fs::write(
+        dir.path().join(".vecgrep/config.toml"),
+        "hybrid_index = true\n",
+    )
+    .unwrap();
+
+    let output = run_vecgrep(dir.path(), &["--reindex"]);
+    assert!(
+        output.status.success(),
+        "config-driven reindex failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(index.is_hybrid_capable().unwrap());
+}
+
+#[test]
+fn test_plain_runs_preserve_hybrid_capability_without_hybrid_index_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid-index"]);
     assert!(output.status.success());
 
     let output = run_vecgrep(dir.path(), &["timeout retry"]);
     assert!(
         output.status.success(),
         "plain query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let index = Index::open(dir.path()).unwrap();
+    assert!(index.is_hybrid_capable().unwrap());
+}
+
+#[test]
+fn test_index_only_preserves_hybrid_capability_without_hybrid_index_in_binary() {
+    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
+
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid-index"]);
+    assert!(output.status.success());
+
+    let output = run_vecgrep(dir.path(), &["--index-only"]);
+    assert!(
+        output.status.success(),
+        "plain index-only failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -254,10 +308,10 @@ fn test_hybrid_query_returns_ranked_results_in_binary() {
     )
     .unwrap();
 
-    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid-index"]);
     assert!(
         output.status.success(),
-        "hybrid reindex failed: {}",
+        "hybrid-index reindex failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -282,7 +336,7 @@ fn test_hybrid_query_returns_ranked_results_in_binary() {
 }
 
 #[test]
-fn test_hybrid_query_after_hybrid_reindex_does_not_reindex_or_remove_all_files() {
+fn test_hybrid_query_after_hybrid_index_reindex_does_not_reindex_or_remove_all_files() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
     std::fs::write(
@@ -296,10 +350,10 @@ fn test_hybrid_query_after_hybrid_reindex_does_not_reindex_or_remove_all_files()
     )
     .unwrap();
 
-    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid-index"]);
     assert!(
         output.status.success(),
-        "hybrid reindex failed: {}",
+        "hybrid-index reindex failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -329,41 +383,16 @@ fn test_hybrid_query_after_hybrid_reindex_does_not_reindex_or_remove_all_files()
 }
 
 #[test]
-fn test_plain_reindex_preserves_existing_hybrid_capability_in_binary() {
+fn test_plain_reindex_drops_existing_hybrid_capability_without_hybrid_index_in_binary() {
     let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
 
-    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
+    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid-index"]);
     assert!(output.status.success());
 
     let output = run_vecgrep(dir.path(), &["--reindex"]);
     assert!(
         output.status.success(),
         "plain reindex failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let index = Index::open(dir.path()).unwrap();
-    assert!(index.is_hybrid_capable().unwrap());
-}
-
-#[test]
-fn test_clear_cache_then_plain_reindex_drops_hybrid_capability_in_binary() {
-    let dir = init_repo_with_file("main.rs", "fn timeout_retry() { handle_timeout(); }");
-
-    let output = run_vecgrep(dir.path(), &["--reindex", "--hybrid"]);
-    assert!(output.status.success());
-
-    let output = run_vecgrep(dir.path(), &["--clear-cache", "timeout retry"]);
-    assert!(
-        output.status.success(),
-        "clear-cache run failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let output = run_vecgrep(dir.path(), &["--reindex"]);
-    assert!(
-        output.status.success(),
-        "plain reindex after clear-cache failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -609,6 +638,40 @@ fn test_reindex_rejects_query() {
     assert!(
         !output.status.success(),
         "expected --reindex to reject positional args"
+    );
+}
+
+#[test]
+fn test_reindex_rejects_query_time_hybrid_flag() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn hello() {}\n").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--reindex", "--hybrid"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "expected --reindex --hybrid to be rejected"
+    );
+}
+
+#[test]
+fn test_query_rejects_hybrid_index_flag() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn hello() {}\n").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
+        .args(["--hybrid-index", "hello"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "expected query-time --hybrid-index to be rejected"
     );
 }
 
