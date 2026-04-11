@@ -19,6 +19,7 @@ embedder_model = "mxbai-embed-large"
 top_k = 20
 threshold = 0.25
 hybrid = true
+hybrid_index = true
 
 # File discovery
 hidden = true
@@ -45,13 +46,14 @@ file_type = ["rust", "python"]
 
 Project-level config is useful for per-repo settings (e.g., a different model or chunk size). Global config sets your personal defaults.
 
-`hybrid = true` sets the default search mode, but it does not silently upgrade an existing index. Build a hybrid-capable index explicitly with:
+`hybrid = true` sets the default query mode. `hybrid_index = true` controls whether the index stores the lexical structures required for hybrid search. Build a hybrid-capable index explicitly with:
 
 ```bash
-vecgrep --reindex --hybrid
+vecgrep --reindex --hybrid-index
+vecgrep --index-only --hybrid-index
 ```
 
-If you later want to drop the lexical side of the index, clear the cache and rebuild without `--hybrid`.
+If you later want to drop the lexical side of the index, rebuild without `--hybrid-index` (or set `hybrid_index = false`).
 
 ## Options reference
 
@@ -66,6 +68,7 @@ Options:
   -k, --top-k <N>              Number of results [default: 10]
       --threshold <F>           Minimum similarity 0.0-1.0 [default: 0.2]
       --hybrid                 Combine vector search with lexical search
+      --hybrid-index           Build lexical index structures for hybrid search
   -i, --interactive             Interactive TUI mode
   -t, --type <TYPE>             Filter by file type (rust, python, js, ...)
   -T, --type-not <TYPE>         Exclude file type

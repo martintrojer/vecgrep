@@ -403,7 +403,7 @@ pub fn run_search(
             .map_err(SearchExecutionError::Search)?
     {
         return Err(SearchExecutionError::Search(anyhow::anyhow!(
-            "hybrid search requires a hybrid-capable index; rebuild with --reindex --hybrid"
+            "hybrid search requires a hybrid-capable index; rebuild with --reindex --hybrid-index"
         )));
     }
 
@@ -1198,7 +1198,7 @@ mod tests {
         match err {
             SearchExecutionError::Search(message) => {
                 let text = format!("{message:#}");
-                assert!(text.contains("--reindex --hybrid"), "got: {text}");
+                assert!(text.contains("--reindex --hybrid-index"), "got: {text}");
             }
             SearchExecutionError::Embed(message) => {
                 panic!("unexpected embed error: {message:#}");

@@ -80,6 +80,10 @@ pub struct Args {
     #[arg(long)]
     pub hybrid: bool,
 
+    /// Build and maintain lexical index structures required for hybrid search.
+    #[arg(long)]
+    pub hybrid_index: bool,
+
     /// Tokens per chunk.
     #[arg(long)]
     pub chunk_size: Option<usize>,
@@ -198,6 +202,7 @@ impl Default for Args {
             clear_cache: false,
             json: false,
             hybrid: false,
+            hybrid_index: false,
             chunk_size: None,
             chunk_overlap: None,
             quiet: false,
@@ -260,6 +265,7 @@ mod tests {
         assert_eq!(args.color, None);
         assert_eq!(args.index_warn_threshold, None);
         assert!(!args.hybrid);
+        assert!(!args.hybrid_index);
     }
 
     #[test]
@@ -271,10 +277,12 @@ mod tests {
             "--chunk-size",
             "128",
             "--hybrid",
+            "--hybrid-index",
             "needle",
         ]);
         assert_eq!(args.top_k, Some(5));
         assert_eq!(args.chunk_size, Some(128));
         assert!(args.hybrid);
+        assert!(args.hybrid_index);
     }
 }
