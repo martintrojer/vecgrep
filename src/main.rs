@@ -502,16 +502,17 @@ fn move_query_to_paths(args: &mut Args) {
 /// positional args as paths. If a positional query was also parsed, move
 /// it into paths. This makes `| xargs vecgrep -i --query "search"` work:
 /// xargs-appended files become paths, the query is explicit.
-fn resolve_query_flag(args: &mut Args) {
+///
+/// Returns a clap::Error instead of calling `.exit()` so the caller is in
+/// charge of process termination (lets us unit-test the validation logic).
+fn resolve_query_flag(args: &mut Args) -> Result<(), clap::Error> {
     if let Some(q) = args.query_flag.take() {
         use clap::error::ErrorKind;
         if !args.interactive && !args.serve {
-            Args::command()
-                .error(
-                    ErrorKind::MissingRequiredArgument,
-                    "--query requires --interactive (-i) or --serve",
-                )
-                .exit();
+            return Err(Args::command().error(
+                ErrorKind::MissingRequiredArgument,
+                "--query requires --interactive (-i) or --serve",
+            ));
         }
         // With --query, all positionals are paths. This handles the xargs
         // case: `| xargs vecgrep -i --query "search" file1.rs file2.rs`
@@ -519,6 +520,46 @@ fn resolve_query_flag(args: &mut Args) {
         move_query_to_paths(args);
         args.query = Some(q);
     }
+    Ok(())
+}
+
+/// Run all post-parse argument-conflict checks. Returns a clap::Error so the
+/// caller decides when to terminate the process; previously these called
+/// `.exit()` inline, which made them untestable.
+fn validate_cli_args(args: &Args) -> Result<(), clap::Error> {
+    use clap::error::ErrorKind;
+    // --reindex always rebuilds from project root; it takes no query or paths.
+    if args.reindex && (args.query.is_some() || args.paths != ["."]) {
+        return Err(Args::command().error(
+            ErrorKind::ArgumentConflict,
+            "--reindex does not accept a query or paths (it always rebuilds from the project root)",
+        ));
+    }
+    if args.reindex && args.hybrid {
+        return Err(Args::command().error(
+            ErrorKind::ArgumentConflict,
+            "--hybrid is query-time only and cannot be combined with --reindex; use --hybrid-index instead",
+        ));
+    }
+    if args.hybrid_index && !args.reindex && !args.index_only {
+        return Err(Args::command().error(
+            ErrorKind::ArgumentConflict,
+            "--hybrid-index is only valid with --reindex or --index-only",
+        ));
+    }
+    if args.stats && args.query.is_some() {
+        return Err(Args::command().error(
+            ErrorKind::ArgumentConflict,
+            "--stats cannot be combined with a query",
+        ));
+    }
+    if args.no_scope && args.paths != ["."] {
+        return Err(Args::command().error(
+            ErrorKind::ArgumentConflict,
+            "--no-scope cannot be combined with explicit paths",
+        ));
+    }
+    Ok(())
 }
 
 fn build_search_scope(arg_paths: &[String], cwd_suffix: &Path, project_root: &Path) -> SearchScope {
@@ -547,57 +588,17 @@ fn run() -> Result<bool> {
 
     let mut args = Args::parse();
 
-    resolve_query_flag(&mut args);
+    // Both helpers return clap::Error rather than calling .exit() so they
+    // are unit-testable. We forward to .exit() here so the user-visible
+    // behavior (styled error + exit code 2) is unchanged.
+    resolve_query_flag(&mut args).unwrap_or_else(|e| e.exit());
 
     // --index-only never searches, so all positionals are paths.
     if args.index_only {
         move_query_to_paths(&mut args);
     }
 
-    {
-        use clap::error::ErrorKind;
-        // --reindex always rebuilds from project root; it takes no query or paths.
-        if args.reindex && (args.query.is_some() || args.paths != ["."]) {
-            Args::command()
-                .error(
-                    ErrorKind::ArgumentConflict,
-                    "--reindex does not accept a query or paths (it always rebuilds from the project root)",
-                )
-                .exit();
-        }
-        if args.reindex && args.hybrid {
-            Args::command()
-                .error(
-                    ErrorKind::ArgumentConflict,
-                    "--hybrid is query-time only and cannot be combined with --reindex; use --hybrid-index instead",
-                )
-                .exit();
-        }
-        if args.hybrid_index && !args.reindex && !args.index_only {
-            Args::command()
-                .error(
-                    ErrorKind::ArgumentConflict,
-                    "--hybrid-index is only valid with --reindex or --index-only",
-                )
-                .exit();
-        }
-        if args.stats && args.query.is_some() {
-            Args::command()
-                .error(
-                    ErrorKind::ArgumentConflict,
-                    "--stats cannot be combined with a query",
-                )
-                .exit();
-        }
-        if args.no_scope && args.paths != ["."] {
-            Args::command()
-                .error(
-                    ErrorKind::ArgumentConflict,
-                    "--no-scope cannot be combined with explicit paths",
-                )
-                .exit();
-        }
-    }
+    validate_cli_args(&args).unwrap_or_else(|e| e.exit());
 
     if args.type_list {
         walker::print_type_list();
@@ -780,6 +781,33 @@ mod tests {
     use tempfile::TempDir;
     use vecgrep::embedder::EMBEDDING_DIM;
     use vecgrep::types::{Chunk, IndexConfig};
+
+    #[test]
+    fn resolve_query_flag_rejects_query_without_interactive_or_serve() {
+        let mut args = Args::parse_from(["vecgrep", "--query", "needle"]);
+        let err = resolve_query_flag(&mut args).expect_err("expected clap error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn resolve_query_flag_accepts_query_with_interactive() {
+        let mut args = Args::parse_from(["vecgrep", "-i", "--query", "needle"]);
+        resolve_query_flag(&mut args).expect("--query should be valid with -i");
+        assert_eq!(args.query.as_deref(), Some("needle"));
+    }
+
+    #[test]
+    fn validate_cli_args_rejects_reindex_with_query() {
+        let args = Args::parse_from(["vecgrep", "--reindex", "needle"]);
+        let err = validate_cli_args(&args).expect_err("expected clap error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn validate_cli_args_accepts_plain_query() {
+        let args = Args::parse_from(["vecgrep", "needle"]);
+        validate_cli_args(&args).expect("plain query should validate");
+    }
 
     fn make_chunk(file_path: &str, text: &str) -> Chunk {
         Chunk {
