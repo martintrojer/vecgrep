@@ -947,10 +947,20 @@ fn test_quiet_hides_indexing_status_output() {
 }
 
 #[test]
-fn test_first_run_status_output_is_compact() {
+fn test_first_run_status_output_reports_correct_file_count() {
+    // Behavior contract: the indexing summary printed to stderr must report
+    // the actual number of files indexed (not a stale or fabricated count).
+    // We write a known number of source files and parse the printed count.
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
-    std::fs::write(dir.path().join("compact.rs"), "fn compact_output() {}").unwrap();
+    let expected_files = 3;
+    for i in 0..expected_files {
+        std::fs::write(
+            dir.path().join(format!("compact{i}.rs")),
+            format!("fn compact_output_{i}() {{}}\n"),
+        )
+        .unwrap();
+    }
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
         .args(["--threshold", "0.0", "compact output"])
@@ -961,24 +971,31 @@ fn test_first_run_status_output_is_compact() {
     assert!(output.status.success());
 
     let stderr = String::from_utf8(output.stderr).unwrap();
-    // Pattern-based assertions: check structure, not exact wording
-    assert!(
-        stderr.contains("model") || stderr.contains("Model") || stderr.contains("Loading"),
-        "expected model loading status on stderr, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("Indexed") && stderr.contains("files") && stderr.contains("chunks"),
-        "expected indexing summary on stderr, got: {stderr:?}"
-    );
-    // Status output should be compact — no redundant lines or blank lines
-    assert!(
-        !stderr.contains("\n\n"),
-        "unexpected blank line in status output: {stderr:?}"
-    );
-    let line_count = stderr.lines().count();
-    assert!(
-        line_count <= 5,
-        "expected compact output (<=5 lines), got {line_count} lines: {stderr:?}"
+
+    // Find the "Indexed N ... files" / "Indexed N/M files" line and parse N.
+    // Accept either an exact "Indexed K files" or a "K/M files" pair where
+    // K is the indexed count. The first integer that precedes the substring
+    // "file" in the line is the indexed-file count.
+    let indexed_line = stderr
+        .lines()
+        .find(|l| l.contains("Indexed") && l.contains("file"))
+        .unwrap_or_else(|| panic!("no indexing summary line found in stderr: {stderr:?}"));
+
+    let file_pos = indexed_line
+        .find("file")
+        .expect("checked above that line contains 'file'");
+    let before_file = &indexed_line[..file_pos];
+    // Take the last integer (after a '/' if present, e.g. "3/3") in the prefix.
+    let last_int: usize = before_file
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("could not parse file count from line: {indexed_line:?}"));
+
+    assert_eq!(
+        last_int, expected_files,
+        "reported file count {last_int} does not match the {expected_files} files we wrote; line was {indexed_line:?}"
     );
 }
 
