@@ -150,11 +150,24 @@ mod tests {
     #[test]
     fn test_large_file_multiple_chunks() {
         let tokenizer = make_tokenizer();
+        // Chunker budget: each chunk targets `chunk_size` tokens, but lines are
+        // emitted whole. A boundary line crossing the budget can push the
+        // chunk slightly over. We therefore allow a small slack for line
+        // snapping; this constant captures the policy explicitly so future
+        // changes to chunk_size are reflected here.
+        const CHUNK_SIZE: usize = 50;
+        const OVERLAP: usize = 10;
+        // Slack allowance for snapping to a whole line at the budget boundary.
+        // Empirically a single trailing line of typical English/code text adds
+        // < 20% over the budget; we use 20% as a generous-but-tight bound.
+        const LINE_SNAP_SLACK: usize = CHUNK_SIZE / 5; // 20% of CHUNK_SIZE = 10
+        const MAX_CHUNK_TOKENS: usize = CHUNK_SIZE + LINE_SNAP_SLACK; // 60
+
         let lines: Vec<String> = (0..100)
             .map(|i| format!("This is line number {} with some content to fill tokens", i))
             .collect();
         let content = lines.join("\n");
-        let chunks = chunk_file("test.txt", &content, 50, 10, Some(&tokenizer));
+        let chunks = chunk_file("test.txt", &content, CHUNK_SIZE, OVERLAP, Some(&tokenizer));
         assert!(chunks.len() > 1);
 
         // Each chunk's token count should not greatly exceed the budget
@@ -168,11 +181,14 @@ mod tests {
             let line_count = chunk.text.lines().count();
             if line_count > 1 {
                 assert!(
-                    token_count <= 60, // small slack for line-snapping
-                    "chunk lines {}-{} has {} tokens, exceeds budget of 50",
+                    token_count <= MAX_CHUNK_TOKENS,
+                    "chunk lines {}-{} has {} tokens, exceeds budget of {} (= {} + {} line-snap slack)",
                     chunk.start_line,
                     chunk.end_line,
-                    token_count
+                    token_count,
+                    MAX_CHUNK_TOKENS,
+                    CHUNK_SIZE,
+                    LINE_SNAP_SLACK
                 );
             }
         }
