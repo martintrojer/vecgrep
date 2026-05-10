@@ -23,7 +23,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum SearchTrigger {
     None,
     AutoRefresh,
@@ -613,5 +613,147 @@ mod tests {
     fn test_validate_open_cmd_all_valid_placeholders() {
         let warnings = validate_open_cmd("{file} {line} {end_line}");
         assert!(warnings.is_empty());
+    }
+
+    // --- TuiState behavior tests (tr_tui_event_loop_gap) ---
+    //
+    // These cover the testable parts of the TUI without the full
+    // event_loop / pty refactor: state initialization, search outcome
+    // dispatch (including out-of-order request handling), error rendering
+    // in the status bar, and scope display. The bigger pieces called out
+    // by the finding (pty integration test, ratatui TestBackend snapshot)
+    // remain DEFERRED — see the task note.
+
+    use crate::types::{Chunk, SearchResult};
+    use std::path::Path;
+
+    fn mk_result(path: &str, score: f32) -> SearchResult {
+        SearchResult {
+            chunk: Chunk {
+                file_path: path.to_string(),
+                text: "text".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            score,
+        }
+    }
+
+    #[test]
+    fn test_tui_state_initial_query_is_prepopulated() {
+        // Regression target: --query value must be in the input on first
+        // frame (and must NOT be re-typed by an event handler).
+        let st = TuiState::new("hello world");
+        assert_eq!(st.query, "hello world");
+        // Initial state must request a search so the pre-populated query
+        // actually fires.
+        assert_eq!(st.pending_search, SearchTrigger::UserInput);
+        assert!(!st.searching);
+        assert!(st.results.is_empty());
+    }
+
+    #[test]
+    fn test_tui_state_handle_search_outcome_ignores_stale_request() {
+        // Out-of-order arrival: state has active_request_id=2, an outcome
+        // for request_id=1 must be dropped on the floor (no result
+        // overwrite, no state change to searching).
+        let mut st = TuiState::new("q");
+        st.searching = true;
+        st.active_request_id = Some(2);
+        st.results = vec![mk_result("existing.rs", 0.5)];
+        let stale = SearchOutcome::Results {
+            request_id: 1,
+            results: vec![mk_result("stale.rs", 0.9)],
+        };
+        st.handle_search_outcome(stale, Path::new(""));
+        assert!(
+            st.searching,
+            "stale outcome must NOT clear `searching` flag"
+        );
+        assert_eq!(
+            st.results.len(),
+            1,
+            "stale outcome must NOT overwrite results"
+        );
+        assert_eq!(
+            st.results[0].chunk.file_path, "existing.rs",
+            "existing result must remain unchanged"
+        );
+        assert_eq!(
+            st.active_request_id,
+            Some(2),
+            "active_request_id must be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_tui_state_handle_search_outcome_applies_matching_request() {
+        let mut st = TuiState::new("q");
+        st.searching = true;
+        st.active_request_id = Some(7);
+        st.active_search_trigger = SearchTrigger::UserInput;
+        let outcome = SearchOutcome::Results {
+            request_id: 7,
+            results: vec![mk_result("a.rs", 0.8), mk_result("b.rs", 0.5)],
+        };
+        st.handle_search_outcome(outcome, Path::new(""));
+        assert!(!st.searching, "matching outcome must clear `searching`");
+        assert_eq!(st.results.len(), 2);
+        assert_eq!(st.list_state.selected(), Some(0), "first row selected");
+        assert!(st.search_error.is_none());
+        assert_eq!(
+            st.active_search_trigger,
+            SearchTrigger::None,
+            "trigger reset after results arrive"
+        );
+    }
+
+    #[test]
+    fn test_tui_state_handle_search_outcome_renders_error() {
+        let mut st = TuiState::new("q");
+        st.searching = true;
+        st.active_request_id = Some(3);
+        st.results = vec![mk_result("old.rs", 0.5)]; // stale results
+        let outcome = SearchOutcome::EmbedError {
+            request_id: 3,
+            message: "connection refused".to_string(),
+        };
+        st.handle_search_outcome(outcome, Path::new(""));
+        assert!(!st.searching);
+        assert_eq!(
+            st.results.len(),
+            0,
+            "results must be cleared on embed error"
+        );
+        let err = st.search_error.expect("error must be set");
+        assert!(
+            err.contains("Embed error") && err.contains("connection refused"),
+            "error message missing expected text: {err}"
+        );
+    }
+
+    #[test]
+    fn test_tui_state_status_text_includes_scope_and_mode() {
+        let mut st = TuiState::new("q");
+        st.results = vec![mk_result("a.rs", 0.5)];
+        st.pipeline_status = PipelineStatus::Ready {
+            files: 10,
+            chunks: 30,
+        };
+        let text = st.status_text(true, &["src".to_string(), "docs".to_string()]);
+        assert!(text.contains("scope: src, docs"), "missing scope: {text}");
+        assert!(text.contains("mode: hybrid"), "missing mode: {text}");
+        assert!(text.contains("1 results"));
+    }
+
+    #[test]
+    fn test_tui_state_status_text_renders_search_error_directly() {
+        let mut st = TuiState::new("q");
+        st.search_error = Some("Search error: boom".to_string());
+        let text = st.status_text(false, &[]);
+        assert_eq!(
+            text, "Search error: boom",
+            "search error must take precedence over status"
+        );
     }
 }
