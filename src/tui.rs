@@ -383,11 +383,7 @@ fn render_list(
     let items: Vec<ListItem> = results
         .iter()
         .map(|r| {
-            let score_color = match output::score_tier(r.score) {
-                output::ScoreTier::High => Color::Green,
-                output::ScoreTier::Medium => Color::Yellow,
-                output::ScoreTier::Low => Color::Red,
-            };
+            let score_color = output::score_to_color_ratatui(r.score);
             let line = Line::from(vec![
                 Span::styled(
                     format!("[{:.3}] ", r.score),

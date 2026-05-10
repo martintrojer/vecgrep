@@ -135,6 +135,15 @@ pub fn score_to_color(score: f32) -> Color {
     }
 }
 
+/// `score_to_color` for ratatui's color type — keeps the tier→color table in one place.
+pub fn score_to_color_ratatui(score: f32) -> ratatui::style::Color {
+    match score_tier(score) {
+        ScoreTier::High => ratatui::style::Color::Green,
+        ScoreTier::Medium => ratatui::style::Color::Yellow,
+        ScoreTier::Low => ratatui::style::Color::Red,
+    }
+}
+
 /// Print results as JSONL for scripting.
 pub fn print_json(results: &[SearchResult], root: &str) -> std::io::Result<()> {
     let stdout = std::io::stdout();
