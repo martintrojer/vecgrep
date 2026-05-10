@@ -79,6 +79,7 @@ Options:
   -l, --files-with-matches      Print only file paths with matches
   -c, --count                   Print count of matching chunks per file
   -., --hidden                  Search hidden files and directories
+      --skip-vcs                Skip VCS directories (.git, .hg, .jj) even when --hidden is set
   -L, --follow                  Follow symbolic links
   -d, --max-depth <N>           Limit directory traversal depth
       --ignore-file <PATH>      Additional ignore file (gitignore syntax, repeatable)
