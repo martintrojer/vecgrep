@@ -988,6 +988,7 @@ mod tests {
                 &[make_chunk("live.rs", "fn live() {}")],
                 std::slice::from_ref(&embedding),
                 &[false],
+                false,
             )
             .unwrap();
         index
@@ -997,6 +998,7 @@ mod tests {
                 &[make_chunk("stale.rs", "fn stale() {}")],
                 std::slice::from_ref(&embedding),
                 &[false],
+                false,
             )
             .unwrap();
 
@@ -1043,6 +1045,7 @@ mod tests {
                 &[make_chunk("src/live.rs", "fn live() {}")],
                 std::slice::from_ref(&embedding),
                 &[false],
+                false,
             )
             .unwrap();
         index
@@ -1052,6 +1055,7 @@ mod tests {
                 &[make_chunk("src/stale.rs", "fn stale() {}")],
                 std::slice::from_ref(&embedding),
                 &[false],
+                false,
             )
             .unwrap();
         index
@@ -1061,6 +1065,7 @@ mod tests {
                 &[make_chunk("tests/keep.rs", "fn keep() {}")],
                 std::slice::from_ref(&embedding),
                 &[false],
+                false,
             )
             .unwrap();
 

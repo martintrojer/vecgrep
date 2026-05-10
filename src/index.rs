@@ -340,28 +340,10 @@ impl Index {
     }
 
     /// Insert or update a file and its chunks.
+    /// `explicit` marks files that came from a direct file path (not a
+    /// directory walk); they are skipped by stale removal and excluded from
+    /// search by default.
     pub fn upsert_file(
-        &self,
-        path: &str,
-        content_hash: &str,
-        chunks: &[Chunk],
-        embeddings: &[Vec<f32>],
-        embedding_failed: &[bool],
-    ) -> Result<()> {
-        self.upsert_file_with_explicit(
-            path,
-            content_hash,
-            chunks,
-            embeddings,
-            embedding_failed,
-            false,
-        )
-    }
-
-    /// Insert or update a file and its chunks, with an explicit flag.
-    /// Explicit files (from direct file paths, not directory walks) are
-    /// cleaned up on subsequent directory walks.
-    pub fn upsert_file_with_explicit(
         &self,
         path: &str,
         content_hash: &str,
@@ -1021,7 +1003,14 @@ mod tests {
         let embeddings = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
 
         index
-            .upsert_file("test.rs", "abc123", &chunks, &embeddings, &[false, false])
+            .upsert_file(
+                "test.rs",
+                "abc123",
+                &chunks,
+                &embeddings,
+                &[false, false],
+                false,
+            )
             .unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 2);
@@ -1052,7 +1041,7 @@ mod tests {
         }];
         let emb_v1 = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1, &[false])
+            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1, &[false], false)
             .unwrap();
 
         let chunks_v2 = vec![Chunk {
@@ -1063,7 +1052,7 @@ mod tests {
         }];
         let emb_v2 = vec![make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2, &[false])
+            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2, &[false], false)
             .unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 1);
@@ -1097,7 +1086,14 @@ mod tests {
         let embeddings = vec![make_test_embedding(dim, 1.0)];
 
         index
-            .upsert_file("notes.rs", "hash-lex", &chunks, &embeddings, &[false])
+            .upsert_file(
+                "notes.rs",
+                "hash-lex",
+                &chunks,
+                &embeddings,
+                &[false],
+                false,
+            )
             .unwrap();
 
         let results = index
@@ -1129,7 +1125,7 @@ mod tests {
         }];
         let emb_v1 = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1, &[false])
+            .upsert_file("a.rs", "hash1", &chunks_v1, &emb_v1, &[false], false)
             .unwrap();
 
         let chunks_v2 = vec![Chunk {
@@ -1140,7 +1136,7 @@ mod tests {
         }];
         let emb_v2 = vec![make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2, &[false])
+            .upsert_file("a.rs", "hash2", &chunks_v2, &emb_v2, &[false], false)
             .unwrap();
 
         let old_results = index
@@ -1202,7 +1198,7 @@ mod tests {
         }];
         let embeddings = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("test.rs", "myhash", &chunks, &embeddings, &[false])
+            .upsert_file("test.rs", "myhash", &chunks, &embeddings, &[false], false)
             .unwrap();
 
         assert_eq!(
@@ -1226,7 +1222,7 @@ mod tests {
             }];
             let emb = vec![make_test_embedding(dim, 1.0)];
             index
-                .upsert_file(name, "hash", &chunks, &emb, &[false])
+                .upsert_file(name, "hash", &chunks, &emb, &[false], false)
                 .unwrap();
         }
 
@@ -1250,7 +1246,7 @@ mod tests {
             }];
             let emb = vec![make_test_embedding(dim, 1.0)];
             index
-                .upsert_file(name, "hash", &chunks, &emb, &[false])
+                .upsert_file(name, "hash", &chunks, &emb, &[false], false)
                 .unwrap();
         }
 
@@ -1274,7 +1270,7 @@ mod tests {
         }];
         let embeddings = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("test.rs", "hash", &chunks, &embeddings, &[false])
+            .upsert_file("test.rs", "hash", &chunks, &embeddings, &[false], false)
             .unwrap();
         index
             .set_config(&IndexConfig {
@@ -1325,10 +1321,17 @@ mod tests {
             },
         ];
         index
-            .upsert_file("a.rs", "h1", &chunks[0..1], &[emb1.clone()], &[false])
+            .upsert_file(
+                "a.rs",
+                "h1",
+                &chunks[0..1],
+                &[emb1.clone()],
+                &[false],
+                false,
+            )
             .unwrap();
         index
-            .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2], &[false])
+            .upsert_file("b.rs", "h2", &chunks[1..2], &[emb2], &[false], false)
             .unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 2);
@@ -1376,7 +1379,7 @@ mod tests {
         ];
         let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, true])
+            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, true], false)
             .unwrap();
 
         let stats = index.stats().unwrap();
@@ -1407,7 +1410,7 @@ mod tests {
         ];
         let emb = vec![make_test_embedding(dim, 1.0), make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, true])
+            .upsert_file("a.rs", "hash", &chunks, &emb, &[false, true], false)
             .unwrap();
 
         let stats = index.stats().unwrap();
@@ -1439,7 +1442,7 @@ mod tests {
 
         let emb = vec![make_test_embedding(dim, 1.0), vec![0.0; dim]];
         index
-            .upsert_file("a.rs", "hash1", &chunks, &emb, &[false, true])
+            .upsert_file("a.rs", "hash1", &chunks, &emb, &[false, true], false)
             .unwrap();
         assert_eq!(index.stats().unwrap().failed_chunk_count, 1);
 
@@ -1457,6 +1460,7 @@ mod tests {
                 &replacement_chunks,
                 &replacement_emb,
                 &[false],
+                false,
             )
             .unwrap();
 
@@ -1481,7 +1485,14 @@ mod tests {
             end_line: 1,
         }];
         index
-            .upsert_file("exact.rs", "h0", &chunks_exact, &[query.clone()], &[false])
+            .upsert_file(
+                "exact.rs",
+                "h0",
+                &chunks_exact,
+                &[query.clone()],
+                &[false],
+                false,
+            )
             .unwrap();
 
         // Insert several other embeddings
@@ -1500,6 +1511,7 @@ mod tests {
                     &chunks,
                     &[emb],
                     &[false],
+                    false,
                 )
                 .unwrap();
         }
@@ -1543,6 +1555,7 @@ mod tests {
                     &chunks,
                     &emb,
                     &[false],
+                    false,
                 )
                 .unwrap();
         }
@@ -1578,7 +1591,7 @@ mod tests {
         }];
         let emb = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("a.rs", "h", &chunks, &emb, &[false])
+            .upsert_file("a.rs", "h", &chunks, &emb, &[false], false)
             .unwrap();
 
         // Use a very different query and high threshold
@@ -1611,7 +1624,7 @@ mod tests {
         }];
         let emb = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("a.rs", "h1", &chunks, &emb, &[false])
+            .upsert_file("a.rs", "h1", &chunks, &emb, &[false], false)
             .unwrap();
         assert_eq!(index.chunk_count().unwrap(), 1);
 
@@ -1634,7 +1647,7 @@ mod tests {
         }];
         let emb2 = vec![make_test_embedding(dim, 2.0)];
         index
-            .upsert_file("b.rs", "h2", &chunks2, &emb2, &[false])
+            .upsert_file("b.rs", "h2", &chunks2, &emb2, &[false], false)
             .unwrap();
 
         let results = index
@@ -1665,7 +1678,7 @@ mod tests {
             }];
             let emb = vec![make_test_embedding(dim, *seed)];
             index
-                .upsert_file(name, "hash", &chunks, &emb, &[false])
+                .upsert_file(name, "hash", &chunks, &emb, &[false], false)
                 .unwrap();
         }
         assert_eq!(index.chunk_count().unwrap(), 2);
@@ -1680,7 +1693,7 @@ mod tests {
         }];
         let emb = vec![make_test_embedding(dim, 3.0)];
         index
-            .upsert_file("a.rs", "hash2", &chunks, &emb, &[false])
+            .upsert_file("a.rs", "hash2", &chunks, &emb, &[false], false)
             .unwrap();
         assert_eq!(index.chunk_count().unwrap(), 2);
         assert_eq!(vec_count(&index), 2);
@@ -1732,7 +1745,7 @@ mod tests {
         // This would fail with dimension mismatch if rebuild_for_config
         // didn't recreate vec_chunks with the correct dimension.
         index
-            .upsert_file("test.rs", "hash", &chunks, &emb, &[false])
+            .upsert_file("test.rs", "hash", &chunks, &emb, &[false], false)
             .unwrap();
 
         assert_eq!(index.chunk_count().unwrap(), 1);
@@ -1764,7 +1777,7 @@ mod tests {
         }];
         let emb = vec![make_test_embedding(dim, 1.0)];
         index
-            .upsert_file("old.rs", "hash1", &chunks, &emb, &[false])
+            .upsert_file("old.rs", "hash1", &chunks, &emb, &[false], false)
             .unwrap();
         assert_eq!(index.chunk_count().unwrap(), 1);
 
@@ -1806,10 +1819,11 @@ mod tests {
                 }],
                 &[emb_normal.clone()],
                 &[false],
+                false,
             )
             .unwrap();
         index
-            .upsert_file_with_explicit(
+            .upsert_file(
                 "secret.log",
                 "h2",
                 &[Chunk {
@@ -1824,7 +1838,7 @@ mod tests {
             )
             .unwrap();
         index
-            .upsert_file_with_explicit(
+            .upsert_file(
                 "other.log",
                 "h3",
                 &[Chunk {
@@ -1899,10 +1913,11 @@ mod tests {
                 }],
                 &[emb.clone()],
                 &[false],
+                false,
             )
             .unwrap();
         index
-            .upsert_file_with_explicit(
+            .upsert_file(
                 "cached.log",
                 "h2",
                 &[Chunk {
@@ -1936,7 +1951,7 @@ mod tests {
 
         // Add a file as explicit
         index
-            .upsert_file_with_explicit(
+            .upsert_file(
                 "main.rs",
                 "h1",
                 &[Chunk {
@@ -1989,7 +2004,7 @@ mod tests {
             end_line: 1,
         };
         index
-            .upsert_file("old.rs", "hash", &[chunk], &[emb], &[false])
+            .upsert_file("old.rs", "hash", &[chunk], &[emb], &[false], false)
             .unwrap();
         assert_eq!(index.file_count().unwrap(), 1);
 
@@ -2026,7 +2041,14 @@ mod tests {
                 end_line: 1,
             };
             index
-                .upsert_file(path, &format!("hash-{path}"), &[chunk], &[emb], &[false])
+                .upsert_file(
+                    path,
+                    &format!("hash-{path}"),
+                    &[chunk],
+                    &[emb],
+                    &[false],
+                    false,
+                )
                 .unwrap();
         }
 

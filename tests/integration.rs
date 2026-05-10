@@ -67,6 +67,7 @@ fn test_index_and_search_roundtrip() {
             &chunks[0..2],
             &embeddings[0..2],
             &[false, false],
+            false,
         )
         .unwrap();
 
@@ -78,6 +79,7 @@ fn test_index_and_search_roundtrip() {
             &chunks[2..3],
             &embeddings[2..3],
             &[false],
+            false,
         )
         .unwrap();
 
@@ -115,7 +117,7 @@ fn test_incremental_indexing() {
     }];
     let emb_a = vec![make_embedding(dim, 1.0)];
     index
-        .upsert_file("a.rs", "hash_a_v1", &chunk_a, &emb_a, &[false])
+        .upsert_file("a.rs", "hash_a_v1", &chunk_a, &emb_a, &[false], false)
         .unwrap();
 
     // Index file b.rs
@@ -127,7 +129,7 @@ fn test_incremental_indexing() {
     }];
     let emb_b = vec![make_embedding(dim, 2.0)];
     index
-        .upsert_file("b.rs", "hash_b", &chunk_b, &emb_b, &[false])
+        .upsert_file("b.rs", "hash_b", &chunk_b, &emb_b, &[false], false)
         .unwrap();
 
     // Verify both are present
@@ -148,7 +150,7 @@ fn test_incremental_indexing() {
 
     // Re-index only a.rs
     index
-        .upsert_file("a.rs", "hash_a_v2", &chunk_a_v2, &emb_a_v2, &[false])
+        .upsert_file("a.rs", "hash_a_v2", &chunk_a_v2, &emb_a_v2, &[false], false)
         .unwrap();
 
     // Verify: still 2 chunks total
@@ -986,6 +988,7 @@ fn test_search_with_non_default_embedding_dim() {
             &chunks[0..1],
             &embeddings[0..1],
             &[false],
+            false,
         )
         .unwrap();
     index
@@ -995,6 +998,7 @@ fn test_search_with_non_default_embedding_dim() {
             &chunks[1..2],
             &embeddings[1..2],
             &[false],
+            false,
         )
         .unwrap();
 
@@ -1032,7 +1036,14 @@ fn test_stats_reports_holes() {
     let embeddings = vec![make_embedding(dim, 1.0), vec![0.0; dim]];
 
     index
-        .upsert_file("mixed.rs", "hash1", &chunks, &embeddings, &[false, true])
+        .upsert_file(
+            "mixed.rs",
+            "hash1",
+            &chunks,
+            &embeddings,
+            &[false, true],
+            false,
+        )
         .unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vecgrep"))
