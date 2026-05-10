@@ -604,4 +604,54 @@ fn benchmark_large_scale() {
     }
     println!("\n  Corpus: {:?}", kind_counts);
     println!();
+
+    // --- Minimum quality gates (tr_bench_large_no_assert).
+    // These exist so a catastrophic regression (cosine sign flipped, lexical
+    // index broken, hybrid scorer returning constants) cannot pass the
+    // benchmark with green check. The bounds are deliberately loose so noise
+    // does not cause flakes, but tight enough to flag total breakage.
+    assert!(corpus_size > 0, "corpus must be non-empty");
+    assert!(
+        evaluated > 0,
+        "at least one query must be evaluated (got {evaluated})"
+    );
+    assert!(
+        corpus_embeddings.len() > total_failed,
+        "successful embeddings must outnumber failures: {} succeeded, {} failed",
+        corpus_embeddings.len() - total_failed,
+        total_failed
+    );
+    let vec_mrr = metrics_by_mode
+        .get(RetrievalMode::Vector.label())
+        .unwrap()
+        .mean_mrr();
+    let lex_mrr = metrics_by_mode
+        .get(RetrievalMode::Lexical.label())
+        .unwrap()
+        .mean_mrr();
+    let hyb_mrr = metrics_by_mode
+        .get(RetrievalMode::Hybrid.label())
+        .unwrap()
+        .mean_mrr();
+    // Each mode must beat random (~1/corpus_size). We use a loose floor of
+    // 0.05 — well above noise for any sane retriever, well below normal
+    // values (0.3+) so we don't fight model variance.
+    const MIN_MRR: f32 = 0.05;
+    assert!(
+        vec_mrr >= MIN_MRR,
+        "vector MRR {vec_mrr:.4} below floor {MIN_MRR} — ranking likely broken"
+    );
+    assert!(
+        lex_mrr >= MIN_MRR,
+        "lexical MRR {lex_mrr:.4} below floor {MIN_MRR} — lexical index likely broken"
+    );
+    // Hybrid must not be strictly worse than BOTH vector and lexical: at a
+    // minimum it should match the better of the two within reasonable
+    // slack. A regression where hybrid scoring returns garbage would fall
+    // here.
+    let best_single = vec_mrr.max(lex_mrr);
+    assert!(
+        hyb_mrr >= best_single * 0.5,
+        "hybrid MRR {hyb_mrr:.4} is less than half the best single-mode MRR {best_single:.4} — hybrid scoring likely broken"
+    );
 }
