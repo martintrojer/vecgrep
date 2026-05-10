@@ -177,14 +177,6 @@ where
 
 /// Walk the given paths, sending discovered files through a channel.
 /// Returns the count of files sent. If the receiver is dropped, exits gracefully.
-pub fn walk_paths_streaming(
-    paths: &[String],
-    opts: &WalkOptions,
-    sender: std::sync::mpsc::Sender<WalkedFile>,
-) -> Result<usize> {
-    walk_paths_streaming_with_progress(paths, opts, sender, Arc::new(StreamProgress::new()))
-}
-
 pub fn walk_paths_streaming_with_progress(
     paths: &[String],
     opts: &WalkOptions,
@@ -698,8 +690,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let paths_clone = paths.clone();
         let opts2 = default_opts();
-        let handle =
-            std::thread::spawn(move || walk_paths_streaming(&paths_clone, &opts2, tx).unwrap());
+        let handle = std::thread::spawn(move || {
+            walk_paths_streaming_with_progress(
+                &paths_clone,
+                &opts2,
+                tx,
+                Arc::new(StreamProgress::new()),
+            )
+            .unwrap()
+        });
 
         let streamed: Vec<WalkedFile> = rx.into_iter().collect();
         let count = handle.join().unwrap();
@@ -729,7 +728,9 @@ mod tests {
         let opts = default_opts();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || walk_paths_streaming(&paths, &opts, tx));
+        let handle = std::thread::spawn(move || {
+            walk_paths_streaming_with_progress(&paths, &opts, tx, Arc::new(StreamProgress::new()))
+        });
 
         // Receive one then drop the receiver
         let _first = rx.recv();

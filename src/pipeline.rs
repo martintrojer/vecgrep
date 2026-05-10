@@ -681,8 +681,15 @@ mod tests {
         let opts = walker::WalkOptions::default();
 
         let (tx, rx) = mpsc::channel();
-        let handle =
-            std::thread::spawn(move || walker::walk_paths_streaming(&paths, &opts, tx).unwrap());
+        let handle = std::thread::spawn(move || {
+            walker::walk_paths_streaming_with_progress(
+                &paths,
+                &opts,
+                tx,
+                std::sync::Arc::new(walker::StreamProgress::new()),
+            )
+            .unwrap()
+        });
 
         let mut batch: Vec<(WalkedFile, String)> = Vec::new();
         for file in rx.iter() {
