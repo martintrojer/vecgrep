@@ -58,10 +58,13 @@ If you later want to drop the lexical side of the index, rebuild without `--hybr
 ## Options reference
 
 ```
-vecgrep [OPTIONS] <QUERY> [PATHS]...
+vecgrep [OPTIONS] [QUERY] [PATHS]...
 
 Arguments:
-  <QUERY>     Search query (natural language or code snippet)
+  [QUERY]     Search query (natural language or code snippet).
+              Optional when used with --stats, --serve, --interactive,
+              --index-only, --type-list, --show-root, --reindex,
+              --clear-cache, or with --query <TEXT>.
   [PATHS]...  Files or directories to search [default: .]
 
 Options:
