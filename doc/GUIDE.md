@@ -32,7 +32,7 @@ vecgrep -t rust -T test -g '*.rs' "index invalidation"
 `--hybrid` combines lexical and semantic ranking. It is most useful for short, grep-like queries with strong identifiers, symbols, or exact phrases:
 
 ```bash
-vecgrep --reindex --hybrid-index ./src         # build a hybrid-capable index
+vecgrep --reindex --hybrid-index               # build a hybrid-capable index (always rebuilds from the project root)
 vecgrep --hybrid "IndexConfig" ./src           # lexical + semantic ranking
 vecgrep --hybrid "timeout error" ./src
 ```
@@ -126,8 +126,8 @@ vecgrep -d 3 "query"                           # cap traversal depth
 
 ```bash
 vecgrep --stats                                 # files, chunks, holes, DB size
-vecgrep --reindex ./src                         # force full re-index
-vecgrep --reindex --hybrid-index ./src          # rebuild with lexical index support
+vecgrep --reindex                               # force full re-index (always rebuilds from the project root; rejects paths/queries)
+vecgrep --reindex --hybrid-index                # rebuild with lexical index support
 vecgrep --index-only ./src                      # build index without searching
 vecgrep --index-only --hybrid-index ./src       # build a hybrid-capable index without searching
 vecgrep --clear-cache                           # delete cached index
