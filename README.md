@@ -12,7 +12,7 @@ Search your codebase by meaning, not just text. Ask for "error handling for netw
 
 ## Install
 
-Pre-built binaries on the [releases page](https://github.com/mtrojer/vecgrep/releases), or:
+Pre-built binaries on the [releases page](https://github.com/martintrojer/vecgrep/releases), or:
 
 ```bash
 mise use github:martintrojer/vecgrep  # mise
