@@ -1082,6 +1082,83 @@ mod tests {
 
     #[test]
     fn test_worker_search_during_indexing() {
+        // This test guards the search-priority contract documented in
+        // AGENTS.md: "the EmbedWorker prioritizes search requests over
+        // indexing" — a regression that drains the entire indexer queue
+        // before checking for searches must fail this test.
+        //
+        // Strategy: queue many files (so total indexing time is meaningful),
+        // measure end-to-end indexing time, then — in a separate run —
+        // dispatch a search just after queueing the same workload and
+        // measure search latency. Search latency must be far below total
+        // indexing time, proving preemption between WORKER_BATCH_SIZE
+        // batches rather than waiting for indexing to finish.
+        use std::time::Instant;
+
+        // Choose a workload large enough that, without preemption, the
+        // search would have to wait significantly. 80 files × ~5–10ms each
+        // (local embedder) ≈ 0.4–0.8s.
+        const N_FILES: usize = 80;
+        // Minimum number of files we expect to still be in flight when the
+        // search returns; below this the test cannot conclude preemption.
+        const MIN_REMAINING_AT_SEARCH: usize = 10;
+        // Search must return well under the no-preemption worst case. We
+        // pick 60% of measured indexing time as a generous bound: even on
+        // slow hardware this catches a regression that drains the whole
+        // queue first.
+        const SEARCH_LATENCY_FRACTION: f64 = 0.6;
+
+        // ---- Phase 1: measure baseline indexing time without searches.
+        let baseline_indexing = {
+            let embedder = Embedder::new_local().unwrap();
+            let idx = Index::open_in_memory().unwrap();
+            let (tx, rx) = mpsc::sync_channel(N_FILES + 4);
+            for i in 0..N_FILES {
+                tx.send(WalkedFile {
+                    rel_path: format!("base{i}.rs"),
+                    content: format!(
+                        "fn base_function_{i}() {{ let x = {i}; let y = x * 2; println!(\"{{}}\", y); }}"
+                    ),
+                    explicit: false,
+                })
+                .unwrap();
+            }
+            drop(tx);
+            let indexer = StreamingIndexer::new(
+                rx,
+                500,
+                100,
+                1,
+                std::path::Path::new(""),
+                std::path::Path::new(""),
+                None,
+            );
+            let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
+            let start = Instant::now();
+            // Wait for indexing to complete by polling progress.
+            let mut last_seen: Option<PipelineStatus> = None;
+            while start.elapsed() < Duration::from_secs(30) {
+                if let Some(p) = worker.drain_progress() {
+                    last_seen = Some(p);
+                    if matches!(p, PipelineStatus::Ready { .. }) {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(
+                matches!(last_seen, Some(PipelineStatus::Ready { .. })),
+                "baseline indexing did not complete (last status: {last_seen:?})"
+            );
+            start.elapsed()
+        };
+        assert!(
+            baseline_indexing >= Duration::from_millis(50),
+            "baseline indexing too fast ({baseline_indexing:?}) to make latency assertion meaningful; raise N_FILES"
+        );
+
+        // ---- Phase 2: same workload but issue a search immediately and
+        // measure how long it takes to come back.
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
@@ -1096,12 +1173,13 @@ mod tests {
         idx.upsert_file("existing.rs", "hash0", &[chunk], &[emb], &[false], false)
             .unwrap();
 
-        // Create a channel with files to index (keeps worker busy)
-        let (tx, rx) = mpsc::sync_channel(32);
-        for i in 0..10 {
+        let (tx, rx) = mpsc::sync_channel(N_FILES + 4);
+        for i in 0..N_FILES {
             tx.send(WalkedFile {
                 rel_path: format!("new{i}.rs"),
-                content: format!("fn new_function_{i}() {{ }}"),
+                content: format!(
+                    "fn new_function_{i}() {{ let x = {i}; let y = x * 2; println!(\"{{}}\", y); }}"
+                ),
                 explicit: false,
             })
             .unwrap();
@@ -1119,9 +1197,22 @@ mod tests {
         );
         let worker = EmbedWorker::spawn(embedder, idx, indexer, SearchScope::default());
 
-        // Search should work even while indexing is happening
+        // Issue search immediately. Time how long the result takes.
+        let t0 = Instant::now();
         let request_id = worker.search("existing content", 5, 0.0, false);
         let outcome = worker.recv_result_for(request_id).unwrap();
+        let search_latency = t0.elapsed();
+
+        // Sample indexing progress at the moment the search returned to
+        // confirm indexing was in fact still in flight (otherwise the
+        // latency check is meaningless).
+        let progress_at_search = worker.drain_progress();
+        let indexed_at_search = match progress_at_search {
+            Some(PipelineStatus::Indexing { indexed, .. }) => indexed,
+            Some(PipelineStatus::Ready { files, .. }) => files,
+            None => 0,
+        };
+
         match outcome {
             SearchOutcome::Results { results, .. } => {
                 assert!(!results.is_empty(), "search should work during indexing");
@@ -1134,6 +1225,23 @@ mod tests {
                 panic!("unexpected search error: {message}")
             }
         }
+
+        let max_allowed = baseline_indexing.mul_f64(SEARCH_LATENCY_FRACTION);
+        assert!(
+            search_latency < max_allowed,
+            "search latency {search_latency:?} exceeded {fraction_pct}% of baseline indexing time {baseline_indexing:?}; \
+             worker did not preempt indexing. Indexed at search time: {indexed_at_search}/{N_FILES}",
+            fraction_pct = (SEARCH_LATENCY_FRACTION * 100.0) as u32
+        );
+        // Sanity check: confirm indexing was still meaningfully in progress.
+        // (If indexing completed before the search arrived, the latency check
+        // is hollow.) Allow the worker to have processed up to N_FILES -
+        // MIN_REMAINING_AT_SEARCH files.
+        assert!(
+            indexed_at_search + MIN_REMAINING_AT_SEARCH <= N_FILES,
+            "indexing finished too quickly to test preemption: indexed {indexed_at_search}/{N_FILES} files \
+             before search returned. Raise N_FILES."
+        );
 
         drop(tx); // let indexing finish
         drop(worker);
