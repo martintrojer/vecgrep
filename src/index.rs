@@ -111,6 +111,36 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
     })
 }
 
+/// Build the WHERE-clause fragment that filters out rows whose file is
+/// `explicit = 1` unless the path appears in `explicit_paths`. The returned
+/// SQL starts with a leading space and `AND ` so it can be concatenated
+/// directly into a query body.
+///
+/// `next_placeholder_idx` is the 1-based index of the first SQL placeholder
+/// available for the path values (e.g. `3` if `?1` and `?2` are already used).
+/// Returns `(sql_fragment, boxed_params)` ready to be appended to the
+/// caller's existing param list.
+fn build_explicit_filter_clause(
+    explicit_paths: &[String],
+    next_placeholder_idx: usize,
+) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    if explicit_paths.is_empty() {
+        return (" AND f.explicit = 0".to_string(), Vec::new());
+    }
+    let placeholders: Vec<String> = (0..explicit_paths.len())
+        .map(|i| format!("?{}", i + next_placeholder_idx))
+        .collect();
+    let sql = format!(
+        " AND (f.explicit = 0 OR f.path IN ({}))",
+        placeholders.join(", ")
+    );
+    let params: Vec<Box<dyn rusqlite::types::ToSql>> = explicit_paths
+        .iter()
+        .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    (sql, params)
+}
+
 fn hybrid_enabled(conn: &Connection) -> Result<bool> {
     let Some(config_json) = get_meta(conn, "config")? else {
         return Ok(false);
@@ -404,25 +434,6 @@ impl Index {
         })
     }
 
-    const VECTOR_SEARCH_QUERY_NO_EXPLICIT: &str = "\
-        SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
-        FROM vec_chunks v \
-        JOIN chunks c ON c.id = v.chunk_id \
-        JOIN files f ON f.id = c.file_id \
-        WHERE v.embedding MATCH ?1 \
-          AND k = ?2 \
-          AND f.explicit = 0 \
-        ORDER BY v.distance";
-
-    const LEXICAL_SEARCH_QUERY_NO_EXPLICIT: &str = "\
-        SELECT c.text, c.start_line, c.end_line, f.path, bm25(chunks_fts) AS rank \
-        FROM chunks_fts \
-        JOIN chunks c ON c.id = chunks_fts.chunk_id \
-        JOIN files f ON f.id = c.file_id \
-        WHERE chunks_fts MATCH ?1 \
-          AND f.explicit = 0 \
-        ORDER BY rank";
-
     fn search_vector_candidates(
         &self,
         query_embedding: &[f32],
@@ -441,33 +452,23 @@ impl Index {
             candidate_limit * SCOPE_OVERFETCH
         };
 
-        let query = if !explicit_paths.is_empty() {
-            let placeholders: Vec<String> = (0..explicit_paths.len())
-                .map(|i| format!("?{}", i + 3))
-                .collect();
-            format!(
-                "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
-                 FROM vec_chunks v \
-                 JOIN chunks c ON c.id = v.chunk_id \
-                 JOIN files f ON f.id = c.file_id \
-                 WHERE v.embedding MATCH ?1 \
-                   AND k = ?2 \
-                   AND (f.explicit = 0 OR f.path IN ({})) \
-                 ORDER BY v.distance",
-                placeholders.join(", ")
-            )
-        } else {
-            Self::VECTOR_SEARCH_QUERY_NO_EXPLICIT.to_string()
-        };
+        let (filter_sql, mut explicit_params) = build_explicit_filter_clause(explicit_paths, 3);
+        let query = format!(
+            "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
+             FROM vec_chunks v \
+             JOIN chunks c ON c.id = v.chunk_id \
+             JOIN files f ON f.id = c.file_id \
+             WHERE v.embedding MATCH ?1 \
+               AND k = ?2{filter_sql} \
+             ORDER BY v.distance"
+        );
         let mut stmt = self.conn.prepare(&query)?;
 
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
             Box::new(query_embedding.as_bytes().to_vec()),
             Box::new(fetch_k as i64),
         ];
-        for p in explicit_paths {
-            param_values.push(Box::new(p.clone()));
-        }
+        param_values.append(&mut explicit_params);
         let params: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
@@ -506,31 +507,21 @@ impl Index {
             candidate_limit * SCOPE_OVERFETCH
         };
 
-        let query = if !explicit_paths.is_empty() {
-            let placeholders: Vec<String> = (0..explicit_paths.len())
-                .map(|i| format!("?{}", i + 3))
-                .collect();
-            format!(
-                "SELECT c.text, c.start_line, c.end_line, f.path, bm25(chunks_fts) AS rank \
-                 FROM chunks_fts \
-                 JOIN chunks c ON c.id = chunks_fts.chunk_id \
-                 JOIN files f ON f.id = c.file_id \
-                 WHERE chunks_fts MATCH ?1 \
-                   AND (f.explicit = 0 OR f.path IN ({})) \
-                 ORDER BY rank \
-                 LIMIT ?2",
-                placeholders.join(", ")
-            )
-        } else {
-            format!("{} LIMIT ?2", Self::LEXICAL_SEARCH_QUERY_NO_EXPLICIT)
-        };
+        let (filter_sql, mut explicit_params) = build_explicit_filter_clause(explicit_paths, 3);
+        let query = format!(
+            "SELECT c.text, c.start_line, c.end_line, f.path, bm25(chunks_fts) AS rank \
+             FROM chunks_fts \
+             JOIN chunks c ON c.id = chunks_fts.chunk_id \
+             JOIN files f ON f.id = c.file_id \
+             WHERE chunks_fts MATCH ?1{filter_sql} \
+             ORDER BY rank \
+             LIMIT ?2"
+        );
         let mut stmt = self.conn.prepare(&query)?;
 
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
             vec![Box::new(match_query), Box::new(fetch_limit as i64)];
-        for p in explicit_paths {
-            param_values.push(Box::new(p.clone()));
-        }
+        param_values.append(&mut explicit_params);
         let params: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
