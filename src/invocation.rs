@@ -132,48 +132,62 @@ fn pick_clone<T: Clone>(cli: &mut Option<T>, cfg: &Option<T>) {
 }
 
 /// Merge CLI args with config file values: cli > config > hardcoded defaults.
+///
+/// The three macros below encode the resolution rules so each field is named
+/// once per category. Adding a new option still requires touching cli::Args,
+/// config::Config, and one line here — but each line documents the rule it
+/// applies, instead of restating it from scratch.
 pub fn resolve_config(args: &mut Args, config: &config::Config) {
-    // Value fields: cli.or(config).or(default)
-    args.top_k = args.top_k.or(config.top_k).or(Some(DEFAULT_TOP_K));
-    args.threshold = args
-        .threshold
-        .or(config.threshold)
-        .or(Some(DEFAULT_THRESHOLD));
-    args.chunk_size = args
-        .chunk_size
-        .or(config.chunk_size)
-        .or(Some(DEFAULT_CHUNK_SIZE));
-    args.chunk_overlap = args
-        .chunk_overlap
-        .or(config.chunk_overlap)
-        .or(Some(DEFAULT_CHUNK_OVERLAP));
-    args.index_warn_threshold = args
-        .index_warn_threshold
-        .or(config.index_warn_threshold)
-        .or(Some(DEFAULT_INDEX_WARN_THRESHOLD));
+    // Copy field with default: cli.or(config).or(Some(default)).
+    macro_rules! pick_value_default {
+        ($field:ident, $default:expr) => {
+            args.$field = args.$field.or(config.$field).or(Some($default));
+        };
+    }
+    // Copy field, no default: cli.or(config).
+    macro_rules! pick_value {
+        ($field:ident) => {
+            args.$field = args.$field.or(config.$field);
+        };
+    }
+    // Bool flag: cli || config.unwrap_or(false). Args field name and Config
+    // field name match.
+    macro_rules! pick_bool {
+        ($field:ident) => {
+            args.$field = args.$field || config.$field.unwrap_or(false);
+        };
+    }
 
-    // Option fields: cli.or(config)
+    // Value fields: cli.or(config).or(default)
+    pick_value_default!(top_k, DEFAULT_TOP_K);
+    pick_value_default!(threshold, DEFAULT_THRESHOLD);
+    pick_value_default!(chunk_size, DEFAULT_CHUNK_SIZE);
+    pick_value_default!(chunk_overlap, DEFAULT_CHUNK_OVERLAP);
+    pick_value_default!(index_warn_threshold, DEFAULT_INDEX_WARN_THRESHOLD);
+
+    // Option<Copy> and Option<u16> fields: cli.or(config)
+    pick_value!(max_depth);
+    pick_value!(port);
+
+    // Option<owned> fields: cli.or(config.clone())
     pick_clone(&mut args.embedder_url, &config.embedder_url);
     pick_clone(&mut args.embedder_model, &config.embedder_model);
-    args.max_depth = args.max_depth.or(config.max_depth);
     pick_clone(&mut args.open_cmd, &config.open_cmd);
-
-    // Option fields: cli.or(config) — list types
     pick_clone(&mut args.file_type, &config.file_type);
     pick_clone(&mut args.file_type_not, &config.file_type_not);
     pick_clone(&mut args.glob, &config.glob);
-    args.port = args.port.or(config.port);
 
-    // Bool flags: CLI flag || config value
-    args.hybrid = args.hybrid || config.hybrid.unwrap_or(false);
-    args.hybrid_index = args.hybrid_index || config.hybrid_index.unwrap_or(false);
-    args.full_index = args.full_index || config.full_index.unwrap_or(false);
-    args.hidden = args.hidden || config.hidden.unwrap_or(false);
-    args.skip_vcs = args.skip_vcs || config.skip_vcs.unwrap_or(false);
-    args.follow = args.follow || config.follow.unwrap_or(false);
-    args.no_ignore = args.no_ignore || config.no_ignore.unwrap_or(false);
-    args.quiet = args.quiet || config.quiet.unwrap_or(false);
-    args.skip_outside_root = args.skip_outside_root || config.skip_outside_root.unwrap_or(false);
+    // Bool flags: cli || config.unwrap_or(false). Note: args.ignore_file vs
+    // config.ignore_files (additive merge below) is the only naming mismatch.
+    pick_bool!(hybrid);
+    pick_bool!(hybrid_index);
+    pick_bool!(full_index);
+    pick_bool!(hidden);
+    pick_bool!(skip_vcs);
+    pick_bool!(follow);
+    pick_bool!(no_ignore);
+    pick_bool!(quiet);
+    pick_bool!(skip_outside_root);
 
     // Ignore files: additive merge
     if let Some(ref config_files) = config.ignore_files {
