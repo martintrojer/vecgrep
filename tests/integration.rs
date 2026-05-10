@@ -85,13 +85,49 @@ fn test_index_and_search_roundtrip() {
 
     assert_eq!(index.chunk_count().unwrap(), 3);
 
-    // Search with the first embedding as query — should find itself as top match
+    // Search with the first embedding as query — should find itself as top match.
+    // We assert the full result set, the payload of the top match, and the
+    // descending-score ordering. A SQL JOIN bug that swaps the file/text payload
+    // would give the right score but the wrong chunk metadata; an ordering bug
+    // (ascending sort) would put the unrelated chunk first.
+    // Use threshold=-1.0 so all 3 chunks come back regardless of cosine sign.
     let results = index
-        .search(&embeddings[0], 3, 0.0, &SearchScope::default())
+        .search(&embeddings[0], 3, -1.0, &SearchScope::default())
         .unwrap();
-    assert!(!results.is_empty());
-    // The top result should have a very high similarity (close to 1.0)
-    assert!(results[0].score > 0.99);
+    assert_eq!(results.len(), 3, "expected all 3 chunks back");
+    assert!(
+        results[0].score > 0.99,
+        "top score must be ~1.0 for self-match, got {}",
+        results[0].score
+    );
+    assert_eq!(results[0].chunk.file_path, "main.rs");
+    assert_eq!(results[0].chunk.text, "fn main() { println!(\"hello\"); }");
+    assert_eq!(results[0].chunk.start_line, 1);
+    assert!(
+        results[0].score > results[1].score,
+        "results must be in descending score order: results[0]={} > results[1]={}",
+        results[0].score,
+        results[1].score
+    );
+    assert!(
+        results[1].score > results[2].score,
+        "results must be in descending score order: results[1]={} > results[2]={}",
+        results[1].score,
+        results[2].score
+    );
+
+    // Discriminator query: searching with embeddings[2] should surface lib.rs
+    // as the top hit — proves search actually picks the closest vector rather
+    // than always returning the same row (e.g. wrong-row JOIN bug).
+    let results_lib = index
+        .search(&embeddings[2], 3, -1.0, &SearchScope::default())
+        .unwrap();
+    assert_eq!(results_lib[0].chunk.file_path, "lib.rs");
+    assert_eq!(
+        results_lib[0].chunk.text,
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }"
+    );
+    assert!(results_lib[0].score > 0.99);
 }
 
 #[test]
@@ -1004,12 +1040,37 @@ fn test_search_with_non_default_embedding_dim() {
 
     assert_eq!(index.chunk_count().unwrap(), 2);
 
-    // Search should work with the correct dimension
+    // Search should work with the correct dimension.
+    // We assert both rows come back (proving the 1024-dim vector is stored at
+    // full width — a silent truncation to 384 would still self-match but lose
+    // the second row's identity), correct top file_path, and a non-trivial
+    // score gap between rank 0 and rank 1 (a dimension truncation bug would
+    // collapse the gap because both vectors get the same prefix).
+    // threshold=-1.0 → don't filter on score sign; we want both rows back.
     let results = index
-        .search(&embeddings[0], 2, 0.0, &SearchScope::default())
+        .search(&embeddings[0], 2, -1.0, &SearchScope::default())
         .unwrap();
-    assert!(!results.is_empty());
-    assert!(results[0].score > 0.99); // should find itself
+    assert_eq!(results.len(), 2, "both rows must be returned");
+    assert_eq!(results[0].chunk.file_path, "main.rs");
+    assert_eq!(results[1].chunk.file_path, "lib.rs");
+    assert!(
+        results[0].score > 0.99,
+        "self-match score must be ~1.0, got {}",
+        results[0].score
+    );
+    assert!(
+        results[0].score - results[1].score > 0.01,
+        "score gap collapsed (top={}, second={}); 1024-dim vectors may be silently truncated",
+        results[0].score,
+        results[1].score
+    );
+
+    // Discriminator: query with embeddings[1] should now put lib.rs on top.
+    let results_lib = index
+        .search(&embeddings[1], 2, -1.0, &SearchScope::default())
+        .unwrap();
+    assert_eq!(results_lib[0].chunk.file_path, "lib.rs");
+    assert!(results_lib[0].score > 0.99);
 }
 
 #[test]
