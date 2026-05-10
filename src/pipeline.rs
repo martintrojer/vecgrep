@@ -42,10 +42,13 @@ impl PipelineStatus {
         }
     }
 
+    /// Number of files indexed so far (or the final file count once `Ready`).
+    /// Always returns a meaningful count rather than `0` in the `Ready` state
+    /// so callers can use it as a monotonic progress signal.
     pub fn indexed(&self) -> usize {
         match self {
             Self::Indexing { indexed, .. } => *indexed,
-            Self::Ready { .. } => 0,
+            Self::Ready { files, .. } => *files,
         }
     }
 }
