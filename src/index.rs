@@ -2109,4 +2109,203 @@ mod tests {
         assert!(paths.contains(&"tests/b.rs"));
         assert!(paths.contains(&"docs/c.md"));
     }
+
+    /// Helper: insert a one-chunk file at `path` with a deterministic embedding.
+    fn insert_one(index: &Index, path: &str, seed: f32) {
+        let emb = make_test_embedding(EMBEDDING_DIM, seed);
+        let chunk = Chunk {
+            file_path: path.to_string(),
+            text: format!("content of {path}"),
+            start_line: 1,
+            end_line: 1,
+        };
+        index
+            .upsert_file(
+                path,
+                &format!("hash-{path}"),
+                &[chunk],
+                &[emb],
+                &[false],
+                false,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_search_with_path_scope_filters_other_dirs_component_aware() {
+        // path_scopes use component-aware Path::starts_with, so a scope of
+        // "src" must NOT match "src-old/". Regression target: a substring or
+        // String::starts_with implementation that allows "src" to match
+        // "src-old/file.rs" silently.
+        let index = Index::open_in_memory().unwrap();
+        insert_one(&index, "src/a.rs", 1.0);
+        insert_one(&index, "docs/b.rs", 1.1);
+        insert_one(&index, "src-old/c.rs", 1.2);
+
+        let scope = SearchScope {
+            explicit_paths: vec![],
+            path_scopes: vec!["src".to_string()],
+        };
+        let query = make_test_embedding(EMBEDDING_DIM, 1.05);
+        let results = index.search(&query, 10, -1.0, &scope).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+
+        assert!(paths.contains(&"src/a.rs"), "src/a.rs missing: {paths:?}");
+        assert!(
+            !paths.contains(&"docs/b.rs"),
+            "docs/b.rs leaked through scope: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"src-old/c.rs"),
+            "src-old/c.rs matched substring 'src' — Path::starts_with must be component-aware: {paths:?}"
+        );
+        assert_eq!(paths.len(), 1, "expected exactly src/a.rs, got: {paths:?}");
+    }
+
+    #[test]
+    fn test_search_with_multiple_path_scopes() {
+        // Multiple scopes act as a union: a file matches if any scope matches.
+        let index = Index::open_in_memory().unwrap();
+        insert_one(&index, "src/a.rs", 1.0);
+        insert_one(&index, "tests/b.rs", 1.1);
+        insert_one(&index, "docs/c.md", 1.2);
+
+        let scope = SearchScope {
+            explicit_paths: vec![],
+            path_scopes: vec!["src".to_string(), "tests".to_string()],
+        };
+        let query = make_test_embedding(EMBEDDING_DIM, 1.05);
+        let results = index.search(&query, 10, -1.0, &scope).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+
+        assert!(paths.contains(&"src/a.rs"));
+        assert!(paths.contains(&"tests/b.rs"));
+        assert!(!paths.contains(&"docs/c.md"), "docs/c.md leaked: {paths:?}");
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_search_path_scope_with_explicit_paths_interaction() {
+        // explicit_paths is a SQL-level filter (which explicit files appear),
+        // path_scopes is a post-filter (which paths the result must live
+        // under). Both must apply: an explicit file inside the scope appears,
+        // an explicit file outside the scope does not, and a normal file
+        // outside the scope does not.
+        let index = Index::open_in_memory().unwrap();
+
+        // Normal (non-explicit) files
+        insert_one(&index, "src/normal.rs", 1.0);
+        insert_one(&index, "docs/normal.md", 1.1);
+
+        // Explicit file inside the scope
+        let emb_in = make_test_embedding(EMBEDDING_DIM, 1.2);
+        index
+            .upsert_file(
+                "src/explicit_in.rs",
+                "h-in",
+                &[Chunk {
+                    file_path: "src/explicit_in.rs".to_string(),
+                    text: "explicit in src".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb_in],
+                &[true],
+                false,
+            )
+            .unwrap();
+
+        // Explicit file outside the scope
+        let emb_out = make_test_embedding(EMBEDDING_DIM, 1.3);
+        index
+            .upsert_file(
+                "docs/explicit_out.md",
+                "h-out",
+                &[Chunk {
+                    file_path: "docs/explicit_out.md".to_string(),
+                    text: "explicit in docs".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                }],
+                &[emb_out],
+                &[true],
+                false,
+            )
+            .unwrap();
+
+        let scope = SearchScope {
+            // include both explicit files at the SQL level
+            explicit_paths: vec![
+                "src/explicit_in.rs".to_string(),
+                "docs/explicit_out.md".to_string(),
+            ],
+            // but post-filter to src/
+            path_scopes: vec!["src".to_string()],
+        };
+        let query = make_test_embedding(EMBEDDING_DIM, 1.05);
+        let results = index.search(&query, 10, -1.0, &scope).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+
+        assert!(
+            paths.contains(&"src/normal.rs"),
+            "normal src file missing: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"src/explicit_in.rs"),
+            "explicit-in-scope file missing: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"docs/normal.md"),
+            "docs file leaked despite scope: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"docs/explicit_out.md"),
+            "explicit-out-of-scope file leaked: {paths:?}"
+        );
+        assert_eq!(paths.len(), 2, "unexpected results: {paths:?}");
+    }
+
+    #[test]
+    fn test_search_path_scope_fetch_k_overfetch_surfaces_in_scope_match() {
+        // SCOPE_OVERFETCH expands the SQL fetch_k to top_k * SCOPE_OVERFETCH
+        // so that a scoped search can surface a file that ranks below top_k
+        // globally but is still within the overfetch window. Insert two
+        // docs/ files (out of scope) closer to the query than the in-scope
+        // src/ file. With top_k=1 and SCOPE_OVERFETCH=3 we fetch 3 rows
+        // from SQL, so the in-scope file (rank 3 globally) survives the
+        // post-filter and is returned. Without overfetch, the SQL side
+        // would return only the top 1 row (a docs file) and the post-filter
+        // would empty the result set.
+        let index = Index::open_in_memory().unwrap();
+
+        // Two out-of-scope files: insert with seeds equal to and very near
+        // the query seed so they win on cosine similarity.
+        insert_one(&index, "docs/d0.md", 1.0);
+        insert_one(&index, "docs/d1.md", 1.0001);
+        // The in-scope file with a different seed: it ranks third globally.
+        insert_one(&index, "src/wanted.rs", 2.0);
+
+        // Sanity: unscoped search at top_k=1 returns a docs file.
+        let query = make_test_embedding(EMBEDDING_DIM, 1.0);
+        let unscoped = index
+            .search(&query, 1, -1.0, &SearchScope::default())
+            .unwrap();
+        assert!(
+            unscoped[0].chunk.file_path.starts_with("docs/"),
+            "sanity check: globally top-1 is expected to be a docs file, got {:?}",
+            unscoped[0].chunk.file_path
+        );
+
+        let scope = SearchScope {
+            explicit_paths: vec![],
+            path_scopes: vec!["src".to_string()],
+        };
+        let results = index.search(&query, 1, -1.0, &scope).unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["src/wanted.rs"],
+            "overfetch must surface the in-scope file when 2 out-of-scope files outrank it globally; got {paths:?}"
+        );
+    }
 }
