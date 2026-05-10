@@ -1,13 +1,14 @@
+use crate::embedder::chars_to_tokens;
 use crate::types::Chunk;
 use tokenizers::Tokenizer;
 
 /// Estimate token count from text length.
-/// Uses ~2.5 chars/token — URLs, markdown, and code tokenize more densely
-/// than plain English (~4 chars/token). Conservative to avoid exceeding
-/// remote model context limits.
+/// Uses the shared chars-per-token ratio defined in `embedder::mod` —
+/// URLs, markdown, and code tokenize more densely than plain English
+/// (~4 chars/token). Conservative to avoid exceeding remote model context
+/// limits.
 fn estimate_tokens(text: &str) -> usize {
-    // Multiply by 2 then divide by 5 to approximate dividing by 2.5
-    (text.len() * 2).div_ceil(5)
+    chars_to_tokens(text.len())
 }
 
 /// Chunk a file's content into overlapping token-window chunks, snapping to line boundaries.
