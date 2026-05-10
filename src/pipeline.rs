@@ -289,10 +289,11 @@ pub enum SearchOutcome {
 
 impl SearchOutcome {
     pub fn request_id(&self) -> u64 {
-        let (Self::Results { request_id, .. }
-        | Self::SearchError { request_id, .. }
-        | Self::EmbedError { request_id, .. }) = self;
-        *request_id
+        match self {
+            Self::Results { request_id, .. } => *request_id,
+            Self::SearchError { request_id, .. } => *request_id,
+            Self::EmbedError { request_id, .. } => *request_id,
+        }
     }
 }
 
