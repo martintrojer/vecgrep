@@ -596,7 +596,7 @@ pub fn process_batch(
             })
             .collect();
 
-        idx.upsert_file_with_explicit(
+        idx.upsert_file(
             &file.rel_path,
             content_hash,
             &chunks,
@@ -978,6 +978,7 @@ mod tests {
                 &[chunk],
                 &[emb],
                 &[false],
+                false,
             )
             .unwrap();
         }
@@ -1029,7 +1030,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
         };
-        idx.upsert_file("existing.rs", "hash0", &[chunk], &[emb], &[false])
+        idx.upsert_file("existing.rs", "hash0", &[chunk], &[emb], &[false], false)
             .unwrap();
 
         // Create a channel with files to index (keeps worker busy)

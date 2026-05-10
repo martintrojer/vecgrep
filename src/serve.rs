@@ -273,6 +273,7 @@ mod tests {
                         &[chunk.clone()],
                         &[emb.clone()],
                         &[false],
+                        false,
                     )
                     .expect("insert fixture chunk into test index");
                 }
