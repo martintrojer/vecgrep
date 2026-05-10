@@ -799,46 +799,92 @@ mod tests {
 
     #[test]
     fn test_streaming_skips_already_indexed() {
+        // Drive the test through StreamingIndexer::drain_all so that a regression
+        // in the production hash-check path actually fails the test. We assert
+        // (a) first pass indexes 1 file, (b) second pass over identical content
+        // indexes 0 files, and (c) chunk count is unchanged — proving no
+        // re-embedding occurred.
         let mut embedder = Embedder::new_local().unwrap();
         let idx = Index::open_in_memory().unwrap();
 
         let content = "fn already_indexed() {}";
-        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        let files = vec![(
-            WalkedFile {
-                rel_path: "cached.rs".to_string(),
-                content: content.to_string(),
-                explicit: false,
-            },
-            hash.clone(),
-        )];
-        process_batch(&mut embedder, &idx, &files, 500, 100).unwrap();
-
-        let (tx, rx) = mpsc::sync_channel(32);
-        tx.send(WalkedFile {
+        let make_walked = || WalkedFile {
             rel_path: "cached.rs".to_string(),
             content: content.to_string(),
             explicit: false,
-        })
-        .unwrap();
-        drop(tx);
+        };
 
-        let mut batch: Vec<(WalkedFile, String)> = Vec::new();
-        for file in rx.iter() {
-            let file_hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
-            let needs_index = match idx.get_file_hash(&file.rel_path) {
-                Ok(Some(stored_hash)) => stored_hash != file_hash,
-                _ => true,
-            };
-            if needs_index {
-                batch.push((file, file_hash));
-            }
-        }
-        assert!(
-            batch.is_empty(),
-            "file should have been skipped (hash match)"
+        // --- First pass: prime the index via the real pipeline entry point.
+        let (tx1, rx1) = mpsc::sync_channel(4);
+        tx1.send(make_walked()).unwrap();
+        drop(tx1);
+        let mut indexer1 = StreamingIndexer::new(
+            rx1,
+            500,
+            100,
+            32,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
         );
-        assert_eq!(idx.chunk_count().unwrap(), 1);
+        let indexed_first = indexer1
+            .drain_all(&mut embedder, &idx, |_| Ok(true))
+            .unwrap();
+        assert_eq!(indexed_first, 1, "first pass must index the new file");
+        let chunks_after_first = idx.chunk_count().unwrap();
+        assert!(chunks_after_first >= 1);
+
+        // --- Second pass: identical content via a fresh indexer.
+        let (tx2, rx2) = mpsc::sync_channel(4);
+        tx2.send(make_walked()).unwrap();
+        drop(tx2);
+        let mut indexer2 = StreamingIndexer::new(
+            rx2,
+            500,
+            100,
+            32,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
+        );
+        let indexed_second = indexer2
+            .drain_all(&mut embedder, &idx, |_| Ok(true))
+            .unwrap();
+        assert_eq!(
+            indexed_second, 0,
+            "second pass must skip the cached file via hash check (got {indexed_second} re-indexed)"
+        );
+        assert_eq!(
+            idx.chunk_count().unwrap(),
+            chunks_after_first,
+            "chunk count must not change — cached file was re-embedded"
+        );
+
+        // --- Third pass: change the content, expect re-index.
+        let modified = WalkedFile {
+            rel_path: "cached.rs".to_string(),
+            content: "fn modified_now() { let x = 1; }".to_string(),
+            explicit: false,
+        };
+        let (tx3, rx3) = mpsc::sync_channel(4);
+        tx3.send(modified).unwrap();
+        drop(tx3);
+        let mut indexer3 = StreamingIndexer::new(
+            rx3,
+            500,
+            100,
+            32,
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            None,
+        );
+        let indexed_third = indexer3
+            .drain_all(&mut embedder, &idx, |_| Ok(true))
+            .unwrap();
+        assert_eq!(
+            indexed_third, 1,
+            "changed content must be re-indexed (got {indexed_third})"
+        );
     }
 
     // --- PipelineStatus tests ---
