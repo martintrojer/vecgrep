@@ -4,7 +4,7 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
-use super::{l2_norm, ort_err, MAX_SEQ_LEN};
+use super::{l2_normalize, ort_err, MAX_SEQ_LEN};
 
 const MODEL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models/model.onnx"));
 const TOKENIZER_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models/tokenizer.json"));
@@ -109,10 +109,9 @@ impl LocalEmbedder {
             let mask_sum = mask.sum().max(1e-9);
             let mean_pooled = summed / mask_sum;
 
-            let norm = l2_norm(mean_pooled.as_slice().unwrap());
-            let normalized = mean_pooled / norm.max(1e-9);
-
-            results.push(normalized.to_vec());
+            let mut normalized = mean_pooled.to_vec();
+            l2_normalize(&mut normalized);
+            results.push(normalized);
         }
 
         Ok(results)

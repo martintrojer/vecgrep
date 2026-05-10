@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::{l2_norm, tokens_to_chars};
+use super::{l2_normalize, tokens_to_chars};
 
 /// Default max chars per text for remote embedders.
 /// Assumes 480-token context (chosen to match historical 1200-char default)
@@ -178,7 +178,7 @@ impl RemoteEmbedder {
                 anyhow::bail!("Response contained duplicate embedding index {}", index);
             }
 
-            let embedding: Vec<f32> = item["embedding"]
+            let mut embedding: Vec<f32> = item["embedding"]
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("Missing 'embedding' in response"))?
                 .iter()
@@ -200,15 +200,8 @@ impl RemoteEmbedder {
                 );
             }
 
-            // L2 normalize
-            let norm = l2_norm(&embedding);
-            let normalized = if norm > 1e-9 {
-                embedding.iter().map(|x| x / norm).collect()
-            } else {
-                embedding
-            };
-
-            embeddings[index] = Some(normalized);
+            l2_normalize(&mut embedding);
+            embeddings[index] = Some(embedding);
         }
 
         embeddings
