@@ -122,6 +122,15 @@ fn determine_run_mode(args: &Args) -> RunMode {
     }
 }
 
+/// If `cli` is `None`, fill it from `cfg` (cloning). Compresses the
+/// `*cli = cli.take().or_else(|| cfg.clone())` boilerplate that arises
+/// when merging owning `Option<T>` fields against a borrowed config.
+fn pick_clone<T: Clone>(cli: &mut Option<T>, cfg: &Option<T>) {
+    if cli.is_none() {
+        *cli = cfg.clone();
+    }
+}
+
 /// Merge CLI args with config file values: cli > config > hardcoded defaults.
 pub fn resolve_config(args: &mut Args, config: &config::Config) {
     // Value fields: cli.or(config).or(default)
@@ -144,27 +153,15 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
         .or(Some(DEFAULT_INDEX_WARN_THRESHOLD));
 
     // Option fields: cli.or(config)
-    args.embedder_url = args
-        .embedder_url
-        .take()
-        .or_else(|| config.embedder_url.clone());
-    args.embedder_model = args
-        .embedder_model
-        .take()
-        .or_else(|| config.embedder_model.clone());
+    pick_clone(&mut args.embedder_url, &config.embedder_url);
+    pick_clone(&mut args.embedder_model, &config.embedder_model);
     args.max_depth = args.max_depth.or(config.max_depth);
-    args.open_cmd = args.open_cmd.take().or_else(|| config.open_cmd.clone());
+    pick_clone(&mut args.open_cmd, &config.open_cmd);
 
     // Option fields: cli.or(config) — list types
-    if args.file_type.is_none() {
-        args.file_type = config.file_type.clone();
-    }
-    if args.file_type_not.is_none() {
-        args.file_type_not = config.file_type_not.clone();
-    }
-    if args.glob.is_none() {
-        args.glob = config.glob.clone();
-    }
+    pick_clone(&mut args.file_type, &config.file_type);
+    pick_clone(&mut args.file_type_not, &config.file_type_not);
+    pick_clone(&mut args.glob, &config.glob);
     args.port = args.port.or(config.port);
 
     // Bool flags: CLI flag || config value
