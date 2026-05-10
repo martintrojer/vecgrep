@@ -30,7 +30,7 @@ npx skills add martintrojer/vecgrep           # Codex / generic
 
 ```bash
 vecgrep "error handling" ./src                          # search by meaning
-vecgrep --reindex --hybrid-index ./src                 # build lexical index support
+vecgrep --reindex --hybrid-index                        # build lexical index support (always rebuilds from project root)
 vecgrep --hybrid "IndexConfig" ./src                   # optional lexical + semantic ranking
 vecgrep -i "authentication"                             # interactive TUI
 vecgrep -l "retry logic" | xargs rg "unwrap"            # combine with ripgrep
