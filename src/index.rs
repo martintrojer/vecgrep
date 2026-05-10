@@ -99,6 +99,18 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Project the first four columns of a search result row
+/// (`text, start_line, end_line, path`) into a `Chunk`.
+/// Both vector and lexical search return these in positions 0..=3.
+fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
+    Ok(Chunk {
+        text: row.get::<_, String>(0)?,
+        start_line: row.get::<_, i64>(1)? as usize,
+        end_line: row.get::<_, i64>(2)? as usize,
+        file_path: row.get::<_, String>(3)?,
+    })
+}
+
 fn hybrid_enabled(conn: &Connection) -> Result<bool> {
     let Some(config_json) = get_meta(conn, "config")? else {
         return Ok(false);
@@ -477,32 +489,16 @@ impl Index {
         let params: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
-        let results = stmt
+        let search_results: Vec<SearchResult> = stmt
             .query_map(params.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, f64>(4)?,
-                ))
+                let chunk = row_to_chunk(row)?;
+                let distance = row.get::<_, f64>(4)?;
+                Ok(SearchResult {
+                    chunk,
+                    score: 1.0 - distance as f32,
+                })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-
-        let search_results: Vec<SearchResult> = results
-            .into_iter()
-            .map(
-                |(text, start_line, end_line, path, distance)| SearchResult {
-                    chunk: Chunk {
-                        file_path: path,
-                        text,
-                        start_line: start_line as usize,
-                        end_line: end_line as usize,
-                    },
-                    score: 1.0 - distance as f32,
-                },
-            )
-            .collect();
 
         Ok(scope_results(search_results, path_scopes, candidate_limit))
     }
@@ -556,29 +552,14 @@ impl Index {
         let params: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
-        let results = stmt
+        let search_results: Vec<SearchResult> = stmt
             .query_map(params.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
+                Ok(SearchResult {
+                    chunk: row_to_chunk(row)?,
+                    score: 0.0,
+                })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-
-        let search_results: Vec<SearchResult> = results
-            .into_iter()
-            .map(|(text, start_line, end_line, path)| SearchResult {
-                chunk: Chunk {
-                    file_path: path,
-                    text,
-                    start_line: start_line as usize,
-                    end_line: end_line as usize,
-                },
-                score: 0.0,
-            })
-            .collect();
 
         Ok(scope_results(search_results, path_scopes, candidate_limit))
     }
