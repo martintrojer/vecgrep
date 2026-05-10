@@ -183,53 +183,6 @@ pub struct Args {
     pub open_cmd: Option<String>,
 }
 
-impl Default for Args {
-    fn default() -> Self {
-        Self {
-            query: None,
-            paths: vec![".".to_string()],
-            query_flag: None,
-            top_k: None,
-            threshold: None,
-            interactive: false,
-            file_type: None,
-            file_type_not: None,
-            glob: None,
-            reindex: false,
-            full_index: false,
-            index_only: false,
-            stats: false,
-            clear_cache: false,
-            json: false,
-            hybrid: false,
-            hybrid_index: false,
-            chunk_size: None,
-            chunk_overlap: None,
-            quiet: false,
-            hidden: false,
-            skip_vcs: false,
-            follow: false,
-            files_with_matches: false,
-            count: false,
-            ignore_file: None,
-            no_ignore: false,
-            max_depth: None,
-            type_list: false,
-            color: None,
-            pretty: false,
-            index_warn_threshold: None,
-            show_root: false,
-            embedder_url: None,
-            embedder_model: None,
-            serve: false,
-            port: None,
-            skip_outside_root: false,
-            no_scope: false,
-            open_cmd: None,
-        }
-    }
-}
-
 /// Hardcoded defaults for config-overridable fields.
 /// These match the spec's `config {}` block defaults.
 pub const DEFAULT_TOP_K: usize = 10;
