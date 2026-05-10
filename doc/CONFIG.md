@@ -86,6 +86,7 @@ Options:
       --type-list               Show all supported file types
       --color <WHEN>            When to use color (auto, always, never)
   -p, --pretty                  Alias for --color=always (force colors when piping)
+  -q, --quiet                   Suppress all status messages on stderr
       --embedder-url <URL>      OpenAI-compatible embeddings API URL
       --embedder-model <NAME>   Model name for --embedder-url
       --reindex                 Force full re-index
