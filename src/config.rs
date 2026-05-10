@@ -61,41 +61,53 @@ fn load_config_file(path: &std::path::Path) -> Result<Option<Config>, String> {
 }
 
 /// Merge two configs. `override_config` values take precedence over `base`.
+/// All fields use `override.or(base)` except `ignore_files`, which is additive
+/// (override entries first, then base entries).
 fn merge(base: Config, override_config: Config) -> Config {
-    Config {
-        embedder_url: override_config.embedder_url.or(base.embedder_url),
-        embedder_model: override_config.embedder_model.or(base.embedder_model),
-        top_k: override_config.top_k.or(base.top_k),
-        threshold: override_config.threshold.or(base.threshold),
-        chunk_size: override_config.chunk_size.or(base.chunk_size),
-        chunk_overlap: override_config.chunk_overlap.or(base.chunk_overlap),
-        hybrid: override_config.hybrid.or(base.hybrid),
-        hybrid_index: override_config.hybrid_index.or(base.hybrid_index),
-        full_index: override_config.full_index.or(base.full_index),
-        hidden: override_config.hidden.or(base.hidden),
-        skip_vcs: override_config.skip_vcs.or(base.skip_vcs),
-        follow: override_config.follow.or(base.follow),
-        ignore_files: match (override_config.ignore_files, base.ignore_files) {
-            (Some(mut o), Some(b)) => {
-                o.extend(b);
-                Some(o)
+    // Per-field `override.or(base)` for every Option<T> field. Listing each
+    // field by hand here is the single source of truth so the compiler will
+    // refuse to compile if a Config field is added but not merged.
+    macro_rules! merge_fields {
+        ($($field:ident),+ $(,)?) => {
+            Config {
+                $($field: override_config.$field.or(base.$field),)+
+                // Special case: ignore_files is additive, handled below.
+                ignore_files: match (override_config.ignore_files, base.ignore_files) {
+                    (Some(mut o), Some(b)) => {
+                        o.extend(b);
+                        Some(o)
+                    }
+                    (o, b) => o.or(b),
+                },
             }
-            (o, b) => o.or(b),
-        },
-        no_ignore: override_config.no_ignore.or(base.no_ignore),
-        max_depth: override_config.max_depth.or(base.max_depth),
-        color: override_config.color.or(base.color),
-        quiet: override_config.quiet.or(base.quiet),
-        index_warn_threshold: override_config
-            .index_warn_threshold
-            .or(base.index_warn_threshold),
-        file_type: override_config.file_type.or(base.file_type),
-        file_type_not: override_config.file_type_not.or(base.file_type_not),
-        glob: override_config.glob.or(base.glob),
-        port: override_config.port.or(base.port),
-        skip_outside_root: override_config.skip_outside_root.or(base.skip_outside_root),
-        open_cmd: override_config.open_cmd.or(base.open_cmd),
+        };
     }
+
+    merge_fields!(
+        embedder_url,
+        embedder_model,
+        top_k,
+        threshold,
+        chunk_size,
+        chunk_overlap,
+        hybrid,
+        hybrid_index,
+        full_index,
+        hidden,
+        skip_vcs,
+        follow,
+        no_ignore,
+        max_depth,
+        color,
+        quiet,
+        index_warn_threshold,
+        file_type,
+        file_type_not,
+        glob,
+        port,
+        skip_outside_root,
+        open_cmd,
+    )
 }
 
 /// Load config with precedence: project (.vecgrep/config.toml) > global (~/.config/vecgrep/config.toml).
