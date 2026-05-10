@@ -141,7 +141,9 @@ fn handle_search(
             respond(request, error_response(500, &message));
         }
         Some(SearchOutcome::EmbedError { message, .. }) => {
-            respond(request, error_response(500, &message));
+            // Embedder is unreachable / failing — infrastructure problem,
+            // worth distinguishing from a generic search failure so clients can retry.
+            respond(request, error_response(503, &message));
         }
         None => {
             respond(request, error_response(500, "worker unavailable"));
