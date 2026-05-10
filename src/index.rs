@@ -1075,6 +1075,13 @@ mod tests {
 
     #[test]
     fn test_search_lexical_finds_matches() {
+        // Insert three distinct chunks so the lexical query must discriminate:
+        //   notes.rs   : strong match for both query terms
+        //   partial.rs : matches only one query term
+        //   unrelated.rs : matches neither
+        // A regression that returns every chunk indiscriminately would fail
+        // the unrelated-not-included assertion. A regression that swapped
+        // BM25 ranking would fail the ordering assertion.
         let index = Index::open_in_memory().unwrap();
         let dim = EMBEDDING_DIM;
         index
@@ -1086,30 +1093,59 @@ mod tests {
                 hybrid: true,
             })
             .unwrap();
-        let chunks = vec![Chunk {
-            file_path: "notes.rs".to_string(),
-            text: "retry timeout handling".to_string(),
-            start_line: 1,
-            end_line: 1,
-        }];
-        let embeddings = vec![make_test_embedding(dim, 1.0)];
 
-        index
-            .upsert_file(
-                "notes.rs",
-                "hash-lex",
-                &chunks,
-                &embeddings,
-                &[false],
-                false,
-            )
-            .unwrap();
+        let entries: [(&str, &str); 3] = [
+            ("notes.rs", "retry timeout handling logic"),
+            ("partial.rs", "timeout configuration values"),
+            ("unrelated.rs", "chocolate cake recipe ingredients"),
+        ];
+        for (i, (path, text)) in entries.iter().enumerate() {
+            let chunks = vec![Chunk {
+                file_path: (*path).to_string(),
+                text: (*text).to_string(),
+                start_line: 1,
+                end_line: 1,
+            }];
+            let emb = vec![make_test_embedding(dim, 1.0 + i as f32)];
+            index
+                .upsert_file(path, &format!("hash-{i}"), &chunks, &emb, &[false], false)
+                .unwrap();
+        }
 
         let results = index
             .search_lexical("timeout retry", 10, &SearchScope::default())
             .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].chunk.file_path, "notes.rs");
+
+        let paths: Vec<&str> = results.iter().map(|r| r.chunk.file_path.as_str()).collect();
+        assert!(
+            paths.contains(&"notes.rs"),
+            "strong match notes.rs missing: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"partial.rs"),
+            "single-term match partial.rs missing: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"unrelated.rs"),
+            "unrelated.rs must not appear in results: {paths:?}"
+        );
+        assert_eq!(
+            results.len(),
+            2,
+            "expected exactly 2 matches, got {paths:?}"
+        );
+        // BM25 ranking: a chunk matching both query terms must outrank one
+        // matching a single term.
+        assert_eq!(
+            results[0].chunk.file_path, "notes.rs",
+            "two-term match notes.rs must rank above one-term match: {paths:?}"
+        );
+        assert!(
+            results[0].score >= results[1].score,
+            "results must be in descending score order: {} >= {} ({paths:?})",
+            results[0].score,
+            results[1].score
+        );
     }
 
     #[test]
