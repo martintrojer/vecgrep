@@ -514,4 +514,234 @@ mod tests {
         let body = "x".repeat(300);
         assert_eq!(extract_error_message(&body).len(), 200);
     }
+
+    // --- HTTP-level integration tests for embed_batch fallback chain.
+    // These cover the per-text retry, zero-vector fallback when dim is
+    // known, and dim-unknown error propagation paths called out by
+    // tr_remote_fallback_gap.
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// Scripted response: status code + body (kept simple, no headers).
+    #[derive(Clone)]
+    struct MockResponse {
+        status: u16,
+        body: String,
+    }
+
+    impl MockResponse {
+        fn ok_embedding_dim(dim: usize, n: usize) -> Self {
+            let mut data = Vec::new();
+            for i in 0..n {
+                let emb: Vec<f32> = (0..dim).map(|j| (i + j + 1) as f32 * 0.001).collect();
+                data.push(serde_json::json!({"index": i, "embedding": emb}));
+            }
+            let body = serde_json::json!({ "data": data }).to_string();
+            Self { status: 200, body }
+        }
+        fn http_400(message: &str) -> Self {
+            Self {
+                status: 400,
+                body: serde_json::json!({"error": {"message": message}}).to_string(),
+            }
+        }
+        fn http_500() -> Self {
+            Self {
+                status: 500,
+                body: "Internal Server Error".to_string(),
+            }
+        }
+    }
+
+    /// Spawn a tiny HTTP server that pops responses from `script` for each
+    /// request received. Returns the bound URL and a join handle. The
+    /// server shuts down when `script` is exhausted (next connection is
+    /// closed without response).
+    fn spawn_mock_server(
+        script: Vec<MockResponse>,
+    ) -> (String, std::thread::JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let received_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+        let received_clone = Arc::clone(&received_bodies);
+
+        let handle = std::thread::spawn(move || {
+            let script = script;
+            let mut idx = 0;
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 8192];
+                let n = match stream.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                // Capture the body for assertion. Find double-CRLF.
+                if let Some(body_pos) = req.find("\r\n\r\n") {
+                    received_clone
+                        .lock()
+                        .unwrap()
+                        .push(req[body_pos + 4..].to_string());
+                } else {
+                    received_clone.lock().unwrap().push(String::new());
+                }
+                if idx >= script.len() {
+                    break;
+                }
+                let resp = &script[idx];
+                idx += 1;
+                let response = format!(
+                    "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp.status,
+                    resp.body.len(),
+                    resp.body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                if idx >= script.len() {
+                    break;
+                }
+            }
+        });
+
+        (url, handle, received_bodies)
+    }
+
+    /// Build a RemoteEmbedder pointing at `url` without contacting it for
+    /// context discovery (which would consume the first scripted response).
+    fn make_remote_at(url: &str) -> RemoteEmbedder {
+        RemoteEmbedder {
+            url: url.to_string(),
+            model: "test-model".to_string(),
+            embedding_dim: None,
+            max_chars: 1000,
+            agent: ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(5)))
+                    .http_status_as_error(false)
+                    .build(),
+            ),
+        }
+    }
+
+    #[test]
+    fn test_embed_batch_success_returns_parsed_embeddings() {
+        let dim = 3;
+        let (url, _h, _) = spawn_mock_server(vec![MockResponse::ok_embedding_dim(dim, 2)]);
+        let mut remote = make_remote_at(&url);
+        let result = remote.embed_batch(&["alpha", "beta"]).unwrap();
+        assert_eq!(result.len(), 2, "two inputs → two embeddings");
+        for emb in &result {
+            assert_eq!(emb.len(), dim, "each embedding has the discovered dim");
+        }
+        assert_eq!(remote.embedding_dim, Some(dim));
+    }
+
+    #[test]
+    fn test_embed_batch_400_then_per_text_retry_fills_zero_when_dim_known() {
+        // First batch (2 texts) fails with 400. Per-text retry: first text
+        // succeeds (so dim becomes known), second text fails with 400 again
+        // — a zero vector is emitted at index 1.
+        let dim = 3;
+        let script = vec![
+            MockResponse::http_400("input too long"), // initial batch
+            MockResponse::ok_embedding_dim(dim, 1),   // per-text retry of text 0
+            MockResponse::http_400("still bad"),      // per-text retry of text 1
+        ];
+        let (url, _h, _) = spawn_mock_server(script);
+        let mut remote = make_remote_at(&url);
+        let result = remote.embed_batch(&["alpha", "beta"]).unwrap();
+
+        assert_eq!(result.len(), 2, "output length must equal input length");
+        assert_eq!(result[0].len(), dim, "first chunk has full embedding");
+        assert_eq!(
+            result[1].len(),
+            dim,
+            "second chunk has zero vector at correct dim"
+        );
+        assert!(
+            result[1].iter().all(|&v| v == 0.0),
+            "second chunk must be a zero vector (failed retry, dim known)"
+        );
+        assert!(
+            result[0].iter().any(|&v| v != 0.0),
+            "first chunk must be a real embedding"
+        );
+    }
+
+    #[test]
+    fn test_embed_batch_500_with_unknown_dim_propagates_error() {
+        // No prior successful request → dim is None. A 500 in the per-text
+        // retry must surface as Err so the caller doesn't get a phantom
+        // zero-length zero vector.
+        let script = vec![
+            MockResponse::http_500(), // initial batch
+            MockResponse::http_500(), // per-text retry of text 0 (dim still unknown)
+        ];
+        let (url, _h, _) = spawn_mock_server(script);
+        let mut remote = make_remote_at(&url);
+        let err = remote.embed_batch(&["alpha"]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("500"),
+            "error must surface upstream HTTP 500: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_embed_batch_400_for_oversize_input_per_text_retry() {
+        // Ollama-style behavior: HTTP 400 for input exceeding context.
+        // Initial batch fails; per-text succeeds for both. Asserts
+        // ordering and length preservation.
+        let dim = 4;
+        let script = vec![
+            MockResponse::http_400("context length exceeded"),
+            MockResponse::ok_embedding_dim(dim, 1),
+            MockResponse::ok_embedding_dim(dim, 1),
+        ];
+        let (url, _h, _) = spawn_mock_server(script);
+        let mut remote = make_remote_at(&url);
+        let result = remote
+            .embed_batch(&["first chunk text", "second chunk text"])
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        // Both should be real embeddings (not zero vectors).
+        for (i, emb) in result.iter().enumerate() {
+            assert_eq!(emb.len(), dim, "emb {i} has expected dim");
+            assert!(
+                emb.iter().any(|&v| v != 0.0),
+                "emb {i} must be non-zero (per-text retry succeeded)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_context_length_returns_none_on_404() {
+        // /api/show endpoint returning 404 must yield None (not panic)
+        // so RemoteEmbedder::new falls back to DEFAULT_REMOTE_MAX_CHARS.
+        let script = vec![MockResponse {
+            status: 404,
+            body: "{}".to_string(),
+        }];
+        let (url, _h, _) = spawn_mock_server(script);
+        // Strip /v1/embeddings tail so query_context_length finds the base.
+        let base_url = url.replace("/v1/embeddings", "/v1/embeddings");
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        let result = query_context_length(&agent, &base_url, "missing-model");
+        assert!(
+            result.is_none(),
+            "404 from /api/show must yield None, got {result:?}"
+        );
+    }
 }
