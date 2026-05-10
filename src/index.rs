@@ -2265,6 +2265,196 @@ mod tests {
         assert_eq!(paths.len(), 2, "unexpected results: {paths:?}");
     }
 
+    // --- Hybrid scoring helper unit tests (tr_hybrid_scoring_gap) ---
+
+    #[test]
+    fn test_hybrid_lexical_query_empty_returns_none() {
+        assert!(hybrid_lexical_query("").is_none());
+        assert!(hybrid_lexical_query("   \t\n  ").is_none());
+    }
+
+    #[test]
+    fn test_hybrid_lexical_query_single_term() {
+        let q = hybrid_lexical_query("timeout").unwrap();
+        // Single quoted term, no OR.
+        assert_eq!(q, "\"timeout\"");
+    }
+
+    #[test]
+    fn test_hybrid_lexical_query_multi_term_or_semantics() {
+        let q = hybrid_lexical_query("retry timeout handling").unwrap();
+        // FTS5: each term quoted, joined with OR.
+        assert_eq!(q, "\"retry\" OR \"timeout\" OR \"handling\"");
+    }
+
+    #[test]
+    fn test_hybrid_lexical_query_escapes_double_quotes() {
+        // Embedded double-quote in a term must be escaped (FTS5 escape: "")
+        // so the resulting MATCH expression stays valid; otherwise lexical
+        // search would silently fail with a syntax error in production.
+        let q = hybrid_lexical_query("foo\"bar baz").unwrap();
+        assert_eq!(q, "\"foo\"\"bar\" OR \"baz\"");
+    }
+
+    #[test]
+    fn test_hybrid_fused_score_neither_rank_is_zero() {
+        assert_eq!(hybrid_fused_score("q", None, None), 0.0);
+    }
+
+    #[test]
+    fn test_hybrid_fused_score_in_unit_interval() {
+        // Best-possible fused score (rank 0 in both modes) must equal 1.0
+        // (== max_score / max_score). Any other ranks must lie in [0,1].
+        let best = hybrid_fused_score("hello world", Some(0), Some(0));
+        assert!(
+            (best - 1.0).abs() < 1e-6,
+            "both rank=0 must give max score 1.0, got {best}"
+        );
+        for r in 0..20 {
+            let s = hybrid_fused_score("hello world", Some(r), None);
+            assert!((0.0..=1.0).contains(&s), "score {s} out of [0,1] at r={r}");
+        }
+    }
+
+    #[test]
+    fn test_hybrid_fused_score_vector_only_decreases_with_rank() {
+        // Pure vector contribution (lexical_rank=None) must be a strictly
+        // decreasing function of rank; a regression that inverted
+        // rank_component (returning 1/(K+rank+1) inverted to (K+rank+1))
+        // would be caught here.
+        let s0 = hybrid_fused_score("q", Some(0), None);
+        let s5 = hybrid_fused_score("q", Some(5), None);
+        let s50 = hybrid_fused_score("q", Some(50), None);
+        assert!(s0 > s5, "rank 0 must outscore rank 5: {s0} vs {s5}");
+        assert!(s5 > s50, "rank 5 must outscore rank 50: {s5} vs {s50}");
+        assert!(s0 > 0.0);
+    }
+
+    #[test]
+    fn test_hybrid_fused_score_lexical_only_discounted() {
+        // A lexical-only hit must receive the lexical_only_weight discount
+        // (0.2x lexical_weight). Compare a lexical-only rank-0 hit to a
+        // both-modes rank-0 hit — the both-modes score must be strictly
+        // larger.
+        let lex_only = hybrid_fused_score("q", None, Some(0));
+        let both = hybrid_fused_score("q", Some(0), Some(0));
+        assert!(
+            both > lex_only,
+            "both-modes hit must outscore lexical-only hit at same rank: {both} vs {lex_only}"
+        );
+        assert!(lex_only > 0.0);
+    }
+
+    #[test]
+    fn test_hybrid_fused_score_lexical_only_uses_only_weight_branch() {
+        // Verify the lexical-only branch applies the 0.2 discount: the
+        // lexical-only score should be strictly less than the would-be
+        // weighted score if the full lexical_weight were applied. We
+        // approximate the latter by a both-modes hit with vector_rank far
+        // out (rank=10000) so vector contribution is negligible.
+        let lex_only = hybrid_fused_score("q", None, Some(0));
+        let lex_with_vec_far = hybrid_fused_score("q", Some(10_000), Some(0));
+        assert!(
+            lex_with_vec_far > lex_only,
+            "lexical-only branch must discount weight: lex_only={lex_only} vs same hit with vec_rank=10000 -> {lex_with_vec_far}"
+        );
+    }
+
+    #[test]
+    fn test_lexical_weight_for_query_shapes() {
+        // Pin the documented weight bands so a regression that flips the
+        // band boundaries is caught.
+        // code-like marker -> 0.65
+        assert!((lexical_weight("foo::bar") - 0.65).abs() < 1e-6);
+        assert!((lexical_weight("x = 1") - 0.65).abs() < 1e-6);
+        // <=2 tokens, no marker -> 0.45
+        assert!((lexical_weight("hello") - 0.45).abs() < 1e-6);
+        assert!((lexical_weight("hello world") - 0.45).abs() < 1e-6);
+        // 3 tokens -> 0.20
+        assert!((lexical_weight("hello world rust") - 0.20).abs() < 1e-6);
+        // >3 tokens -> 0.10 fallback
+        assert!((lexical_weight("hello world rust crate today") - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_fuse_ranked_results_dedups_same_chunk_across_modes() {
+        // The same (file_path, start_line, end_line) appearing in both
+        // vector and lexical results must be deduped (one row in output)
+        // and assigned a both-modes fused score — strictly greater than
+        // either single-mode score at the same rank.
+        let vec_result = SearchResult {
+            chunk: Chunk {
+                file_path: "a.rs".to_string(),
+                text: "alpha".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            score: 0.9,
+        };
+        let lex_result = SearchResult {
+            chunk: Chunk {
+                file_path: "a.rs".to_string(),
+                text: "alpha".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            score: 0.5,
+        };
+        let fused = fuse_ranked_results("alpha", vec![vec_result], vec![lex_result], 10, 0.0);
+        assert_eq!(fused.len(), 1, "dedupe must collapse to one row");
+        let single_vec = fuse_ranked_results(
+            "alpha",
+            vec![SearchResult {
+                chunk: Chunk {
+                    file_path: "a.rs".to_string(),
+                    text: "alpha".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                },
+                score: 0.9,
+            }],
+            vec![],
+            10,
+            0.0,
+        );
+        assert!(
+            fused[0].score > single_vec[0].score,
+            "both-modes hit must outscore vector-only at same rank: {} vs {}",
+            fused[0].score,
+            single_vec[0].score
+        );
+    }
+
+    #[test]
+    fn test_fuse_ranked_results_threshold_filters_and_top_k_truncates() {
+        // Build 5 vector-only candidates with descending implicit ranks 0..4.
+        let make_r = |path: &str| SearchResult {
+            chunk: Chunk {
+                file_path: path.to_string(),
+                text: path.to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            score: 0.0, // overwritten by fuse
+        };
+        let vec_results: Vec<SearchResult> = (0..5).map(|i| make_r(&format!("f{i}.rs"))).collect();
+
+        // top_k=3 must truncate to 3.
+        let top3 = fuse_ranked_results("alpha", vec_results, vec![], 3, 0.0);
+        assert_eq!(top3.len(), 3, "top_k=3 must truncate");
+        // Descending order.
+        assert!(top3[0].score >= top3[1].score && top3[1].score >= top3[2].score);
+
+        // High threshold filters all but the best; rank 0 score for vector-only
+        // is well below 1.0 (it's 1 / (1 + lexical_weight)).
+        let vec_results2: Vec<SearchResult> = (0..5).map(|i| make_r(&format!("f{i}.rs"))).collect();
+        let strict = fuse_ranked_results("alpha", vec_results2, vec![], 10, 0.99);
+        assert!(
+            strict.is_empty(),
+            "threshold 0.99 must filter all vector-only ranks: got {strict:?}"
+        );
+    }
+
     #[test]
     fn test_search_path_scope_fetch_k_overfetch_surfaces_in_scope_match() {
         // SCOPE_OVERFETCH expands the SQL fetch_k to top_k * SCOPE_OVERFETCH
