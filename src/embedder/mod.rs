@@ -102,6 +102,22 @@ fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
+/// Normalize `v` in place to unit L2 norm.
+///
+/// If the L2 norm is below `1e-9` (i.e. the vector is effectively zero),
+/// the vector is left untouched. This matches the previous remote-embedder
+/// behavior and avoids amplifying numerical noise into a near-arbitrary
+/// unit direction. Both local and remote backends call this so the
+/// near-zero policy is identical across embedders.
+pub(super) fn l2_normalize(v: &mut [f32]) {
+    let norm = l2_norm(v);
+    if norm > 1e-9 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
 /// Convert a non-Send ort error into an anyhow error.
 fn ort_err(e: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{}", e)
