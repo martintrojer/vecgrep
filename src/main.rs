@@ -538,6 +538,20 @@ fn run_cli_search(
     Ok(found)
 }
 
+/// Move any positional that clap parsed as `args.query` into `args.paths`.
+/// Used by modes where there is no semantic query positional (`--query` and
+/// `--index-only`): everything after the program name is a path. Replaces
+/// the default `["."]` rather than prepending so the user's path list wins.
+fn move_query_to_paths(args: &mut Args) {
+    if let Some(positional) = args.query.take() {
+        if args.paths == ["."] {
+            args.paths = vec![positional];
+        } else {
+            args.paths.insert(0, positional);
+        }
+    }
+}
+
 /// When `--query` is provided, use it as the search query and treat all
 /// positional args as paths. If a positional query was also parsed, move
 /// it into paths. This makes `| xargs vecgrep -i --query "search"` work:
@@ -553,17 +567,10 @@ fn resolve_query_flag(args: &mut Args) {
                 )
                 .exit();
         }
-        // Move positional "query" (if any) into paths — with --query,
-        // all positionals are paths. This handles the xargs case:
-        // `| xargs vecgrep -i --query "search" file1.rs file2.rs`
+        // With --query, all positionals are paths. This handles the xargs
+        // case: `| xargs vecgrep -i --query "search" file1.rs file2.rs`
         // where clap assigns file1.rs to the query positional.
-        if let Some(positional) = args.query.take() {
-            if args.paths == ["."] {
-                args.paths = vec![positional];
-            } else {
-                args.paths.insert(0, positional);
-            }
-        }
+        move_query_to_paths(args);
         args.query = Some(q);
     }
 }
@@ -598,13 +605,7 @@ fn run() -> Result<bool> {
 
     // --index-only never searches, so all positionals are paths.
     if args.index_only {
-        if let Some(positional) = args.query.take() {
-            if args.paths == ["."] {
-                args.paths = vec![positional];
-            } else {
-                args.paths.insert(0, positional);
-            }
-        }
+        move_query_to_paths(&mut args);
     }
 
     {
