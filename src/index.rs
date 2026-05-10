@@ -452,7 +452,7 @@ impl Index {
             candidate_limit * SCOPE_OVERFETCH
         };
 
-        let (filter_sql, mut explicit_params) = build_explicit_filter_clause(explicit_paths, 3);
+        let (filter_sql, explicit_params) = build_explicit_filter_clause(explicit_paths, 3);
         let query = format!(
             "SELECT c.text, c.start_line, c.end_line, f.path, v.distance \
              FROM vec_chunks v \
@@ -464,24 +464,34 @@ impl Index {
         );
         let mut stmt = self.conn.prepare(&query)?;
 
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-            Box::new(query_embedding.as_bytes().to_vec()),
-            Box::new(fetch_k as i64),
-        ];
-        param_values.append(&mut explicit_params);
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
+        let row_to_result = |row: &rusqlite::Row<'_>| {
+            let chunk = row_to_chunk(row)?;
+            let distance = row.get::<_, f64>(4)?;
+            Ok(SearchResult {
+                chunk,
+                score: 1.0 - distance as f32,
+            })
+        };
 
-        let search_results: Vec<SearchResult> = stmt
-            .query_map(params.as_slice(), |row| {
-                let chunk = row_to_chunk(row)?;
-                let distance = row.get::<_, f64>(4)?;
-                Ok(SearchResult {
-                    chunk,
-                    score: 1.0 - distance as f32,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        // Fast path: no explicit paths means no per-call heap allocation
+        // for params (the common case). Falls back to a boxed Vec when
+        // explicit paths must be bound positionally.
+        let search_results: Vec<SearchResult> = if explicit_params.is_empty() {
+            stmt.query_map(
+                params![query_embedding.as_bytes(), fetch_k as i64],
+                row_to_result,
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut all: Vec<Box<dyn rusqlite::types::ToSql>> =
+                Vec::with_capacity(2 + explicit_params.len());
+            all.push(Box::new(query_embedding.as_bytes().to_vec()));
+            all.push(Box::new(fetch_k as i64));
+            all.extend(explicit_params);
+            let refs: Vec<&dyn rusqlite::types::ToSql> = all.iter().map(|p| p.as_ref()).collect();
+            stmt.query_map(refs.as_slice(), row_to_result)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         Ok(scope_results(search_results, path_scopes, candidate_limit))
     }
@@ -507,7 +517,7 @@ impl Index {
             candidate_limit * SCOPE_OVERFETCH
         };
 
-        let (filter_sql, mut explicit_params) = build_explicit_filter_clause(explicit_paths, 3);
+        let (filter_sql, explicit_params) = build_explicit_filter_clause(explicit_paths, 3);
         let query = format!(
             "SELECT c.text, c.start_line, c.end_line, f.path, bm25(chunks_fts) AS rank \
              FROM chunks_fts \
@@ -519,20 +529,28 @@ impl Index {
         );
         let mut stmt = self.conn.prepare(&query)?;
 
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(match_query), Box::new(fetch_limit as i64)];
-        param_values.append(&mut explicit_params);
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
+        let row_to_result = |row: &rusqlite::Row<'_>| {
+            Ok(SearchResult {
+                chunk: row_to_chunk(row)?,
+                score: 0.0,
+            })
+        };
 
-        let search_results: Vec<SearchResult> = stmt
-            .query_map(params.as_slice(), |row| {
-                Ok(SearchResult {
-                    chunk: row_to_chunk(row)?,
-                    score: 0.0,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        // Fast path: no explicit paths means no per-call heap allocation
+        // for params (the common case).
+        let search_results: Vec<SearchResult> = if explicit_params.is_empty() {
+            stmt.query_map(params![match_query, fetch_limit as i64], row_to_result)?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut all: Vec<Box<dyn rusqlite::types::ToSql>> =
+                Vec::with_capacity(2 + explicit_params.len());
+            all.push(Box::new(match_query));
+            all.push(Box::new(fetch_limit as i64));
+            all.extend(explicit_params);
+            let refs: Vec<&dyn rusqlite::types::ToSql> = all.iter().map(|p| p.as_ref()).collect();
+            stmt.query_map(refs.as_slice(), row_to_result)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         Ok(scope_results(search_results, path_scopes, candidate_limit))
     }
