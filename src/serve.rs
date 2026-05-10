@@ -101,14 +101,11 @@ fn handle_search(
     hybrid: bool,
     root: &str,
 ) -> Result<()> {
-    let params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
-    let q = params
-        .iter()
-        .find(|(k, _)| k == "q")
-        .map(|(_, v)| v.clone());
+    let params: std::collections::HashMap<String, String> =
+        parsed.query_pairs().into_owned().collect();
 
-    let q = match q {
-        Some(q) if !q.is_empty() => q,
+    let q = match params.get("q") {
+        Some(q) if !q.is_empty() => q.clone(),
         _ => {
             respond(
                 request,
@@ -119,15 +116,13 @@ fn handle_search(
     };
 
     let top_k: usize = params
-        .iter()
-        .find(|(k, _)| k == "k")
-        .and_then(|(_, v)| v.parse().ok())
+        .get("k")
+        .and_then(|v| v.parse().ok())
         .unwrap_or(default_top_k);
 
     let threshold: f32 = params
-        .iter()
-        .find(|(k, _)| k == "threshold")
-        .and_then(|(_, v)| v.parse().ok())
+        .get("threshold")
+        .and_then(|v| v.parse().ok())
         .unwrap_or(default_threshold);
 
     let request_id = worker.search(&q, top_k, threshold, hybrid);
