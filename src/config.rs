@@ -133,9 +133,55 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
+    /// Process-wide lock for tests that mutate `HOME` / `XDG_CONFIG_HOME`
+    /// (or any env var observed by `global_config_path` / `load_config`).
+    ///
+    /// **Contract**: every test in this binary that calls `set_var` or
+    /// `remove_var` on `HOME`, `XDG_CONFIG_HOME`, or any other env var that
+    /// can affect config resolution MUST acquire this lock for the entire
+    /// duration the env var is mutated. Forgetting the lock causes
+    /// non-deterministic flakes when cargo runs tests in parallel: another
+    /// test may snapshot the wrong env value or read a tempdir path that
+    /// has just been deleted by a sibling test's `EnvGuard::drop`.
+    ///
+    /// If you add a test elsewhere in the binary that reads env vars
+    /// (e.g. via `std::env::var` or any library that does), prefer one of:
+    ///   1. Take this lock for the duration of the test.
+    ///   2. Inject env values via a parameter rather than reading process
+    ///      state (preferred for new code).
+    /// See `tr_env_lock_partial` for the design rationale.
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn test_env_guard_restores_original_value() {
+        // Regression guard for the contract documented on env_lock(): the
+        // RAII EnvGuard MUST restore the original value (or absence of one)
+        // on drop, even if the test panics. Without this property the
+        // process-wide lock would not be sufficient to keep tests
+        // independent.
+        let _guard = env_lock().lock().unwrap();
+        let key = "VECGREP_TEST_ENV_GUARD_KEY";
+        // Start with the var unset.
+        unsafe { std::env::remove_var(key) };
+        assert!(std::env::var(key).is_err());
+        {
+            let _g = EnvGuard::set(key, "first");
+            assert_eq!(std::env::var(key).unwrap(), "first");
+            {
+                let _inner = EnvGuard::set(key, "nested");
+                assert_eq!(std::env::var(key).unwrap(), "nested");
+            }
+            // Inner guard restored "first".
+            assert_eq!(std::env::var(key).unwrap(), "first");
+        }
+        // Outer guard restored the original (unset) state.
+        assert!(
+            std::env::var(key).is_err(),
+            "EnvGuard must restore unset state on drop"
+        );
     }
 
     /// RAII guard that restores an environment variable on drop (including panic).
