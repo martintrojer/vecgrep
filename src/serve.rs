@@ -228,90 +228,106 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    /// Per-process cache of the default-scope shared test server port.
+    ///
+    /// **Constraint**: tests using `test_port()` must NOT mutate server state
+    /// (the index is shared read-only across the entire test binary). If a
+    /// new test needs different fixture data, a different `SearchScope`, or
+    /// any side effect on the index, it MUST call `start_test_server(...)`
+    /// to spin up its own isolated server instead of using `test_port()`.
     static SERVER_PORT: OnceLock<u16> = OnceLock::new();
 
-    /// Start a shared test server (once) and return its port.
-    fn test_port() -> u16 {
-        *SERVER_PORT.get_or_init(|| {
-            let listener =
-                TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test server port");
-            let port = listener
-                .local_addr()
-                .expect("read bound test server address")
-                .port();
-            drop(listener);
+    /// Spawn a fresh test server with the given `SearchScope` and return its
+    /// bound port. Each call creates an independent in-memory index and HTTP
+    /// server thread; safe to call from multiple tests in parallel.
+    fn start_test_server(scope: SearchScope) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test server port");
+        let port = listener
+            .local_addr()
+            .expect("read bound test server address")
+            .port();
+        drop(listener);
 
-            thread::spawn(move || {
-                let mut embedder = Embedder::new_local().expect("initialize local test embedder");
-                let idx = Index::open_in_memory().expect("open in-memory test index");
+        thread::spawn(move || {
+            let mut embedder = Embedder::new_local().expect("initialize local test embedder");
+            let idx = Index::open_in_memory().expect("open in-memory test index");
 
-                let texts = ["error handling in rust", "memory management", "HTTP server"];
-                let chunks: Vec<Chunk> = texts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, text)| Chunk {
-                        file_path: format!("test{i}.rs"),
-                        text: text.to_string(),
-                        start_line: 1,
-                        end_line: 1,
-                    })
-                    .collect();
+            // Fixture: 3 chunks. Per-server `scope` is supplied by the
+            // caller so a scoped /status response can be exercised without
+            // perturbing the shared (default-scope) tests.
+            let entries = [
+                ("test0.rs", "error handling in rust"),
+                ("test1.rs", "memory management"),
+                ("test2.rs", "HTTP server"),
+            ];
+            let chunks: Vec<Chunk> = entries
+                .iter()
+                .map(|(path, text)| Chunk {
+                    file_path: (*path).to_string(),
+                    text: (*text).to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                })
+                .collect();
 
-                let embeddings: Vec<Vec<f32>> = texts
-                    .iter()
-                    .map(|t| embedder.embed(t).expect("embed test fixture text"))
-                    .collect();
+            let embeddings: Vec<Vec<f32>> = entries
+                .iter()
+                .map(|(_, t)| embedder.embed(t).expect("embed test fixture text"))
+                .collect();
 
-                // Insert each file into the index
-                for (i, (chunk, emb)) in chunks.iter().zip(embeddings.iter()).enumerate() {
-                    idx.upsert_file(
-                        &format!("test{i}.rs"),
-                        &format!("hash{i}"),
-                        &[chunk.clone()],
-                        &[emb.clone()],
-                        &[false],
-                        false,
-                    )
-                    .expect("insert fixture chunk into test index");
-                }
-
-                // Create a dummy indexer (no files to index) for run_streaming
-                let (dummy_tx, dummy_rx) = std::sync::mpsc::sync_channel(0);
-                drop(dummy_tx);
-                let indexer = StreamingIndexer::new(
-                    dummy_rx,
-                    500,
-                    100,
-                    1,
-                    std::path::Path::new(""),
-                    std::path::Path::new(""),
-                    None,
-                );
-                run_streaming(
-                    embedder,
-                    idx,
-                    indexer,
-                    ServeConfig {
-                        port: Some(port),
-                        default_top_k: 10,
-                        default_threshold: 0.3,
-                        hybrid: false,
-                        quiet: true,
-                        root: "/test/root",
-                        scope: SearchScope::default(),
-                    },
+            for (i, (chunk, emb)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+                idx.upsert_file(
+                    &chunk.file_path,
+                    &format!("hash{i}"),
+                    &[chunk.clone()],
+                    &[emb.clone()],
+                    &[false],
+                    false,
                 )
-                .expect("run shared test HTTP server");
-            });
-
-            for _ in 0..50 {
-                if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                    return port;
-                }
-                thread::sleep(Duration::from_millis(100));
+                .expect("insert fixture chunk into test index");
             }
-            panic!("test server did not start within 5 seconds");
-        })
+
+            // Create a dummy indexer (no files to index) for run_streaming
+            let (dummy_tx, dummy_rx) = std::sync::mpsc::sync_channel(0);
+            drop(dummy_tx);
+            let indexer = StreamingIndexer::new(
+                dummy_rx,
+                500,
+                100,
+                1,
+                std::path::Path::new(""),
+                std::path::Path::new(""),
+                None,
+            );
+            run_streaming(
+                embedder,
+                idx,
+                indexer,
+                ServeConfig {
+                    port: Some(port),
+                    default_top_k: 10,
+                    default_threshold: 0.0,
+                    hybrid: false,
+                    quiet: true,
+                    root: "/test/root",
+                    scope,
+                },
+            )
+            .expect("run test HTTP server");
+        });
+
+        for _ in 0..50 {
+            if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                return port;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("test server did not start within 5 seconds");
+    }
+
+    /// Shared default-scope test server port. Read-only — see SERVER_PORT.
+    fn test_port() -> u16 {
+        *SERVER_PORT.get_or_init(|| start_test_server(SearchScope::default()))
     }
 
     fn http_request(method: &str, port: u16, path: &str) -> (u16, String, String) {
@@ -494,6 +510,50 @@ mod tests {
         assert_eq!(content_type, "application/json");
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["error"], "not found");
+    }
+
+    #[test]
+    fn test_status_includes_active_path_scopes() {
+        // Spin up a second, isolated server with non-default scope so the
+        // scope-rendering branch of /status is exercised. The shared
+        // test_port() server uses SearchScope::default(); see SERVER_PORT.
+        let scope = SearchScope {
+            explicit_paths: vec![],
+            path_scopes: vec!["src".to_string(), "docs/api".to_string()],
+        };
+        let port = start_test_server(scope);
+
+        // Wait for ready, same pattern as test_status_returns_ready.
+        let mut body = String::new();
+        for _ in 0..50 {
+            let (s, b, _) = http_request("GET", port, "/status");
+            if s == 200 {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&b) {
+                    if json["status"] == "ready" {
+                        body = b;
+                        break;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !body.is_empty(),
+            "scoped server did not reach ready status within 5s"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        let scope_arr = json
+            .get("scope")
+            .and_then(|v| v.as_array())
+            .expect("scoped /status must include scope array");
+        let scope_strs: Vec<&str> = scope_arr.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            scope_strs,
+            vec!["src", "docs/api"],
+            "scope field must echo configured path_scopes in order, got {json}"
+        );
     }
 
     #[test]
