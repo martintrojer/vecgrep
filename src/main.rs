@@ -365,15 +365,18 @@ fn handle_pre_execution_actions(
 ) -> Result<Option<bool>> {
     if args.clear_cache {
         let cache_dir = path_plan.project_root.join(".vecgrep");
-        let db_path = cache_dir.join("index.db");
-        if db_path.exists() {
-            // Remove index.db and any SQLite WAL/SHM files, preserve config.toml
-            for suffix in &["", "-wal", "-shm"] {
-                let p = cache_dir.join(format!("index.db{suffix}"));
-                if p.exists() {
-                    std::fs::remove_file(&p)?;
-                }
+        // Remove index.db and any SQLite WAL/SHM files, preserve config.toml.
+        // We loop over all three suffixes (not just guard on index.db) so that
+        // an orphaned -wal or -shm file is still cleaned up.
+        let mut removed_any = false;
+        for suffix in &["", "-wal", "-shm"] {
+            let p = cache_dir.join(format!("index.db{suffix}"));
+            if p.exists() {
+                std::fs::remove_file(&p)?;
+                removed_any = true;
             }
+        }
+        if removed_any {
             status!(quiet, "Cache cleared.");
         } else {
             status!(quiet, "No cache found.");
