@@ -30,165 +30,149 @@ enum SearchTrigger {
     UserInput,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_streaming(
-    embedder: Embedder,
-    idx: Index,
-    indexer: StreamingIndexer,
-    initial_query: &str,
-    args: &crate::cli::Args,
-    cwd_suffix: &Path,
-    scope: SearchScope,
-) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let path_scopes = scope.path_scopes.clone();
-    let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
-
-    let result = event_loop(
-        &mut terminal,
-        &worker,
-        initial_query,
-        args.top_k.unwrap(),
-        args.threshold.unwrap(),
-        args.hybrid,
-        cwd_suffix,
-        &path_scopes,
-        args.open_cmd.as_deref(),
-    );
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    result
+/// Result of handling a single key press.
+enum KeyOutcome {
+    Continue,
+    Quit,
+    /// User pressed Enter on a selected result — caller should leave the TUI and
+    /// run the open command for the given (file, start_line, end_line).
+    Open(String, usize, usize),
 }
 
-#[allow(clippy::too_many_arguments)]
-fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    worker: &EmbedWorker,
-    initial_query: &str,
+/// Immutable runtime configuration for the TUI.
+struct TuiConfig<'a> {
     top_k: usize,
     threshold: f32,
     hybrid: bool,
-    cwd_suffix: &Path,
-    path_scopes: &[String],
-    open_cmd: Option<&str>,
-) -> Result<()> {
-    let mut query = initial_query.to_string();
-    let mut results: Vec<SearchResult> = Vec::new();
-    let mut list_state = ListState::default();
-    let mut show_preview = true;
-    let mut last_search = Instant::now() - Duration::from_secs(1);
-    let mut pending_search = SearchTrigger::UserInput;
-    let mut searching = false;
-    let mut active_search_trigger = SearchTrigger::None;
-    let mut active_request_id: Option<u64> = None;
-    let mut search_error: Option<String> = None;
-    let debounce = Duration::from_millis(300);
-    let auto_refresh_interval = Duration::from_secs(3);
-    let mut last_auto_refresh = Instant::now();
+    cwd_suffix: &'a Path,
+    path_scopes: &'a [String],
+    open_cmd: Option<&'a str>,
+}
 
-    // Index progress state
-    let mut pipeline_status = PipelineStatus::initial();
+/// All mutable state that lives across one TUI iteration.
+struct TuiState {
+    query: String,
+    results: Vec<SearchResult>,
+    list_state: ListState,
+    show_preview: bool,
+    last_search: Instant,
+    pending_search: SearchTrigger,
+    searching: bool,
+    active_search_trigger: SearchTrigger,
+    active_request_id: Option<u64>,
+    search_error: Option<String>,
+    debounce: Duration,
+    auto_refresh_interval: Duration,
+    last_auto_refresh: Instant,
+    pipeline_status: PipelineStatus,
+    preview_file_cache: Option<(String, String)>,
+    preview_scroll: u16,
+    last_selected: Option<usize>,
+}
 
-    // Preview state
-    let mut preview_file_cache: Option<(String, String)> = None;
-    let mut preview_scroll: u16 = 0;
-    let mut last_selected: Option<usize> = None;
-
-    // Initial search
-    if !query.is_empty() {
-        active_request_id = Some(worker.search(&query, top_k, threshold, hybrid));
-        searching = true;
-        active_search_trigger = SearchTrigger::UserInput;
-        pending_search = SearchTrigger::None;
+impl TuiState {
+    fn new(initial_query: &str) -> Self {
+        Self {
+            query: initial_query.to_string(),
+            results: Vec::new(),
+            list_state: ListState::default(),
+            show_preview: true,
+            last_search: Instant::now() - Duration::from_secs(1),
+            pending_search: SearchTrigger::UserInput,
+            searching: false,
+            active_search_trigger: SearchTrigger::None,
+            active_request_id: None,
+            search_error: None,
+            debounce: Duration::from_millis(300),
+            auto_refresh_interval: Duration::from_secs(3),
+            last_auto_refresh: Instant::now(),
+            pipeline_status: PipelineStatus::initial(),
+            preview_file_cache: None,
+            preview_scroll: 0,
+            last_selected: None,
+        }
     }
 
-    loop {
-        // 1. Check for search results (non-blocking)
-        if let Some(outcome) = worker.try_recv_results() {
-            if active_request_id == Some(outcome.request_id()) {
-                searching = false;
-                active_search_trigger = SearchTrigger::None;
-                match outcome {
-                    SearchOutcome::Results {
-                        results: new_results,
-                        ..
-                    } => {
-                        search_error = None;
-                        results = new_results;
-                        if !results.is_empty() {
-                            list_state.select(Some(0));
-                        } else {
-                            list_state.select(None);
-                        }
-                        paths::rewrite_results_to_cwd_relative(&mut results, cwd_suffix);
-                    }
-                    SearchOutcome::SearchError { message, .. } => {
-                        search_error = Some(format!("Search error: {message}"));
-                        results.clear();
-                        list_state.select(None);
-                    }
-                    SearchOutcome::EmbedError { message, .. } => {
-                        search_error = Some(format!("Embed error: {message}"));
-                        results.clear();
-                        list_state.select(None);
-                    }
+    /// Apply a search outcome from the worker. Ignores stale request ids.
+    fn handle_search_outcome(&mut self, outcome: SearchOutcome, cwd_suffix: &Path) {
+        if self.active_request_id != Some(outcome.request_id()) {
+            return;
+        }
+        self.searching = false;
+        self.active_search_trigger = SearchTrigger::None;
+        match outcome {
+            SearchOutcome::Results {
+                results: new_results,
+                ..
+            } => {
+                self.search_error = None;
+                self.results = new_results;
+                if !self.results.is_empty() {
+                    self.list_state.select(Some(0));
+                } else {
+                    self.list_state.select(None);
                 }
-                last_selected = None;
+                paths::rewrite_results_to_cwd_relative(&mut self.results, cwd_suffix);
+            }
+            SearchOutcome::SearchError { message, .. } => {
+                self.search_error = Some(format!("Search error: {message}"));
+                self.results.clear();
+                self.list_state.select(None);
+            }
+            SearchOutcome::EmbedError { message, .. } => {
+                self.search_error = Some(format!("Embed error: {message}"));
+                self.results.clear();
+                self.list_state.select(None);
             }
         }
+        self.last_selected = None;
+    }
 
-        // 2. Check for index progress (non-blocking)
-        if let Some(status) = worker.drain_progress() {
-            let was_indexing = !matches!(pipeline_status, PipelineStatus::Ready { .. });
-            pipeline_status = status;
-            let is_ready = matches!(pipeline_status, PipelineStatus::Ready { .. });
+    /// Apply a pipeline progress update and decide whether to schedule an auto-refresh.
+    fn handle_progress(&mut self, status: PipelineStatus) {
+        let was_indexing = !matches!(self.pipeline_status, PipelineStatus::Ready { .. });
+        self.pipeline_status = status;
+        let is_ready = matches!(self.pipeline_status, PipelineStatus::Ready { .. });
 
-            if !query.is_empty() && !searching && pending_search == SearchTrigger::None {
-                if was_indexing && is_ready {
-                    pending_search = SearchTrigger::AutoRefresh;
-                } else if was_indexing && last_auto_refresh.elapsed() >= auto_refresh_interval {
-                    pending_search = SearchTrigger::AutoRefresh;
-                    last_auto_refresh = Instant::now();
-                }
-            }
+        if self.query.is_empty() || self.searching || self.pending_search != SearchTrigger::None {
+            return;
         }
-
-        // 3. Detect selection change and update preview cache/scroll
-        let current_selected = list_state.selected();
-        if current_selected != last_selected {
-            last_selected = current_selected;
-            if let Some(sel) = current_selected {
-                if let Some(result) = results.get(sel) {
-                    let path = &result.chunk.file_path;
-                    let needs_load = match &preview_file_cache {
-                        Some((cached_path, _)) => cached_path != path,
-                        None => true,
-                    };
-                    if needs_load {
-                        if let Ok(content) = std::fs::read_to_string(path) {
-                            preview_file_cache = Some((path.clone(), content));
-                        } else {
-                            preview_file_cache = None;
-                        }
-                    }
-                    preview_scroll = (result.chunk.start_line.saturating_sub(4)) as u16;
-                }
-            }
+        if was_indexing && is_ready {
+            self.pending_search = SearchTrigger::AutoRefresh;
+        } else if was_indexing && self.last_auto_refresh.elapsed() >= self.auto_refresh_interval {
+            self.pending_search = SearchTrigger::AutoRefresh;
+            self.last_auto_refresh = Instant::now();
         }
+    }
 
-        // 4. Render
-        let preview_scroll_val = preview_scroll;
-        let preview_cache_ref = &preview_file_cache;
-        let index_status = pipeline_status.to_string();
+    /// Refresh the cached preview file when the selection changes.
+    fn update_preview_cache(&mut self) {
+        let current_selected = self.list_state.selected();
+        if current_selected == self.last_selected {
+            return;
+        }
+        self.last_selected = current_selected;
+        let Some(sel) = current_selected else {
+            return;
+        };
+        let Some(result) = self.results.get(sel) else {
+            return;
+        };
+        let path = &result.chunk.file_path;
+        let needs_load = match &self.preview_file_cache {
+            Some((cached_path, _)) => cached_path != path,
+            None => true,
+        };
+        if needs_load {
+            self.preview_file_cache = std::fs::read_to_string(path)
+                .ok()
+                .map(|content| (path.clone(), content));
+        }
+        self.preview_scroll = (result.chunk.start_line.saturating_sub(4)) as u16;
+    }
 
+    fn status_text(&self, hybrid: bool, path_scopes: &[String]) -> String {
+        let index_status = self.pipeline_status.to_string();
         let scope_str = if path_scopes.is_empty() {
             String::new()
         } else {
@@ -196,22 +180,105 @@ fn event_loop(
         };
         let mode_str = if hybrid { " | mode: hybrid" } else { "" };
 
-        let status_text = if let Some(ref err) = search_error {
+        if let Some(ref err) = self.search_error {
             err.clone()
-        } else if active_search_trigger == SearchTrigger::UserInput {
+        } else if self.active_search_trigger == SearchTrigger::UserInput {
             format!("Searching... | {index_status}{scope_str}{mode_str}")
-        } else if !matches!(pipeline_status, PipelineStatus::Ready { .. }) {
+        } else if !matches!(self.pipeline_status, PipelineStatus::Ready { .. }) {
             format!(
                 "{} results | Indexing: {index_status}{scope_str}{mode_str}",
-                results.len()
+                self.results.len()
             )
         } else {
             format!(
                 "{} results | {index_status}{scope_str}{mode_str}",
-                results.len()
+                self.results.len()
             )
-        };
+        }
+    }
 
+    fn handle_key(&mut self, key: event::KeyEvent) -> KeyOutcome {
+        match key.code {
+            KeyCode::Esc => KeyOutcome::Quit,
+            KeyCode::Enter => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(result) = self.results.get(sel) {
+                        return KeyOutcome::Open(
+                            result.chunk.file_path.clone(),
+                            result.chunk.start_line,
+                            result.chunk.end_line,
+                        );
+                    }
+                }
+                KeyOutcome::Continue
+            }
+            KeyCode::Tab => {
+                self.show_preview = !self.show_preview;
+                KeyOutcome::Continue
+            }
+            KeyCode::Up => {
+                if let Some(sel) = self.list_state.selected() {
+                    if sel > 0 {
+                        self.list_state.select(Some(sel - 1));
+                    }
+                }
+                KeyOutcome::Continue
+            }
+            KeyCode::Down => {
+                if let Some(sel) = self.list_state.selected() {
+                    if sel + 1 < self.results.len() {
+                        self.list_state.select(Some(sel + 1));
+                    }
+                }
+                KeyOutcome::Continue
+            }
+            KeyCode::PageUp => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+                KeyOutcome::Continue
+            }
+            KeyCode::PageDown => {
+                self.preview_scroll = self.preview_scroll.saturating_add(10);
+                KeyOutcome::Continue
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.pending_search = SearchTrigger::UserInput;
+                self.last_search = Instant::now();
+                KeyOutcome::Continue
+            }
+            KeyCode::Char(c) => {
+                self.query.push(c);
+                self.pending_search = SearchTrigger::UserInput;
+                self.last_search = Instant::now();
+                KeyOutcome::Continue
+            }
+            _ => KeyOutcome::Continue,
+        }
+    }
+
+    /// Issue a search to the worker if the debounce window has elapsed.
+    fn maybe_dispatch_search(&mut self, worker: &EmbedWorker, cfg: &TuiConfig<'_>) {
+        if self.pending_search == SearchTrigger::None
+            || self.searching
+            || self.last_search.elapsed() < self.debounce
+            || self.query.is_empty()
+        {
+            return;
+        }
+        self.active_search_trigger = self.pending_search;
+        self.active_request_id =
+            Some(worker.search(&self.query, cfg.top_k, cfg.threshold, cfg.hybrid));
+        self.searching = true;
+        self.pending_search = SearchTrigger::None;
+        self.last_selected = None;
+    }
+
+    fn render(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        cfg: &TuiConfig<'_>,
+    ) -> Result<()> {
+        let status_text = self.status_text(cfg.hybrid, cfg.path_scopes);
         terminal.draw(|f| {
             let main_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -222,8 +289,8 @@ fn event_loop(
                 ])
                 .split(f.area());
 
-            let query_block = Paragraph::new(query.as_str())
-                .block(Block::default().borders(Borders::ALL).title(if hybrid {
+            let query_block = Paragraph::new(self.query.as_str())
+                .block(Block::default().borders(Borders::ALL).title(if cfg.hybrid {
                     " Query (hybrid search) "
                 } else {
                     " Query (semantic search) "
@@ -231,23 +298,23 @@ fn event_loop(
                 .style(Style::default().fg(Color::Yellow));
             f.render_widget(query_block, main_chunks[0]);
 
-            if show_preview && !results.is_empty() {
+            if self.show_preview && !self.results.is_empty() {
                 let result_area = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                     .split(main_chunks[1]);
 
-                render_list(f, &results, &mut list_state, result_area[0]);
+                render_list(f, &self.results, &mut self.list_state, result_area[0]);
                 render_preview(
                     f,
-                    &results,
-                    &list_state,
+                    &self.results,
+                    &self.list_state,
                     result_area[1],
-                    preview_cache_ref,
-                    preview_scroll_val,
+                    &self.preview_file_cache,
+                    self.preview_scroll,
                 );
             } else {
-                render_list(f, &results, &mut list_state, main_chunks[1]);
+                render_list(f, &self.results, &mut self.list_state, main_chunks[1]);
             }
 
             let key_style = Style::default()
@@ -268,94 +335,111 @@ fn event_loop(
             let status_bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
             f.render_widget(status_bar, main_chunks[2]);
         })?;
+        Ok(())
+    }
+}
 
-        // 5. Handle input
+#[allow(clippy::too_many_arguments)]
+pub fn run_streaming(
+    embedder: Embedder,
+    idx: Index,
+    indexer: StreamingIndexer,
+    initial_query: &str,
+    args: &crate::cli::Args,
+    cwd_suffix: &Path,
+    scope: SearchScope,
+) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let path_scopes = scope.path_scopes.clone();
+    let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
+
+    let cfg = TuiConfig {
+        top_k: args.top_k.unwrap(),
+        threshold: args.threshold.unwrap(),
+        hybrid: args.hybrid,
+        cwd_suffix,
+        path_scopes: &path_scopes,
+        open_cmd: args.open_cmd.as_deref(),
+    };
+    let result = event_loop(&mut terminal, &worker, initial_query, &cfg);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    result
+}
+
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    worker: &EmbedWorker,
+    initial_query: &str,
+    cfg: &TuiConfig<'_>,
+) -> Result<()> {
+    let mut state = TuiState::new(initial_query);
+
+    // Initial search
+    if !state.query.is_empty() {
+        state.active_request_id =
+            Some(worker.search(&state.query, cfg.top_k, cfg.threshold, cfg.hybrid));
+        state.searching = true;
+        state.active_search_trigger = SearchTrigger::UserInput;
+        state.pending_search = SearchTrigger::None;
+    }
+
+    loop {
+        if let Some(outcome) = worker.try_recv_results() {
+            state.handle_search_outcome(outcome, cfg.cwd_suffix);
+        }
+        if let Some(status) = worker.drain_progress() {
+            state.handle_progress(status);
+        }
+        state.update_preview_cache();
+        state.render(terminal, cfg)?;
+
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Esc => return Ok(()),
-                    KeyCode::Enter => {
-                        if let Some(sel) = list_state.selected() {
-                            if let Some(result) = results.get(sel) {
-                                let line = result.chunk.start_line;
-                                let end_line = result.chunk.end_line;
-                                let file = result.chunk.file_path.clone();
-
-                                disable_raw_mode()?;
-                                execute!(io::stdout(), LeaveAlternateScreen)?;
-
-                                let default_cmd = format!(
-                                    "{} +{{line}}G {{file}}",
-                                    std::env::var("PAGER").unwrap_or_else(|_| "less".to_string())
-                                );
-                                let cmd = open_cmd.unwrap_or(default_cmd.as_str());
-                                for warning in validate_open_cmd(cmd) {
-                                    eprintln!("{warning}");
-                                }
-                                let expanded = expand_open_cmd(cmd, &file, line, end_line);
-                                if let Err(e) = std::process::Command::new("sh")
-                                    .arg("-c")
-                                    .arg(&expanded)
-                                    .status()
-                                {
-                                    eprintln!("Failed to run '{}': {}", expanded, e);
-                                }
-
-                                return Ok(());
-                            }
-                        }
+                match state.handle_key(key) {
+                    KeyOutcome::Continue => {}
+                    KeyOutcome::Quit => return Ok(()),
+                    KeyOutcome::Open(file, line, end_line) => {
+                        return open_in_editor(cfg.open_cmd, &file, line, end_line);
                     }
-                    KeyCode::Tab => {
-                        show_preview = !show_preview;
-                    }
-                    KeyCode::Up => {
-                        if let Some(sel) = list_state.selected() {
-                            if sel > 0 {
-                                list_state.select(Some(sel - 1));
-                            }
-                        }
-                    }
-                    KeyCode::Down => {
-                        if let Some(sel) = list_state.selected() {
-                            if sel + 1 < results.len() {
-                                list_state.select(Some(sel + 1));
-                            }
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        preview_scroll = preview_scroll.saturating_sub(10);
-                    }
-                    KeyCode::PageDown => {
-                        preview_scroll = preview_scroll.saturating_add(10);
-                    }
-                    KeyCode::Backspace => {
-                        query.pop();
-                        pending_search = SearchTrigger::UserInput;
-                        last_search = Instant::now();
-                    }
-                    KeyCode::Char(c) => {
-                        query.push(c);
-                        pending_search = SearchTrigger::UserInput;
-                        last_search = Instant::now();
-                    }
-                    _ => {}
                 }
             }
         }
 
-        // 6. Debounced search
-        if pending_search != SearchTrigger::None
-            && !searching
-            && last_search.elapsed() >= debounce
-            && !query.is_empty()
-        {
-            active_search_trigger = pending_search;
-            active_request_id = Some(worker.search(&query, top_k, threshold, hybrid));
-            searching = true;
-            pending_search = SearchTrigger::None;
-            last_selected = None;
-        }
+        state.maybe_dispatch_search(worker, cfg);
     }
+}
+
+/// Drop the alternate screen, run the configured open command, then return.
+fn open_in_editor(open_cmd: Option<&str>, file: &str, line: usize, end_line: usize) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen)?;
+
+    let default_cmd = format!(
+        "{} +{{line}}G {{file}}",
+        std::env::var("PAGER").unwrap_or_else(|_| "less".to_string())
+    );
+    let cmd = open_cmd.unwrap_or(default_cmd.as_str());
+    for warning in validate_open_cmd(cmd) {
+        eprintln!("{warning}");
+    }
+    let expanded = expand_open_cmd(cmd, file, line, end_line);
+    if let Err(e) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&expanded)
+        .status()
+    {
+        eprintln!("Failed to run '{}': {}", expanded, e);
+    }
+    Ok(())
 }
 
 fn render_list(

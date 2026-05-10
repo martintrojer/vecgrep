@@ -181,7 +181,8 @@ impl StreamingIndexer {
 
     /// Run one batch: collect up to `batch_size` files from the channel and process them.
     /// If `blocking_first`, block waiting for the first file; subsequent files use non-blocking recv.
-    /// Returns `true` if anything was processed.
+    /// Returns `true` if anything was processed (caller may want to call `on_progress`),
+    /// `false` if no work was done this call (channel empty, all-cached batch, or shut down).
     fn run_batch(
         &mut self,
         embedder: &mut Embedder,
@@ -195,11 +196,12 @@ impl StreamingIndexer {
         let mut batch: Vec<(WalkedFile, String)> = Vec::new();
 
         if blocking_first {
+            // Block for the first file. `recv_one` may return `None` either because the
+            // file was already cached (channel still open) or because the channel closed
+            // (sets `indexing_done`). Either way fall through; the caller decides whether
+            // to retry the next blocking recv.
             if let Some(entry) = self.recv_one(idx, true) {
                 batch.push(entry);
-            }
-            if self.indexing_done && batch.is_empty() {
-                return Ok(false);
             }
         }
 
@@ -228,8 +230,8 @@ impl StreamingIndexer {
     }
 
     /// Blocking drain: process all files from the channel until it closes.
-    /// Calls `on_progress` after each batch is processed.
-    /// Returns the total number of files indexed.
+    /// Calls `on_progress` after each batch that did work. Returns the total
+    /// number of files indexed.
     pub fn drain_all<F>(
         &mut self,
         embedder: &mut Embedder,
@@ -240,8 +242,12 @@ impl StreamingIndexer {
         F: FnMut(PipelineStatus) -> Result<bool>,
     {
         while !self.indexing_done {
+            // run_batch can return false because the blocking recv hit a cached file
+            // and the rest of the batch was empty — the channel may still be open with
+            // more files, so keep looping. Termination happens via `indexing_done`,
+            // which is set when the channel disconnects.
             if !self.run_batch(embedder, idx, true)? {
-                break;
+                continue;
             }
             if !on_progress(self.status(
                 idx.file_count().unwrap_or(0),
