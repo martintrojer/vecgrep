@@ -146,14 +146,9 @@ fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
         status!(quiet, "Embedding dimension: {}", embedder.embedding_dim());
         embedder
     } else {
-        if !quiet {
-            eprint!("Loading model...");
-            std::io::stderr().flush().ok();
-        }
+        status!(quiet, "Loading model...");
         let embedder = Embedder::new_local().context("Failed to initialize embedder")?;
-        if !quiet {
-            eprintln!(" done.");
-        }
+        status!(quiet, "Model loaded.");
         embedder
     };
 
