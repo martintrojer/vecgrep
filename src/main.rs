@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use std::io::{IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vecgrep::cli::Args;
@@ -580,29 +580,35 @@ fn build_search_scope(arg_paths: &[String], cwd_suffix: &Path, project_root: &Pa
 }
 
 /// Returns Ok(true) if matches were found, Ok(false) if no matches.
-fn run() -> Result<bool> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_env("VECGREP_LOG"))
-        .with_writer(std::io::stderr)
-        .init();
+/// Parsed/validated CLI inputs ready for the rest of the pipeline.
+struct RunPlan {
+    args: Args,
+    cwd: PathBuf,
+    project_root: PathBuf,
+}
 
+/// Parse the CLI, run all clap-style validations, and handle the early-exit
+/// flags (`--type-list`, `--show-root`). Also normalises positional paths for
+/// `--query`/`--index-only`/`--reindex`.
+///
+/// Returns `Ok(None)` if an early-exit flag was handled (caller should return
+/// success), or `Ok(Some(plan))` to continue with the rest of `run`.
+fn parse_and_prepare_args() -> Result<Option<RunPlan>> {
     let mut args = Args::parse();
 
-    // Both helpers return clap::Error rather than calling .exit() so they
-    // are unit-testable. We forward to .exit() here so the user-visible
-    // behavior (styled error + exit code 2) is unchanged.
+    // resolve_query_flag/validate_cli_args return clap::Error rather than
+    // calling .exit() so they are unit-testable. We forward to .exit() here
+    // so user-visible behavior (styled error + exit code 2) is unchanged.
     resolve_query_flag(&mut args).unwrap_or_else(|e| e.exit());
-
-    // --index-only never searches, so all positionals are paths.
     if args.index_only {
+        // --index-only never searches, so all positionals are paths.
         move_query_to_paths(&mut args);
     }
-
     validate_cli_args(&args).unwrap_or_else(|e| e.exit());
 
     if args.type_list {
         walker::print_type_list();
-        return Ok(true);
+        return Ok(None);
     }
 
     let cwd = std::env::current_dir()?;
@@ -610,13 +616,87 @@ fn run() -> Result<bool> {
 
     if args.show_root {
         println!("{}", project_root.display());
-        return Ok(true);
+        return Ok(None);
     }
 
     // --reindex always walks from the project root, regardless of cwd.
     if args.reindex {
         args.paths = vec![project_root.display().to_string()];
     }
+
+    Ok(Some(RunPlan {
+        args,
+        cwd,
+        project_root,
+    }))
+}
+
+/// Run the chosen `RunMode` once indexing has settled.
+fn dispatch_run_mode(
+    run_mode: RunMode,
+    embedder: Embedder,
+    idx: Index,
+    indexer: pipeline::StreamingIndexer,
+    invocation: &Invocation,
+    output: CliOutputContext<'_>,
+    search_scope: SearchScope,
+) -> Result<bool> {
+    let mut embedder = embedder;
+    Ok(match run_mode {
+        RunMode::Serve => {
+            serve::run_streaming(
+                embedder,
+                idx,
+                indexer,
+                serve::ServeConfig {
+                    port: invocation.args.port,
+                    default_top_k: invocation.args.top_k.unwrap(),
+                    default_threshold: invocation.args.threshold.unwrap(),
+                    hybrid: invocation.args.hybrid,
+                    quiet: output.quiet,
+                    root: output.root,
+                    scope: search_scope,
+                },
+            )?;
+            true
+        }
+        RunMode::Interactive => {
+            tui::run_streaming(
+                embedder,
+                idx,
+                indexer,
+                &invocation.query,
+                &invocation.args,
+                output.cwd_suffix,
+                search_scope,
+            )?;
+            true
+        }
+        RunMode::Cli => run_cli_search(
+            &mut embedder,
+            &idx,
+            &invocation.args,
+            &invocation.query,
+            &search_scope,
+            output,
+        )?,
+    })
+}
+
+fn run() -> Result<bool> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_env("VECGREP_LOG"))
+        .with_writer(std::io::stderr)
+        .init();
+
+    let RunPlan {
+        args,
+        cwd,
+        project_root,
+    } = match parse_and_prepare_args()? {
+        Some(plan) => plan,
+        None => return Ok(true),
+    };
 
     let mut invocation = invocation::resolve_invocation(args, &cwd, &project_root)?;
     let quiet = invocation.args.quiet;
@@ -688,45 +768,15 @@ fn run() -> Result<bool> {
         )
     };
 
-    let found = match invocation.run_mode {
-        RunMode::Serve => {
-            serve::run_streaming(
-                embedder,
-                idx,
-                indexer,
-                serve::ServeConfig {
-                    port: invocation.args.port,
-                    default_top_k: invocation.args.top_k.unwrap(),
-                    default_threshold: invocation.args.threshold.unwrap(),
-                    hybrid: invocation.args.hybrid,
-                    quiet: output.quiet,
-                    root: output.root,
-                    scope: search_scope,
-                },
-            )?;
-            true
-        }
-        RunMode::Interactive => {
-            tui::run_streaming(
-                embedder,
-                idx,
-                indexer,
-                &invocation.query,
-                &invocation.args,
-                output.cwd_suffix,
-                search_scope,
-            )?;
-            true
-        }
-        RunMode::Cli => run_cli_search(
-            &mut embedder,
-            &idx,
-            &invocation.args,
-            &invocation.query,
-            &search_scope,
-            output,
-        )?,
-    };
+    let found = dispatch_run_mode(
+        invocation.run_mode,
+        embedder,
+        idx,
+        indexer,
+        &invocation,
+        output,
+        search_scope,
+    )?;
     join_walker(&mut walker_handle)?;
 
     Ok(found)
