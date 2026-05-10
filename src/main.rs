@@ -298,7 +298,11 @@ fn drain_initial_indexing(
     };
     indexer.drain_all(embedder, idx, |status| {
         let indexed = status.indexed();
-        if !quiet && !threshold_prompted && threshold > 0 && indexed >= threshold {
+        // Only prompt while still indexing — a Ready status means we're already done
+        // and `indexed` reflects the full index file count, not work-to-go.
+        let still_indexing = matches!(status, PipelineStatus::Indexing { .. });
+        if still_indexing && !quiet && !threshold_prompted && threshold > 0 && indexed >= threshold
+        {
             threshold_prompted = true;
             if let Some(ref s) = spinner {
                 s.pause();
