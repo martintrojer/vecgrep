@@ -28,6 +28,8 @@ enum PathKind { file | directory }
 enum PathStatus { admitted | skipped | rejected }
 enum EmbedderSource { local | remote }
 enum IndexStatus { empty | indexing | ready | aborted }
+enum IndexCapability { vector | hybrid }
+enum QueryMode { vector | hybrid }
 enum SearchSource { cli | interactive | http }
 enum SearchStatus { pending | completed | failed }
 enum StaleCleanupScope { walked_directory_prefix | none }
@@ -44,6 +46,8 @@ config {
     index_warn_threshold: Integer = 1000
     embedder_source: EmbedderSource = local
     embedder_model: String = "all-MiniLM-L6-v2"
+    hybrid: Boolean = false        -- query-time: fuse lexical + semantic ranking
+    hybrid_index: Boolean = false  -- build-time: maintain lexical index structures
 }
 
 value IndexStats {
@@ -57,6 +61,7 @@ entity ProjectRoot {
     path: Path
     marker: RootMarker
     index_status: IndexStatus
+    index_capability: IndexCapability  -- whether the on-disk index has lexical structures
     model_name: String?
     chunk_size: Integer?
     chunk_overlap: Integer?
@@ -82,6 +87,10 @@ entity Invocation {
     skip_outside_root: Boolean
     no_scope: Boolean           -- when true, search entire project index ignoring path scopes
                                 -- conflicts with explicit paths
+    hybrid: Boolean             -- query-time: request hybrid lexical+semantic ranking
+                                -- requires selected_root.index_capability = hybrid
+    hybrid_index: Boolean       -- build-time: rebuild/build the index with lexical support
+                                -- only valid with reindex_requested or index_only
     open_cmd: String?           -- template for opening files from TUI
                                 -- placeholders: {file}, {line}, {end_line}
                                 -- falls back to $PAGER or less
@@ -185,6 +194,7 @@ rule ClearCacheResetsIndex {
     when: invocation: Invocation.clear_cache_requested becomes true
     requires: invocation.selected_root != null
     ensures: invocation.selected_root.index_status = empty
+    ensures: invocation.selected_root.index_capability = vector
     ensures: invocation.selected_root.model_name = null
     ensures: invocation.selected_root.chunk_size = null
     ensures: invocation.selected_root.chunk_overlap = null
@@ -265,6 +275,33 @@ rule StaleEntriesRemovedAfterIndexing {
         -- cached entries (even if their content hash matched and they
         -- were not re-embedded).
 }
+
+-- Hybrid query/index interaction ---------------------------------------
+--
+-- --hybrid is query-time only: it asks the engine to fuse lexical and
+-- semantic scoring for this search. It never silently upgrades the
+-- on-disk index. Building a hybrid-capable index requires --hybrid-index
+-- combined with --reindex or --index-only.
+
+rule HybridQueryRejectedWithReindex {
+    when: invocation: Invocation.created
+    requires: invocation.reindex_requested and invocation.hybrid
+    ensures: InvocationFailed(invocation: invocation, reason: hybrid_query_with_reindex)
+}
+
+rule HybridIndexFlagRequiresBuildAction {
+    when: invocation: Invocation.created
+    requires: invocation.hybrid_index
+              and not invocation.reindex_requested
+              and not invocation.index_only
+    ensures: InvocationFailed(invocation: invocation, reason: hybrid_index_without_build_action)
+}
+
+@guarantee HybridQueryDoesNotUpgradeIndex
+    -- A query-time --hybrid against a vector-only index must not silently
+    -- rebuild or upgrade the on-disk index. The user must explicitly
+    -- combine --hybrid-index with --reindex or --index-only to add
+    -- lexical structures.
 
 -- Search lifecycle --------------------------------------------------------
 
@@ -440,11 +477,13 @@ surface SearchServer {
         -- resolved config values (config.top_k, config.threshold).
 
     @guarantee PipelineStatusEndpoint
-        -- GET /status returns the current PipelineStatus as JSON.
+        -- GET /status returns the current PipelineStatus as JSON,
+        -- augmented with version, root, hybrid, and (when scoped) scope.
         -- During indexing: {"status":"indexing","indexed":N,"total":M|null,"chunks":C}
         -- When ready: {"status":"ready","files":N,"chunks":C}
         -- Ready state reports full index counts from the database,
-        -- not just the current indexing pass.
+        -- not just the current indexing pass. The hybrid field reflects
+        -- whether the active index has lexical structures.
 }
 
 rule ServerSearchStarts {
