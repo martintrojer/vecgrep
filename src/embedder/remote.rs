@@ -1,11 +1,11 @@
 use anyhow::Result;
 
-use super::l2_norm;
+use super::{l2_norm, tokens_to_chars};
 
 /// Default max chars per text for remote embedders.
-/// Assumes 512-token context at ~2.5 chars/token (URLs, markdown, code
-/// tokenize more densely than plain English).
-const DEFAULT_REMOTE_MAX_CHARS: usize = 1200;
+/// Assumes 480-token context (chosen to match historical 1200-char default)
+/// at the shared chars-per-token ratio in `embedder::mod`.
+const DEFAULT_REMOTE_MAX_CHARS: usize = tokens_to_chars(480);
 
 /// Remote embedder using an OpenAI-compatible API.
 pub struct RemoteEmbedder {
@@ -273,7 +273,7 @@ fn query_context_length(agent: &ureq::Agent, embedder_url: &str, model: &str) ->
         .or_else(|| model_info["general.context_length"].as_u64())?
         as usize;
 
-    let max_chars = context_tokens * 5 / 2;
+    let max_chars = tokens_to_chars(context_tokens);
     tracing::info!(
         "Remote model context: {} tokens, truncating at {} chars",
         context_tokens,

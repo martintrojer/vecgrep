@@ -13,6 +13,24 @@ const MAX_SEQ_LEN: usize = 256;
 /// Embedding dimension for all-MiniLM-L6-v2 (built-in model).
 pub const EMBEDDING_DIM: usize = 384;
 
+/// Approximate chars-per-token ratio for remote embedders without a tokenizer.
+/// URLs, markdown, and code tokenize more densely than plain English
+/// (~4 chars/token), so 2.5 chars/token is conservative and avoids exceeding
+/// remote model context limits.
+pub const CHARS_PER_TOKEN_NUM: usize = 5;
+pub const CHARS_PER_TOKEN_DEN: usize = 2;
+
+/// Approximate the number of tokens in a string of `len` chars.
+pub const fn chars_to_tokens(len: usize) -> usize {
+    // div_ceil for `usize` is stable in const contexts.
+    (len * CHARS_PER_TOKEN_DEN).div_ceil(CHARS_PER_TOKEN_NUM)
+}
+
+/// Approximate the number of chars produced by `tokens` tokens.
+pub const fn tokens_to_chars(tokens: usize) -> usize {
+    tokens * CHARS_PER_TOKEN_NUM / CHARS_PER_TOKEN_DEN
+}
+
 /// Embedding backend — either built-in ONNX model or remote API.
 pub enum Embedder {
     Local(Box<LocalEmbedder>),
@@ -75,7 +93,7 @@ impl Embedder {
     pub fn context_tokens(&self) -> Option<usize> {
         match self {
             Embedder::Local(_) => Some(MAX_SEQ_LEN),
-            Embedder::Remote(r) => Some(r.max_chars * 2 / 5),
+            Embedder::Remote(r) => Some(chars_to_tokens(r.max_chars)),
         }
     }
 }
