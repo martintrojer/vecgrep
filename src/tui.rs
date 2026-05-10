@@ -250,37 +250,21 @@ fn event_loop(
                 render_list(f, &results, &mut list_state, main_chunks[1]);
             }
 
-            let status = Line::from(vec![
-                Span::styled(
-                    " Esc",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":quit "),
-                Span::styled(
-                    "Enter",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":view "),
-                Span::styled(
-                    "Tab",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":preview "),
-                Span::styled(
-                    "PgUp/PgDn",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":scroll "),
-                Span::raw(format!(" | {}", status_text)),
-            ]);
+            let key_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            let keymap: &[(&str, &str)] = &[
+                (" Esc", ":quit "),
+                ("Enter", ":view "),
+                ("Tab", ":preview "),
+                ("PgUp/PgDn", ":scroll "),
+            ];
+            let mut spans: Vec<Span> = keymap
+                .iter()
+                .flat_map(|(k, d)| [Span::styled(*k, key_style), Span::raw(*d)])
+                .collect();
+            spans.push(Span::raw(format!(" | {}", status_text)));
+            let status = Line::from(spans);
             let status_bar = Paragraph::new(status).style(Style::default().bg(Color::DarkGray));
             f.render_widget(status_bar, main_chunks[2]);
         })?;
