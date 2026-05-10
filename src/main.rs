@@ -421,55 +421,6 @@ fn join_walker(walker_handle: &mut Option<WalkerHandle>) -> Result<()> {
     Ok(())
 }
 
-fn run_serve_mode(
-    embedder: Embedder,
-    idx: Index,
-    indexer: pipeline::StreamingIndexer,
-    invocation: &Invocation,
-    output: CliOutputContext<'_>,
-    walker_handle: &mut Option<WalkerHandle>,
-    scope: SearchScope,
-) -> Result<bool> {
-    serve::run_streaming(
-        embedder,
-        idx,
-        indexer,
-        serve::ServeConfig {
-            port: invocation.args.port,
-            default_top_k: invocation.args.top_k.unwrap(),
-            default_threshold: invocation.args.threshold.unwrap(),
-            hybrid: invocation.args.hybrid,
-            quiet: output.quiet,
-            root: output.root,
-            scope,
-        },
-    )?;
-    join_walker(walker_handle)?;
-    Ok(true)
-}
-
-fn run_interactive_mode(
-    embedder: Embedder,
-    idx: Index,
-    indexer: pipeline::StreamingIndexer,
-    invocation: &Invocation,
-    output: CliOutputContext<'_>,
-    walker_handle: &mut Option<WalkerHandle>,
-    scope: SearchScope,
-) -> Result<bool> {
-    tui::run_streaming(
-        embedder,
-        idx,
-        indexer,
-        &invocation.query,
-        &invocation.args,
-        output.cwd_suffix,
-        scope,
-    )?;
-    join_walker(walker_handle)?;
-    Ok(true)
-}
-
 fn render_cli_results(
     mut results: Vec<vecgrep::types::SearchResult>,
     args: &Args,
@@ -741,40 +692,46 @@ fn run() -> Result<bool> {
         )
     };
 
-    match invocation.run_mode {
+    let found = match invocation.run_mode {
         RunMode::Serve => {
-            return run_serve_mode(
+            serve::run_streaming(
                 embedder,
                 idx,
                 indexer,
-                &invocation,
-                output,
-                &mut walker_handle,
-                search_scope,
-            );
+                serve::ServeConfig {
+                    port: invocation.args.port,
+                    default_top_k: invocation.args.top_k.unwrap(),
+                    default_threshold: invocation.args.threshold.unwrap(),
+                    hybrid: invocation.args.hybrid,
+                    quiet: output.quiet,
+                    root: output.root,
+                    scope: search_scope,
+                },
+            )?;
+            true
         }
         RunMode::Interactive => {
-            return run_interactive_mode(
+            tui::run_streaming(
                 embedder,
                 idx,
                 indexer,
-                &invocation,
-                output,
-                &mut walker_handle,
+                &invocation.query,
+                &invocation.args,
+                output.cwd_suffix,
                 search_scope,
-            );
+            )?;
+            true
         }
-        RunMode::Cli => {}
-    }
-
-    let found = run_cli_search(
-        &mut embedder,
-        &idx,
-        &invocation.args,
-        &invocation.query,
-        &search_scope,
-        output,
-    )?;
+        RunMode::Cli => run_cli_search(
+            &mut embedder,
+            &idx,
+            &invocation.args,
+            &invocation.query,
+            &search_scope,
+            output,
+        )?,
+    };
+    join_walker(&mut walker_handle)?;
 
     Ok(found)
 }
