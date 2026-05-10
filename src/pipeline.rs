@@ -179,14 +179,30 @@ impl StreamingIndexer {
         }
     }
 
-    /// Drain up to `batch_size` files from the channel (non-blocking) and process them.
-    /// Returns `true` if any new files were indexed (caller should re-search).
-    pub fn poll(&mut self, embedder: &mut Embedder, idx: &Index) -> Result<bool> {
+    /// Run one batch: collect up to `batch_size` files from the channel and process them.
+    /// If `blocking_first`, block waiting for the first file; subsequent files use non-blocking recv.
+    /// Returns `true` if anything was processed.
+    fn run_batch(
+        &mut self,
+        embedder: &mut Embedder,
+        idx: &Index,
+        blocking_first: bool,
+    ) -> Result<bool> {
         if self.indexing_done {
             return Ok(false);
         }
 
         let mut batch: Vec<(WalkedFile, String)> = Vec::new();
+
+        if blocking_first {
+            if let Some(entry) = self.recv_one(idx, true) {
+                batch.push(entry);
+            }
+            if self.indexing_done && batch.is_empty() {
+                return Ok(false);
+            }
+        }
+
         while batch.len() < self.batch_size && !self.indexing_done {
             match self.recv_one(idx, false) {
                 Some(entry) => batch.push(entry),
@@ -194,19 +210,25 @@ impl StreamingIndexer {
             }
         }
 
-        if !batch.is_empty() {
-            self.indexed_count += batch.len();
-            let chunk_count =
-                process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
-            self.indexed_chunks += chunk_count;
-            return Ok(true);
+        if batch.is_empty() {
+            return Ok(false);
         }
 
-        Ok(false)
+        self.indexed_count += batch.len();
+        let chunk_count =
+            process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
+        self.indexed_chunks += chunk_count;
+        Ok(true)
+    }
+
+    /// Drain up to `batch_size` files from the channel (non-blocking) and process them.
+    /// Returns `true` if any new files were indexed (caller should re-search).
+    pub fn poll(&mut self, embedder: &mut Embedder, idx: &Index) -> Result<bool> {
+        self.run_batch(embedder, idx, false)
     }
 
     /// Blocking drain: process all files from the channel until it closes.
-    /// Calls `on_progress` after each file is processed.
+    /// Calls `on_progress` after each batch is processed.
     /// Returns the total number of files indexed.
     pub fn drain_all<F>(
         &mut self,
@@ -218,36 +240,14 @@ impl StreamingIndexer {
         F: FnMut(PipelineStatus) -> Result<bool>,
     {
         while !self.indexing_done {
-            let mut batch: Vec<(WalkedFile, String)> = Vec::new();
-
-            // First file: blocking recv
-            if let Some(entry) = self.recv_one(idx, true) {
-                batch.push(entry);
-            }
-            if self.indexing_done && batch.is_empty() {
+            if !self.run_batch(embedder, idx, true)? {
                 break;
             }
-
-            // Fill rest of batch: non-blocking
-            while batch.len() < self.batch_size && !self.indexing_done {
-                match self.recv_one(idx, false) {
-                    Some(entry) => batch.push(entry),
-                    None => break,
-                }
-            }
-
-            if !batch.is_empty() {
-                self.indexed_count += batch.len();
-                let chunk_count =
-                    process_batch(embedder, idx, &batch, self.chunk_size, self.chunk_overlap)?;
-                self.indexed_chunks += chunk_count;
-
-                if !on_progress(self.status(
-                    idx.file_count().unwrap_or(0),
-                    idx.chunk_count().unwrap_or(0),
-                ))? {
-                    return Ok(self.indexed_count);
-                }
+            if !on_progress(self.status(
+                idx.file_count().unwrap_or(0),
+                idx.chunk_count().unwrap_or(0),
+            ))? {
+                return Ok(self.indexed_count);
             }
         }
 
