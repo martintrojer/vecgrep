@@ -2,6 +2,24 @@ use std::path::{Path, PathBuf};
 
 use crate::types::SearchResult;
 
+// Why `to_string_lossy().to_string()` everywhere in this module:
+//
+// vecgrep is a text-only search tool: every path it touches must round-trip
+// through UTF-8 to land in SQLite TEXT columns, JSONL output, the TUI,
+// terminal escape sequences, and IDE plugins reading `/search` responses.
+// All of those layers already require UTF-8.
+//
+// `to_string_lossy()` substitutes U+FFFD for any non-UTF-8 byte sequences
+// that exist on disk (e.g. Latin-1 filenames on a misconfigured Linux box,
+// or unpaired UTF-16 surrogates on Windows). The lossy bytes are not
+// silently dropped — they become a visible replacement character so the
+// user can see that the path is malformed. We accept this small loss of
+// fidelity in exchange for keeping every downstream API on `String`.
+//
+// `into_string()` (Path::to_str().map(str::to_string)) would instead skip
+// or error on such files, hiding them from search results without warning.
+// That is a worse user experience than showing a U+FFFD-laden path.
+
 /// Normalize a walker-emitted path: strip leading "./" if present.
 fn normalize_walker_path(walker_path: &str) -> &str {
     walker_path.strip_prefix("./").unwrap_or(walker_path)
