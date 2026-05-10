@@ -404,13 +404,28 @@ mod tests {
     #[test]
     fn test_search_k_override() {
         let port = test_port();
-        let (status, body, _) = http_request("GET", port, "/search?q=test&k=1");
+        // Server is configured with default_threshold=0.0 in start_test_server,
+        // so any positive-similarity match passes. Compare k=1 vs k=10 to
+        // prove the `k` query parameter is plumbed through (a regression
+        // that ignored `k` would return the same count for both).
+        let (status_baseline, body_baseline, _) =
+            http_request("GET", port, "/search?q=rust+code&k=10");
+        assert_eq!(status_baseline, 200);
+        let baseline_lines: Vec<&str> = body_baseline.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            baseline_lines.len() >= 2,
+            "baseline k=10 must return >=2 results to test k cap, got {}",
+            baseline_lines.len()
+        );
 
+        let (status, body, _) = http_request("GET", port, "/search?q=rust+code&k=1");
         assert_eq!(status, 200);
         let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
-        assert!(
-            lines.len() <= 1,
-            "expected at most 1 result with k=1, got {}",
+        assert_eq!(
+            lines.len(),
+            1,
+            "k=1 must return exactly 1 result (baseline had {}), got {}",
+            baseline_lines.len(),
             lines.len()
         );
     }
@@ -418,10 +433,30 @@ mod tests {
     #[test]
     fn test_search_threshold_override() {
         let port = test_port();
-        let (status, body, _) = http_request("GET", port, "/search?q=test&threshold=0.99");
+        // Baseline at threshold=0.0 captures the count of all matches.
+        let (status_baseline, body_baseline, _) =
+            http_request("GET", port, "/search?q=rust+code&threshold=0.0");
+        assert_eq!(status_baseline, 200);
+        let baseline_lines: Vec<&str> = body_baseline.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            baseline_lines.len() >= 2,
+            "baseline must return >=2 results so threshold filtering is observable, got {}",
+            baseline_lines.len()
+        );
 
+        // High threshold: must drop strictly fewer rows AND every kept row
+        // must satisfy the floor. A regression that ignores `threshold`
+        // would keep the baseline count.
+        let (status, body, _) = http_request("GET", port, "/search?q=rust+code&threshold=0.99");
         assert_eq!(status, 200);
-        for line in body.lines().filter(|l| !l.is_empty()) {
+        let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            lines.len() < baseline_lines.len(),
+            "threshold=0.99 must drop at least one result vs baseline ({}), got {}",
+            baseline_lines.len(),
+            lines.len()
+        );
+        for line in &lines {
             let json: serde_json::Value = serde_json::from_str(line).unwrap();
             let score = json["score"].as_f64().unwrap();
             assert!(score >= 0.99, "score {score} should be >= 0.99");
