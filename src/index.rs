@@ -205,7 +205,8 @@ impl Index {
         let index_dir = root.join(".vecgrep");
         std::fs::create_dir_all(&index_dir).context("Failed to create .vecgrep directory")?;
 
-        // Auto-add .vecgrep/ to .gitignore
+        // Auto-add .vecgrep/index.db to .gitignore (just the cache, not the
+        // whole .vecgrep/ dir — config.toml lives there and should be committable).
         let gitignore_path = root.join(".gitignore");
         ensure_gitignore_entry(&gitignore_path);
 
@@ -867,9 +868,15 @@ pub struct IndexStats {
 }
 
 pub(crate) fn ensure_gitignore_entry(gitignore_path: &Path) {
-    let entry = ".vecgrep/";
+    let entry = ".vecgrep/index.db";
+    // Treat the older, broader entry as already covering us.
+    let legacy_entries = [".vecgrep/", ".vecgrep", "/.vecgrep/", "/.vecgrep"];
     let content = std::fs::read_to_string(gitignore_path).unwrap_or_default();
-    if !content.lines().any(|line| line.trim() == entry) {
+    let already_covered = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == entry || legacy_entries.contains(&trimmed)
+    });
+    if !already_covered {
         let mut new_content = content;
         if !new_content.is_empty() && !new_content.ends_with('\n') {
             new_content.push('\n');
@@ -900,17 +907,28 @@ mod tests {
         let gitignore = dir.path().join(".gitignore");
         ensure_gitignore_entry(&gitignore);
         let content = std::fs::read_to_string(&gitignore).unwrap();
-        assert!(content.contains(".vecgrep/"));
+        assert!(content.contains(".vecgrep/index.db"));
     }
 
     #[test]
     fn test_ensure_gitignore_already_present() {
         let dir = TempDir::new().unwrap();
         let gitignore = dir.path().join(".gitignore");
+        std::fs::write(&gitignore, ".vecgrep/index.db\n").unwrap();
+        ensure_gitignore_entry(&gitignore);
+        let content = std::fs::read_to_string(&gitignore).unwrap();
+        assert_eq!(content.matches(".vecgrep/index.db").count(), 1);
+    }
+
+    #[test]
+    fn test_ensure_gitignore_legacy_dir_entry_left_alone() {
+        // Older vecgrep wrote `.vecgrep/` which covers index.db too — don't double up.
+        let dir = TempDir::new().unwrap();
+        let gitignore = dir.path().join(".gitignore");
         std::fs::write(&gitignore, ".vecgrep/\n").unwrap();
         ensure_gitignore_entry(&gitignore);
         let content = std::fs::read_to_string(&gitignore).unwrap();
-        assert_eq!(content.matches(".vecgrep/").count(), 1);
+        assert_eq!(content, ".vecgrep/\n");
     }
 
     #[test]
@@ -921,8 +939,8 @@ mod tests {
         ensure_gitignore_entry(&gitignore);
         let content = std::fs::read_to_string(&gitignore).unwrap();
         assert!(content.contains("target/"));
-        assert!(content.contains(".vecgrep/"));
-        assert!(content.contains("node_modules/\n.vecgrep/"));
+        assert!(content.contains(".vecgrep/index.db"));
+        assert!(content.contains("node_modules/\n.vecgrep/index.db"));
     }
 
     // --- Integration tests using in-memory DB ---
