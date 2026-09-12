@@ -345,7 +345,8 @@ pub fn run_streaming(
     idx: Index,
     indexer: StreamingIndexer,
     initial_query: &str,
-    args: &crate::cli::Args,
+    settings: &crate::invocation::ResolvedSettings,
+    hybrid: bool,
     cwd_suffix: &Path,
     scope: SearchScope,
 ) -> Result<()> {
@@ -359,12 +360,12 @@ pub fn run_streaming(
     let worker = EmbedWorker::spawn(embedder, idx, indexer, scope);
 
     let cfg = TuiConfig {
-        top_k: args.top_k.unwrap(),
-        threshold: args.threshold.unwrap(),
-        hybrid: args.hybrid,
+        top_k: settings.top_k,
+        threshold: settings.threshold,
+        hybrid,
         cwd_suffix,
         path_scopes: &path_scopes,
-        open_cmd: args.open_cmd.as_deref(),
+        open_cmd: settings.open_cmd.as_deref(),
     };
     let result = event_loop(&mut terminal, &worker, initial_query, &cfg);
 
@@ -431,13 +432,16 @@ fn open_in_editor(open_cmd: Option<&str>, file: &str, line: usize, end_line: usi
     for warning in validate_open_cmd(cmd) {
         eprintln!("{warning}");
     }
-    let expanded = expand_open_cmd(cmd, file, line, end_line);
-    if let Err(e) = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&expanded)
+    let argv = expand_open_cmd_argv(cmd, file, line, end_line);
+    if argv.is_empty() {
+        eprintln!("Failed to run open-cmd: empty command");
+        return Ok(());
+    }
+    if let Err(e) = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .status()
     {
-        eprintln!("Failed to run '{}': {}", expanded, e);
+        eprintln!("Failed to run {:?}: {}", argv, e);
     }
     Ok(())
 }
@@ -535,11 +539,17 @@ fn render_preview(
     f.render_widget(preview, area);
 }
 
-/// Expand `{file}`, `{line}`, and `{end_line}` placeholders in an open-cmd template.
-fn expand_open_cmd(cmd: &str, file: &str, line: usize, end_line: usize) -> String {
-    cmd.replace("{file}", file)
-        .replace("{line}", &line.to_string())
-        .replace("{end_line}", &end_line.to_string())
+/// Split the open-cmd template on whitespace, then substitute placeholders per arg.
+fn expand_open_cmd_argv(cmd: &str, file: &str, line: usize, end_line: usize) -> Vec<String> {
+    let line_s = line.to_string();
+    let end_line_s = end_line.to_string();
+    cmd.split_whitespace()
+        .map(|arg| {
+            arg.replace("{file}", file)
+                .replace("{line}", &line_s)
+                .replace("{end_line}", &end_line_s)
+        })
+        .collect()
 }
 
 /// Return warnings for an open-cmd template (missing `{file}`, unknown placeholders).
@@ -568,25 +578,28 @@ mod tests {
 
     #[test]
     fn test_expand_open_cmd_all_placeholders() {
-        let result = expand_open_cmd("nvim +{line} {file}", "src/main.rs", 42, 50);
-        assert_eq!(result, "nvim +42 src/main.rs");
+        let result = expand_open_cmd_argv("nvim +{line} {file}", "src/main.rs", 42, 50);
+        assert_eq!(result, vec!["nvim", "+42", "src/main.rs"]);
     }
 
     #[test]
     fn test_expand_open_cmd_with_end_line() {
-        let result = expand_open_cmd(
+        let result = expand_open_cmd_argv(
             "bat -n --highlight-line {line}:{end_line} {file}",
             "a.rs",
             10,
             20,
         );
-        assert_eq!(result, "bat -n --highlight-line 10:20 a.rs");
+        assert_eq!(
+            result,
+            vec!["bat", "-n", "--highlight-line", "10:20", "a.rs"]
+        );
     }
 
     #[test]
     fn test_expand_open_cmd_no_placeholders() {
-        let result = expand_open_cmd("less", "file.rs", 1, 5);
-        assert_eq!(result, "less");
+        let result = expand_open_cmd_argv("less", "file.rs", 1, 5);
+        assert_eq!(result, vec!["less"]);
     }
 
     #[test]

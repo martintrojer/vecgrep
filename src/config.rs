@@ -2,7 +2,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// User configuration loaded from `~/.config/vecgrep/config.toml`.
-/// All fields are optional — absent means "use CLI default".
+/// All fields are optional — absent means fall through to hardcoded defaults
+/// in `resolve_config` (after CLI overrides).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -54,9 +55,27 @@ fn load_config_file(path: &std::path::Path) -> Result<Option<Config>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("Failed to read {}: {}", path.display(), e)),
     };
-    match toml::from_str(&content) {
-        Ok(config) => Ok(Some(config)),
+    match toml::from_str::<Config>(&content) {
+        Ok(config) => {
+            validate_color(&config.color, path)?;
+            Ok(Some(config))
+        }
         Err(e) => Err(format!("Failed to parse {}: {}", path.display(), e)),
+    }
+}
+
+/// Accept `always` / `never` / `auto` case-insensitively; reject anything else.
+fn validate_color(color: &Option<String>, path: &std::path::Path) -> Result<(), String> {
+    let Some(value) = color.as_deref() else {
+        return Ok(());
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "always" | "never" | "auto" => Ok(()),
+        _ => Err(format!(
+            "Invalid color {:?} in {}: expected always, never, or auto",
+            value,
+            path.display()
+        )),
     }
 }
 
@@ -136,13 +155,10 @@ mod tests {
     /// Process-wide lock for tests that mutate `HOME` / `XDG_CONFIG_HOME`
     /// (or any env var observed by `global_config_path` / `load_config`).
     ///
-    /// **Contract**: every test in this binary that calls `set_var` or
-    /// `remove_var` on `HOME`, `XDG_CONFIG_HOME`, or any other env var that
-    /// can affect config resolution MUST acquire this lock for the entire
-    /// duration the env var is mutated. Forgetting the lock causes
-    /// non-deterministic flakes when cargo runs tests in parallel: another
-    /// test may snapshot the wrong env value or read a tempdir path that
-    /// has just been deleted by a sibling test's `EnvGuard::drop`.
+    /// Tests in this module that call `set_var` / `remove_var` on those vars
+    /// should hold this lock for the whole mutation window. `EnvGuard` is the
+    /// usual enforcement path (RAII restore on drop); the lock serializes
+    /// concurrent tests so one case does not observe another's env.
     ///
     /// If you add a test elsewhere in the binary that reads env vars
     /// (e.g. via `std::env::var` or any library that does), prefer one of:

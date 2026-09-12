@@ -30,10 +30,37 @@ pub enum RunMode {
 
 pub struct Invocation {
     pub args: Args,
+    pub settings: ResolvedSettings,
     pub path_plan: PathPlan,
     pub query: String,
     pub run_mode: RunMode,
     pub color_choice: termcolor::ColorChoice,
+}
+
+/// Fully resolved numeric/string settings after CLI > config > defaults merge.
+#[derive(Debug, Clone)]
+pub struct ResolvedSettings {
+    pub top_k: usize,
+    pub threshold: f32,
+    pub chunk_size: usize,
+    pub chunk_overlap: usize,
+    pub index_warn_threshold: usize,
+    pub port: Option<u16>,
+    pub open_cmd: Option<String>,
+}
+
+impl ResolvedSettings {
+    fn from_args(args: &Args) -> Self {
+        Self {
+            top_k: args.top_k.unwrap(),
+            threshold: args.threshold.unwrap(),
+            chunk_size: args.chunk_size.unwrap(),
+            chunk_overlap: args.chunk_overlap.unwrap(),
+            index_warn_threshold: args.index_warn_threshold.unwrap(),
+            port: args.port,
+            open_cmd: args.open_cmd.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -204,13 +231,18 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
         args.color = Some(ColorChoice::Always);
     }
 
-    // Color: cli.or(config parsed).or(Auto)
+    // Color: cli.or(config parsed case-insensitively).or(Auto).
+    // Unknown config values are rejected in `config::load_config`.
     if args.color.is_none() {
-        args.color = config.color.as_deref().and_then(|c| match c {
-            "always" => Some(ColorChoice::Always),
-            "never" => Some(ColorChoice::Never),
-            _ => None,
-        });
+        args.color = config
+            .color
+            .as_deref()
+            .and_then(|c| match c.to_ascii_lowercase().as_str() {
+                "always" => Some(ColorChoice::Always),
+                "never" => Some(ColorChoice::Never),
+                "auto" => Some(ColorChoice::Auto),
+                _ => None,
+            });
     }
     if args.color.is_none() {
         args.color = Some(ColorChoice::Auto);
@@ -218,13 +250,7 @@ pub fn resolve_config(args: &mut Args, config: &config::Config) {
 }
 
 pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Result<Invocation> {
-    let config = match config::load_config(project_root) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-    };
+    let config = config::load_config(project_root).map_err(|e| anyhow::anyhow!("{e}"))?;
     resolve_config(&mut args, &config);
 
     if args.skip_vcs && !args.hidden {
@@ -237,9 +263,11 @@ pub fn resolve_invocation(mut args: Args, cwd: &Path, project_root: &Path) -> Re
     let query = args.query.clone().unwrap_or_default();
     let run_mode = determine_run_mode(&args);
     let color_choice = output::resolve_color_choice(args.color.as_ref().unwrap());
+    let settings = ResolvedSettings::from_args(&args);
 
     Ok(Invocation {
         args,
+        settings,
         path_plan,
         query,
         run_mode,

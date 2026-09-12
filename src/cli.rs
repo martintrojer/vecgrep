@@ -65,7 +65,7 @@ pub struct Args {
     pub index_only: bool,
 
     /// Show index statistics.
-    #[arg(long, conflicts_with_all = ["interactive", "serve", "index_only", "type_list", "show_root"])]
+    #[arg(long, conflicts_with_all = ["interactive", "serve", "index_only", "type_list", "show_root", "reindex", "clear_cache"])]
     pub stats: bool,
 
     /// Delete cached index.
