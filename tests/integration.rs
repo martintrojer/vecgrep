@@ -1328,6 +1328,15 @@ fn test_stale_file_removed_within_walked_dir() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
+        output.status.success(),
+        "search should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("keep.rs"),
+        "remaining file should appear in results, got: {stdout}"
+    );
+    assert!(
         !stdout.contains("remove.rs"),
         "deleted file should not appear in results, got: {stdout}"
     );
