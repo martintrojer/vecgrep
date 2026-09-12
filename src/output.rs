@@ -145,11 +145,11 @@ pub fn score_to_color_ratatui(score: f32) -> ratatui::style::Color {
 }
 
 /// Print results as JSONL for scripting.
-pub fn print_json(results: &[SearchResult], root: &str) -> std::io::Result<()> {
+pub fn print_json(results: &[SearchResult], root: &str, hybrid: bool) -> std::io::Result<()> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     for result in results {
-        let json = format_json_result(result, root);
+        let json = format_json_result_with_hybrid(result, root, hybrid);
         writeln!(handle, "{}", json)?;
     }
     Ok(())

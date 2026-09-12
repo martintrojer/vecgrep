@@ -8,7 +8,7 @@ use vecgrep::cli::Args;
 use vecgrep::embedder::Embedder;
 use vecgrep::index::Index;
 use vecgrep::invocation::{
-    capped_chunk_size, CliOutputContext, Invocation, RunMode, StaleRemovalScope,
+    capped_chunk_size, CliOutputContext, Invocation, ResolvedSettings, RunMode, StaleRemovalScope,
 };
 use vecgrep::pipeline::{run_search, PipelineStatus};
 use vecgrep::root::resolve_project_root;
@@ -152,17 +152,16 @@ fn initialize_embedder(invocation: &mut Invocation) -> Result<Embedder> {
         embedder
     };
 
-    let original_chunk_size = invocation.args.chunk_size.unwrap();
-    invocation.args.chunk_size = Some(capped_chunk_size(
-        original_chunk_size,
-        embedder.context_tokens(),
-    ));
-    if invocation.args.chunk_size.unwrap() < original_chunk_size {
+    let original_chunk_size = invocation.settings.chunk_size;
+    let capped = capped_chunk_size(original_chunk_size, embedder.context_tokens());
+    invocation.args.chunk_size = Some(capped);
+    invocation.settings.chunk_size = capped;
+    if capped < original_chunk_size {
         status!(
             quiet,
             "Reducing chunk_size from {} to {} (model context limit)",
             original_chunk_size,
-            invocation.args.chunk_size.unwrap()
+            capped
         );
     }
 
@@ -182,8 +181,8 @@ fn prepare_index(
     let config = IndexConfig {
         model_name: embedder.model_name().to_string(),
         embedding_dim: embedder.embedding_dim(),
-        chunk_size: invocation.args.chunk_size.unwrap(),
-        chunk_overlap: invocation.args.chunk_overlap.unwrap(),
+        chunk_size: invocation.settings.chunk_size,
+        chunk_overlap: invocation.settings.chunk_overlap,
         hybrid: if apply_requested_hybrid_index {
             invocation.args.hybrid_index
         } else {
@@ -247,8 +246,8 @@ fn prepare_execution(invocation: &mut Invocation) -> Result<ExecutionContext> {
 
     let indexer = pipeline::StreamingIndexer::new(
         rx,
-        invocation.args.chunk_size.unwrap(),
-        invocation.args.chunk_overlap.unwrap(),
+        invocation.settings.chunk_size,
+        invocation.settings.chunk_overlap,
         BATCH_SIZE,
         &invocation.path_plan.cwd_suffix,
         &invocation.path_plan.project_root,
@@ -437,7 +436,7 @@ fn render_cli_results(
     }
 
     if args.json {
-        output::print_json(&results, root)?;
+        output::print_json(&results, root, args.hybrid)?;
     } else if args.files_with_matches {
         output::print_files_with_matches(&results, color_choice)?;
     } else if args.count {
@@ -453,6 +452,7 @@ fn run_cli_search(
     embedder: &mut Embedder,
     idx: &Index,
     args: &Args,
+    settings: &ResolvedSettings,
     query: &str,
     scope: &SearchScope,
     output: CliOutputContext<'_>,
@@ -464,8 +464,8 @@ fn run_cli_search(
         embedder,
         idx,
         query,
-        args.top_k.unwrap(),
-        args.threshold.unwrap(),
+        settings.top_k,
+        settings.threshold,
         scope,
         args.hybrid,
     )
@@ -583,7 +583,6 @@ fn build_search_scope(arg_paths: &[String], cwd_suffix: &Path, project_root: &Pa
     }
 }
 
-/// Returns Ok(true) if matches were found, Ok(false) if no matches.
 /// Parsed/validated CLI inputs ready for the rest of the pipeline.
 struct RunPlan {
     args: Args,
@@ -648,15 +647,17 @@ fn dispatch_run_mode(
     let mut embedder = embedder;
     Ok(match run_mode {
         RunMode::Serve => {
+            let hybrid_capable = idx.is_hybrid_capable()?;
             serve::run_streaming(
                 embedder,
                 idx,
                 indexer,
                 serve::ServeConfig {
-                    port: invocation.args.port,
-                    default_top_k: invocation.args.top_k.unwrap(),
-                    default_threshold: invocation.args.threshold.unwrap(),
+                    port: invocation.settings.port,
+                    default_top_k: invocation.settings.top_k,
+                    default_threshold: invocation.settings.threshold,
                     hybrid: invocation.args.hybrid,
+                    hybrid_capable,
                     quiet: output.quiet,
                     root: output.root,
                     scope: search_scope,
@@ -670,7 +671,8 @@ fn dispatch_run_mode(
                 idx,
                 indexer,
                 &invocation.query,
-                &invocation.args,
+                &invocation.settings,
+                invocation.args.hybrid,
                 output.cwd_suffix,
                 search_scope,
             )?;
@@ -680,6 +682,7 @@ fn dispatch_run_mode(
             &mut embedder,
             &idx,
             &invocation.args,
+            &invocation.settings,
             &invocation.query,
             &search_scope,
             output,
@@ -742,7 +745,7 @@ fn run() -> Result<bool> {
             &mut embedder,
             &idx,
             quiet,
-            invocation.args.index_warn_threshold.unwrap(),
+            invocation.settings.index_warn_threshold,
             show_spinner,
             prompt_to_continue,
         )?;
@@ -1106,7 +1109,7 @@ mod tests {
         assert_eq!(args.query_flag.as_deref(), Some("search"));
         assert_eq!(args.paths, ["file2.rs"]);
 
-        resolve_query_flag(&mut args);
+        resolve_query_flag(&mut args).expect("--query should be valid with -i");
 
         assert_eq!(args.query.as_deref(), Some("search"));
         assert_eq!(args.paths, ["file1.rs", "file2.rs"]);
@@ -1119,7 +1122,7 @@ mod tests {
         assert!(args.query.is_none());
         assert_eq!(args.query_flag.as_deref(), Some("search"));
 
-        resolve_query_flag(&mut args);
+        resolve_query_flag(&mut args).expect("--query should be valid with -i");
 
         assert_eq!(args.query.as_deref(), Some("search"));
         assert_eq!(args.paths, ["."]);
@@ -1132,7 +1135,7 @@ mod tests {
         assert_eq!(args.query.as_deref(), Some("search term"));
         assert!(args.query_flag.is_none());
 
-        resolve_query_flag(&mut args);
+        resolve_query_flag(&mut args).expect("no --query flag is always ok");
 
         assert_eq!(args.query.as_deref(), Some("search term"));
     }

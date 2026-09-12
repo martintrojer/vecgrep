@@ -43,6 +43,7 @@ fn handle_request(
     default_top_k: usize,
     default_threshold: f32,
     hybrid: bool,
+    hybrid_capable: bool,
     root: &str,
     pipeline_status: &PipelineStatus,
     path_scopes: &[String],
@@ -76,7 +77,7 @@ fn handle_request(
             let mut status = serde_json::to_value(pipeline_status).unwrap();
             status["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
             status["root"] = serde_json::Value::String(root.to_string());
-            status["hybrid"] = serde_json::Value::Bool(hybrid);
+            status["hybrid"] = serde_json::Value::Bool(hybrid_capable);
             if !path_scopes.is_empty() {
                 status["scope"] = serde_json::json!(path_scopes);
             }
@@ -156,7 +157,10 @@ pub struct ServeConfig<'a> {
     pub port: Option<u16>,
     pub default_top_k: usize,
     pub default_threshold: f32,
+    /// Query-time hybrid ranking for `/search`.
     pub hybrid: bool,
+    /// Whether the active index supports hybrid lexical search (`/status` `"hybrid"`).
+    pub hybrid_capable: bool,
     pub quiet: bool,
     pub root: &'a str,
     pub scope: SearchScope,
@@ -210,6 +214,7 @@ pub fn run_streaming(
             config.default_top_k,
             config.default_threshold,
             config.hybrid,
+            config.hybrid_capable,
             config.root,
             &pipeline_status,
             &path_scopes,
@@ -308,6 +313,7 @@ mod tests {
                     default_top_k: 10,
                     default_threshold: 0.0,
                     hybrid: false,
+                    hybrid_capable: false,
                     quiet: true,
                     root: "/test/root",
                     scope,
