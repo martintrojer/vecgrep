@@ -1,10 +1,9 @@
 use anyhow::Result;
-use ndarray::{ArrayView2, Axis};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
-use super::{l2_normalize, ort_err, MAX_SEQ_LEN};
+use super::{l2_normalize, ort_err, Embedding, MAX_SEQ_LEN};
 
 const MODEL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models/model.onnx"));
 const TOKENIZER_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/models/tokenizer.json"));
@@ -33,7 +32,7 @@ impl LocalEmbedder {
         Ok(Self { session, tokenizer })
     }
 
-    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Embedding>> {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
@@ -82,36 +81,34 @@ impl LocalEmbedder {
 
         let dims: Vec<usize> = out_shape.iter().map(|&d| d as usize).collect();
         let hidden_size = dims[2];
-
-        let token_embeddings =
-            ArrayView2::from_shape((batch_size * dims[1], hidden_size), out_data)?;
-
-        let attention_f32: Vec<f32> = attention_mask.iter().map(|&v| v as f32).collect();
-        let attention_mask_2d = ArrayView2::from_shape((batch_size, max_len), &attention_f32)?;
+        // Model seq length should match the padded input length we sent.
+        debug_assert_eq!(dims[1], max_len);
 
         let mut results = Vec::with_capacity(batch_size);
 
         for i in 0..batch_size {
-            let start = i * max_len;
-            let end = start + max_len;
-            let tokens = token_embeddings.slice(ndarray::s![start..end, ..]);
-            let mask = attention_mask_2d.row(i);
-
-            let mask_expanded = mask
-                .to_owned()
-                .insert_axis(Axis(1))
-                .broadcast((max_len, hidden_size))
-                .unwrap()
-                .to_owned();
-
-            let masked = &tokens * &mask_expanded;
-            let summed = masked.sum_axis(Axis(0));
-            let mask_sum = mask.sum().max(1e-9);
-            let mean_pooled = summed / mask_sum;
-
-            let mut normalized = mean_pooled.to_vec();
-            l2_normalize(&mut normalized);
-            results.push(normalized);
+            let mut pooled = vec![0.0f32; hidden_size];
+            let mut mask_sum = 0.0f32;
+            for j in 0..max_len {
+                let m = attention_mask[i * max_len + j] as f32;
+                if m == 0.0 {
+                    continue;
+                }
+                mask_sum += m;
+                let token_offset = (i * max_len + j) * hidden_size;
+                for (h, cell) in pooled.iter_mut().enumerate() {
+                    *cell += out_data[token_offset + h] * m;
+                }
+            }
+            let denom = mask_sum.max(1e-9);
+            for cell in &mut pooled {
+                *cell /= denom;
+            }
+            l2_normalize(&mut pooled);
+            results.push(Embedding {
+                values: pooled,
+                failed: false,
+            });
         }
 
         Ok(results)

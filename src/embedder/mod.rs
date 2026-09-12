@@ -31,6 +31,13 @@ pub const fn tokens_to_chars(tokens: usize) -> usize {
     tokens * CHARS_PER_TOKEN_NUM / CHARS_PER_TOKEN_DEN
 }
 
+/// One embedding vector plus whether production of it failed (zero-vector hole).
+#[derive(Debug, Clone)]
+pub struct Embedding {
+    pub values: Vec<f32>,
+    pub failed: bool,
+}
+
 /// Embedding backend — either built-in ONNX model or remote API.
 pub enum Embedder {
     Local(Box<LocalEmbedder>),
@@ -51,11 +58,11 @@ impl Embedder {
     /// Embed a single text string, returning a normalized embedding vector.
     pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         let results = self.embed_batch(&[text])?;
-        Ok(results.into_iter().next().unwrap())
+        Ok(results.into_iter().next().unwrap().values)
     }
 
     /// Embed a batch of texts, returning normalized embedding vectors.
-    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Embedding>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -144,9 +151,11 @@ mod tests {
             .embed_batch(&["hello world", "semantic search"])
             .unwrap();
         assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].len(), EMBEDDING_DIM);
-        assert_eq!(embeddings[1].len(), EMBEDDING_DIM);
-        assert_ne!(embeddings[0], embeddings[1]);
+        assert_eq!(embeddings[0].values.len(), EMBEDDING_DIM);
+        assert_eq!(embeddings[1].values.len(), EMBEDDING_DIM);
+        assert!(!embeddings[0].failed);
+        assert!(!embeddings[1].failed);
+        assert_ne!(embeddings[0].values, embeddings[1].values);
     }
 
     #[test]

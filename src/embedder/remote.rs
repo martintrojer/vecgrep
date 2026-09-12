@@ -37,13 +37,18 @@ impl RemoteEmbedder {
         }
     }
 
-    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<super::Embedding>> {
         let mut all_embeddings = Vec::new();
 
         for batch in self.make_batches(texts) {
             match self.send_request(&batch) {
                 Ok(response) => {
-                    all_embeddings.extend(self.parse_embeddings(&response, batch.len())?);
+                    for values in self.parse_embeddings(&response, batch.len())? {
+                        all_embeddings.push(super::Embedding {
+                            values,
+                            failed: false,
+                        });
+                    }
                 }
                 Err(batch_err) => {
                     tracing::debug!(
@@ -55,7 +60,12 @@ impl RemoteEmbedder {
                     for text in &batch {
                         match self.send_request(&[*text]) {
                             Ok(response) => {
-                                all_embeddings.extend(self.parse_embeddings(&response, 1)?);
+                                for values in self.parse_embeddings(&response, 1)? {
+                                    all_embeddings.push(super::Embedding {
+                                        values,
+                                        failed: false,
+                                    });
+                                }
                             }
                             Err(e) => {
                                 // If we haven't discovered the embedding dimension yet,
@@ -73,7 +83,10 @@ impl RemoteEmbedder {
                                 );
                                 // Use zero vector so index positions stay aligned
                                 let dim = self.embedding_dim.unwrap();
-                                all_embeddings.push(vec![0.0; dim]);
+                                all_embeddings.push(super::Embedding {
+                                    values: vec![0.0; dim],
+                                    failed: true,
+                                });
                             }
                         }
                     }
@@ -638,7 +651,12 @@ mod tests {
         let result = remote.embed_batch(&["alpha", "beta"]).unwrap();
         assert_eq!(result.len(), 2, "two inputs → two embeddings");
         for emb in &result {
-            assert_eq!(emb.len(), dim, "each embedding has the discovered dim");
+            assert_eq!(
+                emb.values.len(),
+                dim,
+                "each embedding has the discovered dim"
+            );
+            assert!(!emb.failed);
         }
         assert_eq!(remote.embedding_dim, Some(dim));
     }
@@ -659,18 +677,24 @@ mod tests {
         let result = remote.embed_batch(&["alpha", "beta"]).unwrap();
 
         assert_eq!(result.len(), 2, "output length must equal input length");
-        assert_eq!(result[0].len(), dim, "first chunk has full embedding");
         assert_eq!(
-            result[1].len(),
+            result[0].values.len(),
+            dim,
+            "first chunk has full embedding"
+        );
+        assert!(!result[0].failed, "first chunk must not be marked failed");
+        assert_eq!(
+            result[1].values.len(),
             dim,
             "second chunk has zero vector at correct dim"
         );
+        assert!(result[1].failed, "second chunk must be marked failed");
         assert!(
-            result[1].iter().all(|&v| v == 0.0),
+            result[1].values.iter().all(|&v| v == 0.0),
             "second chunk must be a zero vector (failed retry, dim known)"
         );
         assert!(
-            result[0].iter().any(|&v| v != 0.0),
+            result[0].values.iter().any(|&v| v != 0.0),
             "first chunk must be a real embedding"
         );
     }
@@ -713,9 +737,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         // Both should be real embeddings (not zero vectors).
         for (i, emb) in result.iter().enumerate() {
-            assert_eq!(emb.len(), dim, "emb {i} has expected dim");
+            assert_eq!(emb.values.len(), dim, "emb {i} has expected dim");
+            assert!(!emb.failed, "emb {i} must not be marked failed");
             assert!(
-                emb.iter().any(|&v| v != 0.0),
+                emb.values.iter().any(|&v| v != 0.0),
                 "emb {i} must be non-zero (per-text retry succeeded)"
             );
         }
@@ -723,25 +748,55 @@ mod tests {
 
     #[test]
     fn test_query_context_length_returns_none_on_404() {
-        // /api/show endpoint returning 404 must yield None (not panic)
-        // so RemoteEmbedder::new falls back to DEFAULT_REMOTE_MAX_CHARS.
+        // Body that would parse successfully on 200 — status alone must decide.
+        let parseable_body = serde_json::json!({
+            "model_info": {
+                "bert.context_length": 512
+            }
+        })
+        .to_string();
         let script = vec![MockResponse {
             status: 404,
-            body: "{}".to_string(),
+            body: parseable_body.clone(),
         }];
         let (url, _h, _) = spawn_mock_server(script);
-        // Strip /v1/embeddings tail so query_context_length finds the base.
-        let base_url = url.replace("/v1/embeddings", "/v1/embeddings");
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
                 .timeout_global(Some(std::time::Duration::from_secs(5)))
                 .http_status_as_error(false)
                 .build(),
         );
-        let result = query_context_length(&agent, &base_url, "missing-model");
+        let result = query_context_length(&agent, &url, "missing-model");
         assert!(
             result.is_none(),
             "404 from /api/show must yield None, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_query_context_length_returns_some_on_200() {
+        let parseable_body = serde_json::json!({
+            "model_info": {
+                "bert.context_length": 512
+            }
+        })
+        .to_string();
+        let script = vec![MockResponse {
+            status: 200,
+            body: parseable_body,
+        }];
+        let (url, _h, _) = spawn_mock_server(script);
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        let result = query_context_length(&agent, &url, "present-model");
+        assert_eq!(
+            result,
+            Some(crate::embedder::tokens_to_chars(512)),
+            "200 with bert.context_length must yield char limit"
         );
     }
 }

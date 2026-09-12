@@ -798,9 +798,9 @@ fn finish_indexing(
     let removed = match stale_removal_scope {
         StaleRemovalScope::Prefix(walk_prefix) => {
             if walk_prefix.as_os_str().is_empty() {
-                idx.remove_stale_files(&indexer.all_paths, None)?
+                idx.remove_stale_files(indexer.all_paths(), None)?
             } else {
-                idx.remove_stale_files(&indexer.all_paths, Some(walk_prefix))?
+                idx.remove_stale_files(indexer.all_paths(), Some(walk_prefix))?
             }
         }
         StaleRemovalScope::None => 0,
@@ -809,19 +809,19 @@ fn finish_indexing(
         status!(quiet, "Removed {} stale files from index.", removed);
     }
 
-    if indexer.indexed_count > 0 {
+    if indexer.indexed_count() > 0 {
         status!(
             quiet,
             "Indexed {}/{} files, {} chunks.",
-            indexer.indexed_count,
-            indexer.all_paths.len(),
-            indexer.indexed_chunks
+            indexer.indexed_count(),
+            indexer.all_paths().len(),
+            indexer.indexed_chunks()
         );
     } else {
         status!(
             quiet,
             "Index is up to date. {} files.",
-            indexer.all_paths.len()
+            indexer.all_paths().len()
         );
     }
 
@@ -1009,9 +1009,7 @@ mod tests {
         let (_tx, rx) = std::sync::mpsc::sync_channel(1);
         let mut indexer =
             pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), Path::new(""), None);
-        indexer.all_paths = vec!["live.rs".to_string()];
-        indexer.indexed_count = 1;
-        indexer.indexed_chunks = 1;
+        indexer.set_test_progress(vec!["live.rs".to_string()], 1);
 
         finish_indexing(
             &mut indexer,
@@ -1076,7 +1074,7 @@ mod tests {
         let (_tx, rx) = std::sync::mpsc::sync_channel(1);
         let mut indexer =
             pipeline::StreamingIndexer::new(rx, 500, 100, 1, Path::new(""), Path::new(""), None);
-        indexer.all_paths = vec!["src/live.rs".to_string()];
+        indexer.set_test_progress(vec!["src/live.rs".to_string()], 0);
 
         finish_indexing(
             &mut indexer,
