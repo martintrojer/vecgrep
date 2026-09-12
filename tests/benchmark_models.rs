@@ -277,7 +277,12 @@ fn benchmark_retrieval() {
 
     // Embed corpus
     let corpus_texts: Vec<&str> = data.corpus.iter().map(|d| d.text.as_str()).collect();
-    let corpus_embeddings = embedder.embed_batch(&corpus_texts).unwrap();
+    let corpus_embeddings: Vec<Vec<f32>> = embedder
+        .embed_batch(&corpus_texts)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.values)
+        .collect();
 
     let id_to_idx: HashMap<&str, usize> = data
         .corpus

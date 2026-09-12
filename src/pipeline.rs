@@ -18,7 +18,7 @@ pub enum SearchExecutionError {
 }
 
 /// Pipeline state — single source of truth for indexing progress.
-/// Used by CLI spinner, TUI status bar, serve endpoint, and future `/status` API.
+/// Used by the CLI spinner, TUI status bar, and GET /status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PipelineStatus {
@@ -71,17 +71,29 @@ impl std::fmt::Display for PipelineStatus {
     }
 }
 
+/// Result of trying to pull one walked file that still needs indexing.
+enum RecvOne {
+    /// Content hash differs from the cache (or file is new).
+    NeedsIndex(WalkedFile, String),
+    /// File is already cached at the current hash; keep draining.
+    Cached,
+    /// Channel empty (non-blocking) — no file available right now.
+    Empty,
+    /// Channel closed; indexing is finished.
+    Disconnected,
+}
+
 /// Manages incremental indexing from a streaming channel.
 pub struct StreamingIndexer {
     rx: Receiver<WalkedFile>,
-    pub indexing_done: bool,
-    pub indexed_count: usize,
-    pub indexed_chunks: usize,
+    indexing_done: bool,
+    indexed_count: usize,
+    indexed_chunks: usize,
     /// All file paths seen (for stale removal).
-    pub all_paths: Vec<String>,
+    all_paths: Vec<String>,
     chunk_size: usize,
     chunk_overlap: usize,
-    pub(crate) batch_size: usize,
+    batch_size: usize,
     cwd_suffix: Box<Path>,
     project_root: Box<Path>,
     stream_progress: Option<Arc<StreamProgress>>,
@@ -110,6 +122,29 @@ impl StreamingIndexer {
             project_root: project_root.into(),
             stream_progress,
         }
+    }
+
+    pub fn indexing_done(&self) -> bool {
+        self.indexing_done
+    }
+
+    pub fn indexed_count(&self) -> usize {
+        self.indexed_count
+    }
+
+    pub fn all_paths(&self) -> &[String] {
+        &self.all_paths
+    }
+
+    pub fn indexed_chunks(&self) -> usize {
+        self.indexed_chunks
+    }
+
+    /// Seed path/count state without walking (integration / binary tests).
+    #[doc(hidden)]
+    pub fn set_test_progress(&mut self, paths: Vec<String>, indexed_count: usize) {
+        self.all_paths = paths;
+        self.indexed_count = indexed_count;
     }
 
     /// Build the current pipeline status.
@@ -142,24 +177,23 @@ impl StreamingIndexer {
         }
     }
 
-    /// Receive one file from the channel, hash-check it, and return it if it needs indexing.
-    /// Returns `None` if the file is up-to-date or the channel is empty/closed.
-    fn recv_one(&mut self, idx: &Index, blocking: bool) -> Option<(WalkedFile, String)> {
+    /// Receive one file from the channel and hash-check it.
+    fn recv_one(&mut self, idx: &Index, blocking: bool) -> RecvOne {
         let mut file = if blocking {
             match self.rx.recv() {
                 Ok(f) => f,
                 Err(_) => {
                     self.indexing_done = true;
-                    return None;
+                    return RecvOne::Disconnected;
                 }
             }
         } else {
             match self.rx.try_recv() {
                 Ok(f) => f,
-                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Empty) => return RecvOne::Empty,
                 Err(TryRecvError::Disconnected) => {
                     self.indexing_done = true;
-                    return None;
+                    return RecvOne::Disconnected;
                 }
             }
         };
@@ -170,12 +204,15 @@ impl StreamingIndexer {
         let hash = blake3::hash(file.content.as_bytes()).to_hex().to_string();
         let needs_index = match idx.get_file_hash(&file.rel_path) {
             Ok(Some(stored_hash)) => stored_hash != hash,
-            _ => true,
+            Ok(None) => true,
+            // Treat lookup errors as a cache miss so indexing can continue;
+            // a later upsert surfaces a clearer failure if the DB is broken.
+            Err(_) => true,
         };
         if needs_index {
-            Some((file, hash))
+            RecvOne::NeedsIndex(file, hash)
         } else {
-            None
+            RecvOne::Cached
         }
     }
 
@@ -196,19 +233,25 @@ impl StreamingIndexer {
         let mut batch: Vec<(WalkedFile, String)> = Vec::new();
 
         if blocking_first {
-            // Block for the first file. `recv_one` may return `None` either because the
-            // file was already cached (channel still open) or because the channel closed
-            // (sets `indexing_done`). Either way fall through; the caller decides whether
-            // to retry the next blocking recv.
-            if let Some(entry) = self.recv_one(idx, true) {
-                batch.push(entry);
+            // Block until we get a file that needs indexing, the channel empties
+            // into a disconnect, or we only see cached files (keep going).
+            loop {
+                match self.recv_one(idx, true) {
+                    RecvOne::NeedsIndex(file, hash) => {
+                        batch.push((file, hash));
+                        break;
+                    }
+                    RecvOne::Cached => continue,
+                    RecvOne::Empty | RecvOne::Disconnected => break,
+                }
             }
         }
 
         while batch.len() < self.batch_size && !self.indexing_done {
             match self.recv_one(idx, false) {
-                Some(entry) => batch.push(entry),
-                None => break,
+                RecvOne::NeedsIndex(file, hash) => batch.push((file, hash)),
+                RecvOne::Cached => continue,
+                RecvOne::Empty | RecvOne::Disconnected => break,
             }
         }
 
@@ -242,10 +285,6 @@ impl StreamingIndexer {
         F: FnMut(PipelineStatus) -> Result<bool>,
     {
         while !self.indexing_done {
-            // run_batch can return false because the blocking recv hit a cached file
-            // and the rest of the batch was empty — the channel may still be open with
-            // more files, so keep looping. Termination happens via `indexing_done`,
-            // which is set when the channel disconnects.
             if !self.run_batch(embedder, idx, true)? {
                 continue;
             }
@@ -314,8 +353,6 @@ pub struct EmbedWorker {
 
 impl EmbedWorker {
     /// Spawn a background worker that owns the embedder, index, and indexer.
-    /// `explicit_paths`: when `Some`, only these explicit files appear in results
-    /// alongside normal files. When `None`, all explicit files are excluded.
     pub fn spawn(
         embedder: Embedder,
         idx: Index,
@@ -423,7 +460,8 @@ pub fn run_search(
             .map(|reader| {
                 let query = query.to_string();
                 let scope = scope.clone();
-                std::thread::spawn(move || reader.search_lexical(&query, top_k * 5, &scope))
+                let lexical_limit = top_k * crate::index::HYBRID_FETCH_MULTIPLIER;
+                std::thread::spawn(move || reader.search_lexical(&query, lexical_limit, &scope))
             })
     } else {
         None
@@ -545,14 +583,30 @@ fn worker_loop(
         }
 
         // Priority 2: index a small batch
-        if !indexer.indexing_done {
+        if !indexer.indexing_done() {
             match indexer.poll(&mut embedder, &idx) {
-                Ok(_) => {
-                    let total_files = idx.file_count().unwrap_or(0);
-                    let total_chunks = idx.chunk_count().unwrap_or(0);
-                    progress_tx
-                        .send(indexer.status(total_files, total_chunks))
-                        .ok();
+                Ok(did_work) => {
+                    if did_work {
+                        let total_files = idx.file_count().unwrap_or(0);
+                        let total_chunks = idx.chunk_count().unwrap_or(0);
+                        progress_tx
+                            .send(indexer.status(total_files, total_chunks))
+                            .ok();
+                    } else if !indexer.indexing_done() {
+                        // Channel empty or only cached files — wait briefly for
+                        // search requests instead of busy-spinning on COUNT(*).
+                        if let Ok(req) = req_rx.recv_timeout(Duration::from_millis(50)) {
+                            if !dispatch_request(req, &mut embedder, &idx, &scope, &result_tx) {
+                                return;
+                            }
+                        }
+                    } else {
+                        let total_files = idx.file_count().unwrap_or(0);
+                        let total_chunks = idx.chunk_count().unwrap_or(0);
+                        progress_tx
+                            .send(indexer.status(total_files, total_chunks))
+                            .ok();
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Indexing error: {e:#}");
@@ -593,18 +647,16 @@ pub fn process_batch(
         }
 
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = embedder.embed_batch(&texts)?;
-
-        let failed: Vec<bool> = embeddings
-            .iter()
-            .map(|emb| {
-                let is_zero = emb.iter().all(|&v| v == 0.0);
-                if is_zero {
-                    tracing::warn!("Zero embedding for chunk in file: {}", file.rel_path);
-                }
-                is_zero
-            })
-            .collect();
+        let embedded = embedder.embed_batch(&texts)?;
+        let mut embeddings = Vec::with_capacity(embedded.len());
+        let mut failed = Vec::with_capacity(embedded.len());
+        for e in embedded {
+            if e.failed {
+                tracing::warn!("Failed embedding for chunk in file: {}", file.rel_path);
+            }
+            failed.push(e.failed);
+            embeddings.push(e.values);
+        }
 
         idx.upsert_file(
             &file.rel_path,

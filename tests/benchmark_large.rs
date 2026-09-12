@@ -432,7 +432,10 @@ fn embed_batch_resilient(
     dim: usize,
 ) -> (Vec<Vec<f32>>, usize) {
     match embedder.embed_batch(texts) {
-        Ok(embeddings) => (embeddings, 0),
+        Ok(embeddings) => {
+            let failed = embeddings.iter().filter(|e| e.failed).count();
+            (embeddings.into_iter().map(|e| e.values).collect(), failed)
+        }
         Err(_) => {
             let mut results = Vec::new();
             let mut failed = 0;
@@ -610,10 +613,20 @@ fn benchmark_large_scale() {
     // index broken, hybrid scorer returning constants) cannot pass the
     // benchmark with green check. The bounds are deliberately loose so noise
     // does not cause flakes, but tight enough to flag total breakage.
+    assert!(
+        data.complete,
+        "benchmark corpus incomplete ({} / {} docs) — re-download or clear cache",
+        corpus_size, data.expected_corpus_size
+    );
     assert!(corpus_size > 0, "corpus must be non-empty");
     assert!(
         evaluated > 0,
         "at least one query must be evaluated (got {evaluated})"
+    );
+    let query_fail_rate = query_failures as f32 / query_count as f32;
+    assert!(
+        query_fail_rate <= 0.05,
+        "query failure rate {query_fail_rate:.3} exceeds 5% ({query_failures}/{query_count})"
     );
     assert!(
         corpus_embeddings.len() > total_failed,
@@ -633,10 +646,10 @@ fn benchmark_large_scale() {
         .get(RetrievalMode::Hybrid.label())
         .unwrap()
         .mean_mrr();
-    // Each mode must beat random (~1/corpus_size). We use a loose floor of
-    // 0.05 — well above noise for any sane retriever, well below normal
-    // values (0.3+) so we don't fight model variance.
-    const MIN_MRR: f32 = 0.05;
+    // Each mode must beat random (~1/corpus_size). Raised floor vs noise for
+    // any sane retriever; still below normal values (0.3+) so we don't fight
+    // model variance.
+    const MIN_MRR: f32 = 0.08;
     assert!(
         vec_mrr >= MIN_MRR,
         "vector MRR {vec_mrr:.4} below floor {MIN_MRR} — ranking likely broken"

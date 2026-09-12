@@ -17,7 +17,6 @@ ort = "2.0.0-rc.9"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 sqlite-vec = "0.1"
 zerocopy = { version = "0.8", features = ["derive"] }
-ndarray = "0.16"
 ignore = "0.4"
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 blake3 = "1.6"
