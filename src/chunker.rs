@@ -29,7 +29,6 @@ pub fn chunk_file(
         return vec![];
     }
 
-    // Get token counts per line — use tokenizer if available, otherwise estimate
     let line_token_counts: Vec<usize> = match tokenizer {
         Some(tok) => lines
             .iter()

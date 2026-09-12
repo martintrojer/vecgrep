@@ -80,7 +80,7 @@ Fields:
 - `total` — `null` while the file walker is still scanning
 - `version` — vecgrep binary version
 - `root` — project root path
-- `hybrid` — whether the server is running hybrid search mode
+- `hybrid` — whether the active index supports hybrid lexical search
 - `scope` — active path scopes (omitted when searching the full project)
 
 IDE plugins can poll this to show indexing progress or wait for readiness.
