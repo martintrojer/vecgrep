@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// A chunk of text from a file, with its position info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
-    /// Path to the source file (relative to search root).
+    /// Path to the source file (relative to project root).
     pub file_path: String,
     /// The text content of this chunk.
     pub text: String,
